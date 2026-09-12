@@ -1,0 +1,18 @@
+[package]
+name = "pai-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local-first storage: SQLite for structured data + FTS, filesystem blob store."
+
+[dependencies]
+pai-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tracing.workspace = true

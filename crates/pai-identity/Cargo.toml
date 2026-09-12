@@ -1,0 +1,18 @@
+[package]
+name = "pai-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "User identity and device registry. Ed25519 keys; private keys stay in the OS keystore in production."
+
+[dependencies]
+pai-core.workspace = true
+pai-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+rusqlite.workspace = true
