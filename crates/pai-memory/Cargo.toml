@@ -1,0 +1,22 @@
+[package]
+name = "pai-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Multi-type memory: working, episodic, semantic, procedural, relationship. Keyword + vector + metadata retrieval."
+
+[dependencies]
+pai-core.workspace = true
+pai-storage.workspace = true
+pai-inference.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

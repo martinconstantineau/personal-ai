@@ -1,0 +1,24 @@
+[package]
+name = "pai-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent runtime: bounded turn loop, memory recall, permission-gated tool execution, streaming events, cancellation, audit."
+
+[dependencies]
+pai-core.workspace = true
+pai-inference.workspace = true
+pai-memory.workspace = true
+pai-permissions.workspace = true
+pai-tools.workspace = true
+pai-audit.workspace = true
+pai-broker.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+futures.workspace = true
