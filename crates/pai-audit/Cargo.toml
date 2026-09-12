@@ -1,0 +1,16 @@
+[package]
+name = "pai-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Immutable audit log: every meaningful agent action is recorded and queryable."
+
+[dependencies]
+pai-core.workspace = true
+pai-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true

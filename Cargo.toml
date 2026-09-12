@@ -1,0 +1,80 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pai-core",
+    "crates/pai-config",
+    "crates/pai-storage",
+    "crates/pai-identity",
+    "crates/pai-inference",
+    "crates/pai-models",
+    "crates/pai-memory",
+    "crates/pai-permissions",
+    "crates/pai-tools",
+    "crates/pai-agent",
+    "crates/pai-audit",
+    "crates/pai-broker",
+    "crates/pai-tasks",
+    "crates/pai-sync",
+    "crates/pai-documents",
+    "crates/pai-voice",
+    "crates/pai-vision",
+    "crates/pai-media",
+    "crates/pai-ffi",
+    "connectors/email",
+    "apps/cli",
+    "tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/martinconstantineau/personal-ai"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures = "0.3"
+async-trait = "0.1"
+toml = "0.8"
+dirs = "5"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+pai-core = { path = "crates/pai-core" }
+pai-config = { path = "crates/pai-config" }
+pai-storage = { path = "crates/pai-storage" }
+pai-identity = { path = "crates/pai-identity" }
+pai-inference = { path = "crates/pai-inference" }
+pai-models = { path = "crates/pai-models" }
+pai-memory = { path = "crates/pai-memory" }
+pai-permissions = { path = "crates/pai-permissions" }
+pai-tools = { path = "crates/pai-tools" }
+pai-agent = { path = "crates/pai-agent" }
+pai-audit = { path = "crates/pai-audit" }
+pai-broker = { path = "crates/pai-broker" }
+pai-tasks = { path = "crates/pai-tasks" }
+pai-sync = { path = "crates/pai-sync" }
+pai-documents = { path = "crates/pai-documents" }
+pai-voice = { path = "crates/pai-voice" }
+pai-vision = { path = "crates/pai-vision" }
+pai-media = { path = "crates/pai-media" }
+pai-ffi = { path = "crates/pai-ffi" }
+pai-connector-email = { path = "connectors/email" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

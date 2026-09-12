@@ -1,0 +1,21 @@
+[package]
+name = "pai-models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model registry, manifests, download/verify/install, hardware-fit checks. Free/open models only by policy."
+
+[dependencies]
+pai-core.workspace = true
+pai-storage.workspace = true
+pai-inference.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "pai-broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Compute broker: answers 'where should this workload run?' from device capabilities + user compute policy."
+
+[dependencies]
+pai-core.workspace = true
+pai-config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

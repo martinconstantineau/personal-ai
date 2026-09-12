@@ -1,0 +1,13 @@
+[package]
+name = "pai-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core domain model for the Personal AI platform. No I/O, no providers — stable platform concepts only."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
