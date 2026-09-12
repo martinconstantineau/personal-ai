@@ -109,10 +109,11 @@ endforeach(bundled_library)
 # Bundle the Rust core shared library (built by `cargo build -p pai-ffi` or
 # scripts/build_core.sh). Warns rather than fails when it is missing so the
 # shell still builds before the Rust toolchain is installed.
+# CMAKE_CURRENT_SOURCE_DIR is apps/desktop/linux — repo root is three levels up.
 if(CMAKE_BUILD_TYPE MATCHES "Debug")
-  set(PAI_CORE_SO "${CMAKE_CURRENT_SOURCE_DIR}/../../target/debug/libpai_ffi.so")
+  set(PAI_CORE_SO "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/debug/libpai_ffi.so")
 else()
-  set(PAI_CORE_SO "${CMAKE_CURRENT_SOURCE_DIR}/../../target/release/libpai_ffi.so")
+  set(PAI_CORE_SO "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/release/libpai_ffi.so")
 endif()
 if(EXISTS "${PAI_CORE_SO}")
   install(FILES "${PAI_CORE_SO}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"

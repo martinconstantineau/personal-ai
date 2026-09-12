@@ -17,7 +17,11 @@ class PaiBridge {
   static Future<PaiBridge> start(Map<String, dynamic> config) async {
     final ready = ReceivePort();
     await Isolate.spawn(_workerMain, (ready.sendPort, config));
-    final requests = await ready.first as SendPort;
+    final handshake = await ready.first;
+    if (handshake is _InitError) {
+      throw StateError(handshake.message);
+    }
+    final requests = handshake as SendPort;
     final bridge = PaiBridge._(requests);
     // Route replies back by id.
     final replies = ReceivePort();
@@ -49,7 +53,13 @@ class PaiBridge {
     final (ready, config) = args;
     final inbox = ReceivePort();
     SendPort? replies;
-    final client = PaiClient.init(config);
+    final PaiClient client;
+    try {
+      client = PaiClient.init(config);
+    } catch (e) {
+      ready.send(_InitError(e.toString()));
+      return;
+    }
     ready.send(inbox.sendPort);
     inbox.listen((msg) {
       if (msg is _Subscribe) {
@@ -73,6 +83,11 @@ class PaiBridge {
 }
 
 enum _Op { send, memories, audit }
+
+class _InitError {
+  _InitError(this.message);
+  final String message;
+}
 
 class _Subscribe {
   _Subscribe(this.port);
