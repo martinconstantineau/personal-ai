@@ -1,0 +1,32 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Flutter / Dart
+**/build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+*.so.aot
+apps/desktop/.dart_tool/
+apps/desktop/build/
+apps/desktop/linux/flutter/ephemeral/
+
+# Platform
+.DS_Store
+
+# Local data / models (never commit user data or model weights)
+data/
+models/
+*.gguf
+*.onnx
+*.bin
+.env
+*.key
+secrets/
+
+# Editor
+.idea/
+.vscode/
+*.swp
