@@ -122,6 +122,9 @@ impl AuditLog {
 fn kind_name(k: AuditKind) -> &'static str {
     match k {
         AuditKind::MessageSent => "message_sent",
+        AuditKind::RunStarted => "run_started",
+        AuditKind::RunFinished => "run_finished",
+        AuditKind::ModelResponded => "model_responded",
         AuditKind::MemoryWritten => "memory_written",
         AuditKind::MemoryDeleted => "memory_deleted",
         AuditKind::ToolRequested => "tool_requested",

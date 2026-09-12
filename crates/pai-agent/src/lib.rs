@@ -234,6 +234,13 @@ impl AgentRuntime {
         };
         let mut run = run;
         emit(AgentEvent::RunStarted { run: run.id });
+        self.audit(
+            &run,
+            AuditKind::RunStarted,
+            AuditOutcome::Ok,
+            None,
+            serde_json::json!({"provider": def.provider, "model": def.model}),
+        );
 
         let provider = self
             .providers
@@ -256,6 +263,14 @@ impl AgentRuntime {
         for step in 0..self.max_steps {
             if cancel.cancelled() {
                 run.state = RunState::Cancelled;
+                run.ended_at = Some(now());
+                self.audit(
+                    &run,
+                    AuditKind::RunFinished,
+                    AuditOutcome::Cancelled,
+                    None,
+                    serde_json::json!({"state": "cancelled"}),
+                );
                 emit(AgentEvent::Done {
                     run: run.id,
                     state: run.state,
@@ -279,6 +294,13 @@ impl AgentRuntime {
                     self.audit_error(&run, &e);
                     run.state = RunState::Failed;
                     run.ended_at = Some(now());
+                    self.audit(
+                        &run,
+                        AuditKind::RunFinished,
+                        AuditOutcome::Error,
+                        None,
+                        serde_json::json!({"state": "failed"}),
+                    );
                     emit(AgentEvent::Done {
                         run: run.id,
                         state: run.state,
@@ -289,6 +311,13 @@ impl AgentRuntime {
                 Err(_) => {
                     run.state = RunState::TimedOut;
                     run.ended_at = Some(now());
+                    self.audit(
+                        &run,
+                        AuditKind::RunFinished,
+                        AuditOutcome::Error,
+                        None,
+                        serde_json::json!({"state": "timed_out"}),
+                    );
                     emit(AgentEvent::Done {
                         run: run.id,
                         state: run.state,
@@ -297,12 +326,37 @@ impl AgentRuntime {
                     return Err(Error::Timeout);
                 }
             };
+            self.audit(
+                &run,
+                AuditKind::ModelResponded,
+                AuditOutcome::Ok,
+                None,
+                serde_json::json!({
+                    "step": step,
+                    "action": match &resp.action {
+                        Some(pai_inference::ModelAction::ToolCall { name, .. }) => {
+                            serde_json::json!({"type": "tool_call", "tool": name})
+                        }
+                        Some(pai_inference::ModelAction::Final { .. }) => {
+                            serde_json::json!({"type": "final"})
+                        }
+                        None => serde_json::json!({"type": "unparsed"}),
+                    },
+                }),
+            );
 
             match self.dispatch(def, &run, conv, resp).await? {
                 Dispatch::Final { text } => {
                     answer = Some(text.clone());
                     run.state = RunState::Completed;
                     run.ended_at = Some(now());
+                    self.audit(
+                        &run,
+                        AuditKind::RunFinished,
+                        AuditOutcome::Ok,
+                        None,
+                        serde_json::json!({"state": "completed"}),
+                    );
                     emit(AgentEvent::TextDelta { text: text.clone() });
                     emit(AgentEvent::Done {
                         run: run.id,
@@ -336,10 +390,10 @@ impl AgentRuntime {
         run.ended_at = Some(now());
         self.audit(
             &run,
-            AuditKind::ToolDenied,
+            AuditKind::RunFinished,
             AuditOutcome::Error,
             None,
-            serde_json::json!({"reason": "max_steps exceeded"}),
+            serde_json::json!({"state": "failed", "reason": "max_steps exceeded"}),
         );
         emit(AgentEvent::Done {
             run: run.id,

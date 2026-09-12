@@ -501,6 +501,9 @@ pub struct AuditEvent {
 #[serde(rename_all = "snake_case")]
 pub enum AuditKind {
     MessageSent,
+    RunStarted,
+    RunFinished,
+    ModelResponded,
     MemoryWritten,
     MemoryDeleted,
     ToolRequested,
