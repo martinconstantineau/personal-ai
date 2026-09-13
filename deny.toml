@@ -6,10 +6,10 @@
 # Runs in CI (.github/workflows/ci.yml → deny job).
 
 [advisories]
-# Fail on any known-vulnerable or yanked dependency. `unmaintained` takes a
-# detection scope, not a lint level — flag direct deps only.
-vulnerability = "deny"
+# Vulnerability advisories are unconditional errors; yanked crates denied.
+# `unmaintained`/`unsound` take a detection scope — flag direct deps.
 unmaintained = "workspace"
+unsound = "workspace"
 yanked = "deny"
 ignore = []
 

@@ -27,7 +27,7 @@ class _Entry {
   String text;
   String sub;
   bool streaming;
-  bool isError;
+  bool isError = false;
 }
 
 class ChatScreen extends StatefulWidget {
