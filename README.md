@@ -19,13 +19,14 @@ documents stay on your devices; inference runs on free, local models.
 - 🔄 **Sync designed, not bolted on** — end-to-end-encrypted object sync via
   pluggable transports (folder transport implemented; relays are ciphertext-only).
 
-## Status: groundwork + vertical slice
+## Status: V1 — usable local assistant
 
-This repository is the architectural foundation plus one working end-to-end
-slice: **remember → recall → use a tool → gated by permissions → recorded in
-the audit log**. Everything else is a real, compilable interface — no fake
-features. See [docs/ROADMAP.md](docs/ROADMAP.md) for what's next and
-[ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
+The architectural foundation is merged, and V1 adds the day-to-day
+assistant surface: **streaming answers, interactive tool approvals, a
+policy editor, persistent conversations with per-chat memory isolation, a
+memory browser with forget, crash-safe run resume, and Hugging Face model
+install/search/serve**. See [docs/ROADMAP.md](docs/ROADMAP.md) for what's
+next and [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ## Quick start
 
@@ -37,12 +38,22 @@ features. See [docs/ROADMAP.md](docs/ROADMAP.md) for what's next and
 # Run the vertical slice end-to-end (offline, deterministic):
 cargo run -p pai-cli -- demo
 
-# Chat against it:
-cargo run -p pai-cli -- chat
+# Install + serve a local model (serving needs llama.cpp on PATH):
+cargo run -p pai-cli -- models detect                        # what's already here?
+cargo run -p pai-cli -- models list                          # catalog
+cargo run -p pai-cli -- models install qwen2.5-0.5b-instruct-q4_k_m
+cargo run -p pai-cli -- models serve qwen2.5-0.5b-instruct-q4_k_m
 
-# Use a real local model (llama.cpp llama-server, Ollama, LM Studio):
-llama-server -m model.gguf --port 8080          # any OpenAI-compatible server
-cargo run -p pai-cli -- chat --provider llama-server --model model.gguf
+# …or pick any GGUF straight from Hugging Face:
+cargo run -p pai-cli -- models search "qwen 3b"
+cargo run -p pai-cli -- models files Qwen/Qwen2.5-3B-Instruct-GGUF
+cargo run -p pai-cli -- models install \
+    hf://Qwen/Qwen2.5-3B-Instruct-GGUF/qwen2.5-3b-instruct-q4_k_m.gguf
+
+# Chat — `auto` probes running servers, or point at one explicitly:
+cargo run -p pai-cli -- chat --provider auto
+cargo run -p pai-cli -- chat --provider llama-server \
+    --server-url http://127.0.0.1:8080 --model my-model
 ```
 
 The `demo` command exercises the whole stack: it tells the assistant to
@@ -53,7 +64,8 @@ permission engine), and prints the resulting audit trail.
 ## Repository layout
 
 ```
-apps/cli        — `pai` binary: demo, chat, models, audit, memories
+apps/cli        — `pai` binary: demo, chat, models (incl. Hugging Face),
+                  conversations, runs, policies, audit, memories
 apps/desktop    — Flutter desktop shell (dart:ffi → libpai_ffi)
 connectors/     — external service connectors (email provider trait first)
 crates/pai-*    — the Rust core (see ARCHITECTURE.md)
@@ -82,11 +94,11 @@ scripts/        — setup, test, build, model-install helpers
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design, layers, crate map |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Build/test/lint, adding crates & tools |
-| [SECURITY.md](SECURITY.md) | Security model, reporting, hardening |
+| [docs/SECURITY.md](docs/SECURITY.md) | Security model, reporting, supply-chain & signed-commit policy |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Style, review checklist, ADR policy |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | V1 → V3 milestones and known debt |
 | [docs/architecture/](docs/architecture/) | Per-subsystem deep dives |
-| [docs/adr/](docs/adr/) | 11 architecture decision records |
+| [docs/adr/](docs/adr/) | Architecture decision records |
 | [docs/security/threat-model.md](docs/security/threat-model.md) | Threat model |
 
 ## License

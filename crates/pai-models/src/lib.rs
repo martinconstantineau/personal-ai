@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::path::{Path, PathBuf};
 
+pub mod hf;
+
 /// A downloadable model artifact in the catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelManifest {
@@ -79,7 +81,80 @@ pub fn builtin_catalog() -> Vec<ModelManifest> {
             sha256: None,
             filename: "smollm2-360m-instruct-q4_0.gguf".into(),
         },
+        ModelManifest {
+            model: Model {
+                id: ModelId::new(),
+                slug: "qwen2.5-0.5b-instruct-q4_k_m".into(),
+                family: "Qwen2.5".into(),
+                provider: "llama-server".into(),
+                capabilities: vec![
+                    ModelCapability::TextGeneration,
+                    ModelCapability::ToolCalling,
+                ],
+                context_length: 32768,
+                quantization: Some("q4_k_m".into()),
+                size_bytes: 397_000_000,
+                requirements: ModelRequirements {
+                    min_ram_bytes: Some(1024 * 1024 * 1024),
+                    min_vram_bytes: None,
+                    accelerators: vec![Accelerator::Cpu],
+                },
+                local: true,
+                license: Some("Apache-2.0".into()),
+            },
+            url: Some(
+                "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf".into(),
+            ),
+            sha256: None,
+            filename: "qwen2.5-0.5b-instruct-q4_k_m.gguf".into(),
+        },
+        ModelManifest {
+            model: Model {
+                id: ModelId::new(),
+                slug: "qwen2.5-1.5b-instruct-q4_k_m".into(),
+                family: "Qwen2.5".into(),
+                provider: "llama-server".into(),
+                capabilities: vec![
+                    ModelCapability::TextGeneration,
+                    ModelCapability::ToolCalling,
+                ],
+                context_length: 32768,
+                quantization: Some("q4_k_m".into()),
+                size_bytes: 986_000_000,
+                requirements: ModelRequirements {
+                    min_ram_bytes: Some(2 * 1024 * 1024 * 1024),
+                    min_vram_bytes: None,
+                    accelerators: vec![Accelerator::Cpu],
+                },
+                local: true,
+                license: Some("Apache-2.0".into()),
+            },
+            url: Some(
+                "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf".into(),
+            ),
+            sha256: None,
+            filename: "qwen2.5-1.5b-instruct-q4_k_m.gguf".into(),
+        },
     ]
+}
+
+/// Resolve a user-supplied model argument to a manifest:
+/// - `hf://owner/repo/file.gguf[@rev]` → resolved against the hub (HEAD
+///   request captures size + LFS sha256)
+/// - otherwise treated as a catalog slug.
+pub async fn resolve_model_arg(arg: &str) -> Result<ModelManifest> {
+    if arg.starts_with("hf://") {
+        let r = hf::parse_hf_ref(arg)?;
+        return hf::HfClient::new().manifest_for(&r).await;
+    }
+    builtin_catalog()
+        .into_iter()
+        .find(|m| m.model.slug == arg)
+        .ok_or_else(|| {
+            Error::NotFound(format!(
+                "model '{arg}' (try `pai models list`, `pai models search`, or an hf:// ref)"
+            ))
+        })
 }
 
 /// Can `caps` run `model`? Deterministic, hardware-based check.
@@ -210,6 +285,44 @@ impl ModelManager {
                 )
             })
             .map(|p| p.map(PathBuf::from))
+    }
+
+    /// Every registered model (catalog entries + hf:// installs) with its
+    /// install state and on-disk path when present.
+    pub fn list(&self) -> Result<Vec<(Model, bool, Option<PathBuf>)>> {
+        self.store
+            .with_conn(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT slug, family, provider, capabilities_json,
+                            context_length, quantization, size_bytes,
+                            requirements_json, local, license,
+                            installed, path
+                     FROM models ORDER BY slug",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        Model {
+                            id: ModelId::new(),
+                            slug: r.get(0)?,
+                            family: r.get(1)?,
+                            provider: r.get(2)?,
+                            capabilities: serde_json::from_str(&r.get::<_, String>(3)?)
+                                .unwrap_or_default(),
+                            context_length: r.get(4)?,
+                            quantization: r.get(5)?,
+                            size_bytes: r.get::<_, i64>(6)? as u64,
+                            requirements: serde_json::from_str(&r.get::<_, String>(7)?)
+                                .unwrap_or_default(),
+                            local: r.get::<_, i64>(8)? != 0,
+                            license: r.get(9)?,
+                        },
+                        r.get::<_, i64>(10)? != 0,
+                        r.get::<_, Option<String>>(11)?.map(PathBuf::from),
+                    ))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(store_err)
     }
 
     /// All models whose declared requirements fit this device.

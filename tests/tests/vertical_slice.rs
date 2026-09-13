@@ -34,6 +34,7 @@ fn runtime(store: Arc<Store>) -> (AgentRuntime, Arc<SqliteMemory>, Arc<pai_audit
         max_steps: 8,
         step_timeout: std::time::Duration::from_secs(10),
         device: DeviceId::new(),
+        persistence: None,
     };
     (agent, memory, audit)
 }
@@ -66,6 +67,8 @@ async fn remember_recall_tool_audit() {
             approval: &pai_agent::AutoApprove,
             cancel: CancelToken::default(),
             emit: &emit,
+            stream: false,
+            resume_from: None,
         })
         .await
         .unwrap();
@@ -94,6 +97,8 @@ async fn remember_recall_tool_audit() {
             approval: &pai_agent::AutoApprove,
             cancel: CancelToken::default(),
             emit: &emit,
+            stream: false,
+            resume_from: None,
         })
         .await
         .unwrap();
@@ -110,6 +115,8 @@ async fn remember_recall_tool_audit() {
             approval: &pai_agent::AutoApprove,
             cancel: CancelToken::default(),
             emit: &emit,
+            stream: false,
+            resume_from: None,
         })
         .await
         .unwrap();
@@ -147,6 +154,8 @@ async fn denied_permission_never_executes() {
             approval: &CountApprovals(asked.clone(), false),
             cancel: CancelToken::default(),
             emit: &|_| {},
+            stream: false,
+            resume_from: None,
         })
         .await
         .unwrap();
@@ -187,6 +196,8 @@ async fn cancellation_stops_run() {
             approval: &pai_agent::AutoApprove,
             cancel,
             emit: &|_| {},
+            stream: false,
+            resume_from: None,
         })
         .await
         .unwrap();
@@ -208,6 +219,8 @@ async fn unknown_tool_is_an_observation_not_a_crash() {
             approval: &pai_agent::AutoApprove,
             cancel: CancelToken::default(),
             emit: &|_| {},
+            stream: false,
+            resume_from: None,
         })
         .await
         .unwrap();

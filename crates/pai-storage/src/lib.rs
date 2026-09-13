@@ -15,9 +15,10 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
@@ -174,7 +175,35 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-"#];
+"#,
+    r#"
+-- V2: per-conversation memory scoping, run checkpoints, persisted policies.
+ALTER TABLE memories ADD COLUMN conversation_id TEXT;
+ALTER TABLE conversations ADD COLUMN memory_scope TEXT NOT NULL DEFAULT 'shared';
+CREATE INDEX IF NOT EXISTS idx_memories_conversation
+    ON memories(conversation_id, deleted);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT,
+    conversation_id TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    state TEXT NOT NULL,
+    step INTEGER NOT NULL DEFAULT 0,
+    input TEXT NOT NULL DEFAULT '',
+    checkpoint_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_open
+    ON agent_runs(ended_at, state);
+
+CREATE TABLE IF NOT EXISTS policies (
+    permission TEXT PRIMARY KEY,
+    policy TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"#,
+];
 
 /// Handle to the platform's local storage.
 pub struct Store {
