@@ -58,7 +58,9 @@ class PaiBridge {
   /// completes with the final `{answer, events, run_id, ...}` payload.
   SendHandle sendStreaming(String text) {
     final events = StreamController<Map<String, dynamic>>();
-    return SendHandle(events.stream, _call(_Op.send, arg: text, events: events));
+    final result =
+        _call(_Op.send, arg: text, events: events).then((v) => v as Map<String, dynamic>);
+    return SendHandle(events.stream, result);
   }
 
   /// Back-compatible: wait for the run to finish, return the result map.

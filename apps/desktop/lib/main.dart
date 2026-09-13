@@ -22,7 +22,7 @@ class PaiApp extends StatelessWidget {
 
 /// One chat transcript row. `streaming` marks the in-flight assistant reply.
 class _Entry {
-  _Entry({required this.role, this.text = '', this.sub = '', this.streaming = false, this.isError = false});
+  _Entry({required this.role, this.text = '', this.sub = '', this.streaming = false});
   final String role; // you | ai | system
   String text;
   String sub;

@@ -22,8 +22,6 @@ typedef NativeEventCallback = Void Function(Pointer<Utf8>, Pointer<Void>);
 typedef _SetEventCbNative = Void Function(
     Pointer<Void>, Pointer<NativeFunction<NativeEventCallback>>, Pointer<Void>);
 typedef _ApproveNative = Int32 Function(Pointer<Void>, Pointer<Utf8>, Int32);
-typedef _TwoStrNative = Pointer<Utf8> Function(
-    Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>);
 typedef _ThreeStrNative = Pointer<Utf8> Function(
     Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>);
 typedef _CancelNative = Void Function(Pointer<Void>);
