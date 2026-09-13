@@ -161,6 +161,11 @@ pub struct AgentRuntime {
     /// Who this runtime acts for.
     pub device: DeviceId,
     pub persistence: Option<Persistence>,
+    /// Document store exposed to `documents.*` tools.
+    pub documents: Option<Arc<pai_documents::DocumentStore>>,
+    /// Filesystem jail for file-touching tools: canonicalized roots a tool
+    /// may read inside. Empty = no filesystem reads.
+    pub allowed_roots: Vec<std::path::PathBuf>,
 }
 
 pub struct RunOutcome {
@@ -715,6 +720,8 @@ impl AgentRuntime {
             device: self.device,
             memory: Some(self.memory.as_ref()),
             memory_scope,
+            documents: self.documents.as_deref(),
+            allowed_roots: &self.allowed_roots,
         };
         match tool.execute(arguments, &ctx).await {
             Ok(out) => {

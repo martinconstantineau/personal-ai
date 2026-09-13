@@ -16,6 +16,7 @@ pai-memory.workspace = true
 pai-permissions.workspace = true
 pai-tools.workspace = true
 pai-agent.workspace = true
+pai-documents.workspace = true
 pai-audit.workspace = true
 pai-broker.workspace = true
 serde.workspace = true

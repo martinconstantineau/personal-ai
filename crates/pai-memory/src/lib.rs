@@ -72,6 +72,18 @@ pub struct ScoredMemory {
     pub score: f32,
 }
 
+/// Text → embedding vector. Implemented by providers (e.g.
+/// `pai_inference::OllamaEmbedder`); attached to `SqliteMemory` so `put`
+/// and `recall` embed transparently.
+#[async_trait]
+pub trait Embedder: Send + Sync {
+    /// Provider/model id, e.g. "ollama/nomic-embed-text" — recorded for
+    /// debugging; embeddings are stored without model tagging (V1.1 uses a
+    /// single embedder per store).
+    fn id(&self) -> String;
+    async fn embed(&self, text: &str) -> Result<Vec<f32>>;
+}
+
 #[async_trait]
 pub trait MemoryBackend: Send + Sync {
     async fn put(&self, item: &MemoryItem) -> Result<()>;
@@ -88,11 +100,22 @@ pub trait MemoryBackend: Send + Sync {
 
 pub struct SqliteMemory {
     store: std::sync::Arc<Store>,
+    embedder: Option<std::sync::Arc<dyn Embedder>>,
 }
 
 impl SqliteMemory {
     pub fn new(store: std::sync::Arc<Store>) -> Self {
-        Self { store }
+        Self {
+            store,
+            embedder: None,
+        }
+    }
+
+    /// Attach an embedder: `put` embeds items lacking one, `recall` embeds
+    /// query text so the semantic path activates.
+    pub fn with_embedder(mut self, e: std::sync::Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(e);
+        self
     }
 
     fn scope_name(s: MemoryScope) -> &'static str {
@@ -200,6 +223,14 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[async_trait]
 impl MemoryBackend for SqliteMemory {
     async fn put(&self, item: &MemoryItem) -> Result<()> {
+        let mut item = item.clone();
+        if item.embedding.is_none() {
+            if let Some(e) = &self.embedder {
+                if let Ok(v) = e.embed(&item.content).await {
+                    item.embedding = Some(v);
+                }
+            }
+        }
         let emb: Option<Vec<u8>> = item
             .embedding
             .as_ref()
@@ -275,6 +306,15 @@ impl MemoryBackend for SqliteMemory {
         let mut out: Vec<ScoredMemory> = Vec::new();
         let limit = query.limit.max(1);
         let conv = conversation_clause(query);
+        let mut query = query.clone();
+        // No explicit query vector → embed the text when an embedder exists.
+        if query.embedding.is_none() {
+            if let (Some(e), Some(t)) = (&self.embedder, &query.text) {
+                if let Ok(v) = e.embed(t).await {
+                    query.embedding = Some(v);
+                }
+            }
+        }
 
         if let Some(text) = &query.text {
             // FTS5 keyword path — OR over tokens so natural-language queries
@@ -412,6 +452,96 @@ impl WorkingMemory {
 
     pub fn items(&self) -> &[MemoryItem] {
         &self.items
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OllamaEmbedder — local embeddings via Ollama's /api/embeddings
+// ---------------------------------------------------------------------------
+
+/// Known free embedding models served by Ollama, in preference order.
+const KNOWN_EMBED_MODELS: &[&str] = &[
+    "nomic-embed-text",
+    "mxbai-embed-large",
+    "all-minilm",
+    "snowflake-arctic-embed",
+    "bge-m3",
+    "bge-large",
+    "embeddinggemma",
+];
+
+/// Embeds text through a local Ollama instance — keeps vector recall fully
+/// offline and free.
+pub struct OllamaEmbedder {
+    base_url: String,
+    model: String,
+    client: reqwest::Client,
+}
+
+impl OllamaEmbedder {
+    pub fn new(base_url: &str, model: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            model: model.into(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Probe `base_url`'s `/api/tags` for a known embedding model.
+    pub async fn detect(base_url: &str, timeout: std::time::Duration) -> Option<Self> {
+        let resp = reqwest::Client::new()
+            .get(format!("{}/api/tags", base_url.trim_end_matches('/')))
+            .timeout(timeout)
+            .send()
+            .await
+            .ok()?;
+        let body: serde_json::Value = resp.json().await.ok()?;
+        let names: Vec<&str> = body["models"]
+            .as_array()?
+            .iter()
+            .filter_map(|m| m["name"].as_str())
+            .collect();
+        let model = names.iter().copied().find(|n| {
+            KNOWN_EMBED_MODELS
+                .iter()
+                .any(|k| *n == *k || n.starts_with(&format!("{k}:")))
+        })?;
+        Some(Self::new(base_url, model))
+    }
+}
+
+#[async_trait]
+impl Embedder for OllamaEmbedder {
+    fn id(&self) -> String {
+        format!("ollama/{}", self.model)
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let resp = self
+            .client
+            .post(format!("{}/api/embeddings", self.base_url))
+            .json(&serde_json::json!({"model": self.model, "prompt": text}))
+            .send()
+            .await
+            .map_err(|e| Error::Provider(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(Error::Provider(format!(
+                "embeddings HTTP {}",
+                resp.status()
+            )));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Provider(e.to_string()))?;
+        body["embedding"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect()
+            })
+            .ok_or_else(|| Error::Provider("no embedding in response".into()))
     }
 }
 

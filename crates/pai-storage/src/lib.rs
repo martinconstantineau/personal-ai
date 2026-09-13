@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -203,7 +203,16 @@ CREATE TABLE IF NOT EXISTS policies (
     updated_at TEXT NOT NULL
 );
 "#,
+    r#"
+-- V3: OS-keystore marker for device keys; embeddings on document sections.
+ALTER TABLE devices ADD COLUMN key_storage TEXT NOT NULL DEFAULT 'file';
+ALTER TABLE document_sections ADD COLUMN embedding BLOB;
+"#,
 ];
+
+/// A 32-byte SQLCipher raw key, sourced from the OS keystore (or a 0600
+/// file fallback) by the caller — see `pai_identity::keystore::store_key`.
+pub type EncryptionKey = [u8; 32];
 
 /// Handle to the platform's local storage.
 pub struct Store {
@@ -213,16 +222,36 @@ pub struct Store {
 
 impl Store {
     /// Open (creating + migrating if needed) the store under `data_dir`.
-    pub fn open(data_dir: &Path) -> Result<Self> {
+    ///
+    /// `key` controls at-rest encryption (SQLCipher):
+    /// - `Some(k)`: opens the DB encrypted; a pre-existing plaintext DB is
+    ///   migrated in place via `sqlcipher_export`.
+    /// - `None`: plaintext — used by tests and the `PAI_PLAINTEXT_STORE`
+    ///   escape hatch.
+    pub fn open(data_dir: &Path, key: Option<&EncryptionKey>) -> Result<Self> {
         std::fs::create_dir_all(data_dir).map_err(store_err)?;
         let db_path = data_dir.join("personal-ai.db");
+        if let Some(k) = key {
+            if db_path.exists() && Self::is_plaintext(&db_path)? {
+                Self::migrate_to_encrypted(&db_path, k)?;
+            }
+        }
         let conn = Connection::open(&db_path).map_err(store_err)?;
+        if let Some(k) = key {
+            // Raw 32-byte key — skips PBKDF; the keystore/file already
+            // gates access.
+            conn.pragma_update(None, "key", format!("x'{}'", hex::encode(k)))
+                .map_err(store_err)?;
+        }
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(store_err)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(store_err)?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(store_err)?;
+        // Probe: wrong/absent key surfaces here, not mid-query later.
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+            .map_err(|_| Error::Storage("cannot read store: bad or missing key".into()))?;
         let store = Self {
             conn: Mutex::new(conn),
             blob_dir: data_dir.join("blobs"),
@@ -230,6 +259,58 @@ impl Store {
         store.migrate()?;
         std::fs::create_dir_all(&store.blob_dir).map_err(store_err)?;
         Ok(store)
+    }
+
+    /// True when `path` is a readable *plaintext* SQLite db. SQLCipher with
+    /// no key set behaves as plain SQLite, so a successful probe = plaintext.
+    fn is_plaintext(db_path: &Path) -> Result<bool> {
+        let conn = Connection::open(db_path).map_err(store_err)?;
+        match conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(())) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::NotADatabase =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(store_err(e)),
+        }
+    }
+
+    /// Copy a plaintext db into an encrypted one and swap with a backup.
+    fn migrate_to_encrypted(db_path: &Path, key: &EncryptionKey) -> Result<()> {
+        let enc_path = db_path.with_extension("enc");
+        let bak_path = db_path.with_extension("plaintext-bak");
+        for p in [&enc_path, &bak_path] {
+            if p.exists() {
+                std::fs::remove_file(p).map_err(store_err)?;
+            }
+        }
+        {
+            let conn = Connection::open(db_path).map_err(store_err)?;
+            // Fold any pending WAL frames into the main file first.
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+            let esc = enc_path.to_string_lossy().replace('\'', "''");
+            conn.execute_batch(&format!(
+                "ATTACH DATABASE '{esc}' AS enc KEY \"x'{}'\";
+                 SELECT sqlcipher_export('enc');
+                 DETACH DATABASE enc;",
+                hex::encode(key)
+            ))
+            .map_err(store_err)?;
+        }
+        // Windows rename fails when the destination exists — rotate via a
+        // backup instead of renaming over.
+        std::fs::rename(db_path, &bak_path).map_err(store_err)?;
+        if let Err(e) = std::fs::rename(&enc_path, db_path) {
+            let _ = std::fs::rename(&bak_path, db_path); // roll back
+            return Err(store_err(e));
+        }
+        for ext in ["wal", "shm"] {
+            let _ = std::fs::remove_file(db_path.with_extension(ext));
+        }
+        let _ = std::fs::remove_file(&bak_path);
+        tracing::info!("migrated store.db to SQLCipher (encrypted at rest)");
+        Ok(())
     }
 
     /// In-memory store for tests.

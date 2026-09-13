@@ -67,6 +67,34 @@ pub struct ToolContext<'a> {
     /// memory writes are tagged to that conversation and memory reads stay
     /// inside its scope. `None` = shared (global) memory.
     pub memory_scope: Option<ConversationId>,
+    /// Document store for `documents.*` tools.
+    pub documents: Option<&'a pai_documents::DocumentStore>,
+    /// Directories a file-touching tool may read from — the in-process
+    /// sandbox profile. Empty = no filesystem reads allowed. User-initiated
+    /// paths (CLI `docs ingest`) bypass this; the jail guards *model-driven*
+    /// reads.
+    pub allowed_roots: &'a [std::path::PathBuf],
+}
+
+impl<'a> ToolContext<'a> {
+    /// Resolve `path` inside `allowed_roots`; errors when the canonicalized
+    /// path escapes every root.
+    pub fn resolve_in_jail(&self, path: &std::path::Path) -> Result<std::path::PathBuf> {
+        let canon = std::fs::canonicalize(path)
+            .map_err(|e| Error::InvalidInput(format!("{path:?}: {e}")))?;
+        let ok = self.allowed_roots.iter().any(|root| {
+            std::fs::canonicalize(root)
+                .map(|r| canon.starts_with(r))
+                .unwrap_or(false)
+        });
+        if ok {
+            Ok(canon)
+        } else {
+            Err(Error::PermissionDenied(format!(
+                "{canon:?} is outside the tool's allowed roots"
+            )))
+        }
+    }
 }
 
 #[derive(Default)]
@@ -319,12 +347,160 @@ impl Tool for MemoryForget {
     }
 }
 
+/// documents.search — hybrid keyword+vector search over ingested docs.
+/// Output carries [Dn] citation tags the model can quote in its answer.
+pub struct DocumentsSearch;
+
+#[async_trait]
+impl Tool for DocumentsSearch {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "documents.search".into(),
+            description: "Search ingested documents; returns cited snippets \
+                          ([D1] title, section) to quote in answers"
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["query"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::DocumentRead],
+            risk: RiskLevel::Low,
+            execution: ExecutionMode::Local,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let docs = ctx
+            .documents
+            .ok_or_else(|| Error::InvalidInput("documents not configured".into()))?;
+        let query = args["query"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("missing 'query'".into()))?;
+        let limit = args["limit"].as_u64().unwrap_or(5).min(10) as usize;
+        let hits = docs.search(query, limit).await?;
+        let results: Vec<serde_json::Value> = hits
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                serde_json::json!({
+                    "ref": format!("D{}", i + 1),
+                    "document": h.document_id.to_string(),
+                    "title": h.title,
+                    "section": h.section,
+                    "snippet": h.snippet,
+                    "score": h.score,
+                })
+            })
+            .collect();
+        let summary = if hits.is_empty() {
+            "no matching document sections".into()
+        } else {
+            format!(
+                "{} doc hit(s): {}",
+                hits.len(),
+                hits.iter()
+                    .enumerate()
+                    .map(|(i, h)| format!(
+                        "[D{}] {} §{}",
+                        i + 1,
+                        h.title.as_deref().unwrap_or("untitled"),
+                        h.section
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        Ok(ToolOutput {
+            value: serde_json::json!({"results": results}),
+            summary,
+        })
+    }
+}
+
+/// documents.ingest — pull a file into the document store. Reads go
+/// through the tool's filesystem jail (`ToolContext::allowed_roots`).
+pub struct DocumentsIngest;
+
+#[async_trait]
+impl Tool for DocumentsIngest {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "documents.ingest".into(),
+            description: "Ingest a text/markdown/html file into the \
+                          document store so it becomes searchable"
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::FilesRead, Permission::DocumentWrite],
+            risk: RiskLevel::Medium,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let docs = ctx
+            .documents
+            .ok_or_else(|| Error::InvalidInput("documents not configured".into()))?;
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("missing 'path'".into()))?;
+        // Filesystem jail: canonicalize + confine to allowed roots.
+        let canon = ctx.resolve_in_jail(std::path::Path::new(path))?;
+        let bytes = std::fs::read(&canon).map_err(pai_storage_err)?;
+        let mime = match canon
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
+            "md" | "markdown" => "text/markdown",
+            "html" | "htm" => "text/html",
+            _ => "text/plain",
+        };
+        let title = canon.file_name().and_then(|n| n.to_str());
+        let id = docs.ingest(&bytes, mime, title).await?;
+        Ok(ToolOutput {
+            value: serde_json::json!({
+                "document_id": id.to_string(),
+                "title": title,
+            }),
+            summary: format!("ingested {}", title.unwrap_or(&id.to_string()[..8])),
+        })
+    }
+}
+
+fn pai_storage_err(e: impl std::fmt::Display) -> Error {
+    Error::Storage(e.to_string())
+}
+
 /// A registry pre-loaded with the safe built-ins.
 pub fn builtin_registry() -> ToolRegistry {
     let mut r = ToolRegistry::default();
     r.register(Arc::new(CalculatorAdd));
     r.register(Arc::new(MemoryRemember));
     r.register(Arc::new(MemoryForget));
+    r.register(Arc::new(DocumentsSearch));
+    r.register(Arc::new(DocumentsIngest));
     r
 }
 
@@ -343,6 +519,8 @@ mod tests {
             device: DeviceId::new(),
             memory: None,
             memory_scope: None,
+            documents: None,
+            allowed_roots: &[],
         };
         let out = tool
             .execute(serde_json::json!({"a":2,"b":3}), &ctx)

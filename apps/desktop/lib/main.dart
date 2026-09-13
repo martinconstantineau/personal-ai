@@ -254,6 +254,14 @@ class _ChatScreenState extends State<ChatScreen> {
                     builder: (_) => MemoriesScreen(bridge: _pai!))),
           ),
           IconButton(
+            icon: const Icon(Icons.description_outlined),
+            tooltip: 'Documents',
+            onPressed: _pai == null
+                ? null
+                : () => Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => DocumentsScreen(bridge: _pai!))),
+          ),
+          IconButton(
             icon: const Icon(Icons.policy_outlined),
             tooltip: 'Permissions',
             onPressed: _pai == null
@@ -675,6 +683,177 @@ class _MemoriesScreenState extends State<MemoriesScreen> {
       await widget.bridge.forget(m['id'] as String);
       await _load();
     }
+  }
+}
+
+/// Documents — ingest files for RAG, browse, search, delete.
+/// Everything stays local; sections get embeddings when an Ollama
+/// embedding model is installed.
+class DocumentsScreen extends StatefulWidget {
+  const DocumentsScreen({super.key, required this.bridge});
+  final PaiBridge bridge;
+  @override
+  State<DocumentsScreen> createState() => _DocumentsScreenState();
+}
+
+class _DocumentsScreenState extends State<DocumentsScreen> {
+  List<dynamic> _items = const [];
+  List<dynamic> _hits = const [];
+  bool _loading = true;
+  final _pathCtrl = TextEditingController();
+  final _searchCtrl = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _pathCtrl.dispose();
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final items = await widget.bridge.docs();
+    if (mounted) setState(() { _items = items; _loading = false; });
+  }
+
+  Future<void> _ingest() async {
+    final path = _pathCtrl.text.trim();
+    if (path.isEmpty) return;
+    final r = await widget.bridge.docsIngest(path);
+    _pathCtrl.clear();
+    if (r['error'] != null && mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('${r['error']}')));
+    }
+    await _load();
+  }
+
+  Future<void> _search() async {
+    final q = _searchCtrl.text.trim();
+    if (q.isEmpty) {
+      setState(() => _hits = const []);
+      return;
+    }
+    final hits = await widget.bridge.docsSearch(q);
+    if (mounted) setState(() => _hits = hits);
+  }
+
+  Future<void> _delete(dynamic d) async {
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              title: const Text('Delete this document?'),
+              content: Text('"${d['title'] ?? d['id']}"'),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('Cancel')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Delete')),
+              ],
+            ));
+    if (ok == true) {
+      await widget.bridge.docsDelete(d['id'] as String);
+      await _load();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Documents')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : Column(children: [
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _pathCtrl,
+                      decoration: const InputDecoration(
+                          labelText: 'Ingest file path',
+                          hintText: r'C:\path\to\notes.md'),
+                      onSubmitted: (_) => _ingest(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.icon(
+                      onPressed: _ingest,
+                      icon: const Icon(Icons.upload_file),
+                      label: const Text('Ingest')),
+                ]),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _searchCtrl,
+                      decoration: const InputDecoration(
+                          labelText: 'Search sections',
+                          hintText: 'keyword or phrase'),
+                      onSubmitted: (_) => _search(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                      onPressed: _search, icon: const Icon(Icons.search)),
+                ]),
+              ),
+              if (_hits.isNotEmpty)
+                SizedBox(
+                  height: 180,
+                  child: ListView.builder(
+                    itemCount: _hits.length,
+                    itemBuilder: (_, i) {
+                      final h = _hits[i];
+                      return ListTile(
+                        dense: true,
+                        leading: Text('[D${i + 1}]',
+                            style: TextStyle(color: cs.primary)),
+                        title: Text('${h['title'] ?? "untitled"} §${h['section']}',
+                            style: const TextStyle(fontSize: 12)),
+                        subtitle: Text('${h['snippet']}',
+                            maxLines: 2, overflow: TextOverflow.ellipsis),
+                      );
+                    },
+                  ),
+                ),
+              const Divider(),
+              Expanded(
+                child: _items.isEmpty
+                    ? const Center(
+                        child: Text('no documents ingested yet'))
+                    : ListView.builder(
+                        itemCount: _items.length,
+                        itemBuilder: (_, i) {
+                          final d = _items[i];
+                          return ListTile(
+                            leading: const Icon(Icons.article_outlined),
+                            title:
+                                Text('${d['title'] ?? "untitled"}'),
+                            subtitle: Text(
+                                '${d['mime']}  •  ${d['sections']} sections'),
+                            trailing: IconButton(
+                              icon: Icon(Icons.delete_outline,
+                                  color: cs.error),
+                              tooltip: 'Delete',
+                              onPressed: () => _delete(d),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ]),
+    );
   }
 }
 

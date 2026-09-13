@@ -22,14 +22,15 @@ Canonical repo: [GitLab](https://gitlab.com/martin.constantineau.ca/personal-ai)
 - 🔄 **Sync designed, not bolted on** — end-to-end-encrypted object sync via
   pluggable transports (folder transport implemented; relays are ciphertext-only).
 
-## Status: V1 — usable local assistant
+## Status: V1.1 — hardened local assistant
 
-The architectural foundation is merged, and V1 adds the day-to-day
-assistant surface: **streaming answers, interactive tool approvals, a
-policy editor, persistent conversations with per-chat memory isolation, a
-memory browser with forget, crash-safe run resume, and Hugging Face model
-install/search/serve**. See [docs/ROADMAP.md](docs/ROADMAP.md) for what's
-next and [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
+V1 delivered the day-to-day surface (streaming answers, approvals,
+conversations, memory, resume, Hugging Face models). V1.1 hardens it:
+**at-rest encryption (SQLCipher) keyed from the OS keystore, interactive
+CLI approvals, Ollama embeddings + vector recall, document ingest with
+RAG citations (`pai docs`, Flutter Documents screen), and a filesystem
+jail for model-driven file reads**. See [docs/ROADMAP.md](docs/ROADMAP.md)
+for what's next and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Quick start
 

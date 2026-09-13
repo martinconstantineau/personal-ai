@@ -1,9 +1,12 @@
 //! User identity + device registry.
 //!
 //! Each device holds an ed25519 keypair; the public key identifies the device
-//! to peers during sync. V1 stores the private key under `data_dir` with
-//! 0600 permissions; production targets the OS keystore (Keychain, Android
-//! Keystore, TPM) — see docs/adr/0011-cryptography.md.
+//! to peers during sync. Private keys live in the OS keystore when one is
+//! reachable (Windows Credential Manager, macOS Keychain, Secret Service);
+//! otherwise they fall back to a 0600 file under `data_dir`. See
+//! docs/adr/0011-cryptography.md.
+
+pub mod keystore;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use pai_core::*;
@@ -58,8 +61,8 @@ impl IdentityStore {
             })
     }
 
-    /// Register this device. Generates a fresh keypair; writes the private
-    /// key under `key_dir` (0600) and returns the public half.
+    /// Register this device. Generates a fresh keypair; the private key goes
+    /// to the OS keystore when available, else a 0600 file under `key_dir`.
     pub fn register_device(
         &self,
         owner: UserId,
@@ -68,7 +71,6 @@ impl IdentityStore {
         capabilities: DeviceCapabilities,
         key_dir: &Path,
     ) -> Result<Device> {
-        std::fs::create_dir_all(key_dir).map_err(store_err)?;
         let signing = SigningKey::generate(&mut OsRng);
         let device = Device {
             id: DeviceId::new(),
@@ -80,19 +82,27 @@ impl IdentityStore {
             last_seen_at: now(),
             capabilities,
         };
-        let key_path = key_dir.join(format!("{}.key", device.id));
-        std::fs::write(&key_path, signing.to_bytes()).map_err(store_err)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
-                .map_err(store_err)?;
-        }
+        let key_name = format!("device:{}", device.id);
+        let key_storage = if keystore::store(&key_name, &signing.to_bytes()) {
+            "os"
+        } else {
+            std::fs::create_dir_all(key_dir).map_err(store_err)?;
+            let key_path = key_dir.join(format!("{}.key", device.id));
+            std::fs::write(&key_path, signing.to_bytes()).map_err(store_err)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(store_err)?;
+            }
+            tracing::warn!("OS keystore unavailable; device key written to {key_path:?}");
+            "file"
+        };
         self.store.with_conn(|c| {
             c.execute(
                 "INSERT INTO devices(id, owner, name, platform, public_key,
-                    registered_at, last_seen_at, capabilities_json)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                    registered_at, last_seen_at, capabilities_json, key_storage)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
                     device.id.to_string(),
                     device.owner.to_string(),
@@ -102,6 +112,7 @@ impl IdentityStore {
                     ts(&device.registered_at),
                     ts(&device.last_seen_at),
                     serde_json::to_string(&device.capabilities).unwrap_or_else(|_| "{}".into()),
+                    key_storage,
                 ],
             )
         })?;
@@ -131,11 +142,23 @@ impl IdentityStore {
         })
     }
 
-    /// Sign `msg` with a device's private key loaded from `key_dir`.
+    /// Sign `msg` with a device's private key. Reads the OS keystore first,
+    /// then the `key_dir` file fallback; a file key is migrated into the
+    /// keystore opportunistically so it stops living on disk.
     pub fn sign(&self, device: DeviceId, key_dir: &Path, msg: &[u8]) -> Result<Vec<u8>> {
-        let key_path = key_dir.join(format!("{device}.key"));
-        let raw = std::fs::read(&key_path)
-            .map_err(|_| Error::NotFound(format!("device key {device}")))?;
+        let key_name = format!("device:{device}");
+        let raw = if let Some(bytes) = keystore::load(&key_name) {
+            bytes
+        } else {
+            let key_path = key_dir.join(format!("{device}.key"));
+            let raw = std::fs::read(&key_path)
+                .map_err(|_| Error::NotFound(format!("device key {device}")))?;
+            if keystore::store(&key_name, &raw) {
+                let _ = std::fs::remove_file(&key_path);
+                tracing::info!(%device, "migrated device key into OS keystore");
+            }
+            raw
+        };
         let signing = SigningKey::from_bytes(
             raw.as_slice()
                 .try_into()

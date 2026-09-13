@@ -9,6 +9,7 @@ description = "First-class tool protocol: declared schemas, permissions, risk le
 pai-core.workspace = true
 pai-permissions.workspace = true
 pai-memory.workspace = true
+pai-documents.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -69,6 +69,14 @@ class PaiClient {
   late final _convSetMemory = _lib.lookupFunction<_ThreeStrNative,
           Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>(
       'pai_conversation_set_memory');
+  late final _docs = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_docs');
+  late final _docsIngest = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_docs_ingest');
+  late final _docsSearch = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_docs_search');
+  late final _docsDelete = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_docs_delete');
   late final _setPolicy = _lib.lookupFunction<_ThreeStrNative,
           Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>(
       'pai_set_policy');
@@ -202,6 +210,23 @@ class PaiClient {
       _call2(_convSetMemory, id, mode);
   Map<String, dynamic> setPolicy(String permission, String policy) =>
       _call2(_setPolicy, permission, policy);
+
+  /// Ingested documents: [{id, title, mime, created_at, sections}].
+  List<dynamic> docs() => _json(_docs(_handle)) as List<dynamic>;
+
+  /// Ingest a file by absolute path. Blocking — worker isolate only.
+  Map<String, dynamic> docsIngest(String path) => _call1(_docsIngest, path);
+
+  /// Hybrid search over document sections: [{document, title, section,
+  /// snippet, score}].
+  List<dynamic> docsSearch(String query) {
+    final q = query.toNativeUtf8();
+    final out = _docsSearch(_handle, q);
+    calloc.free(q);
+    return _json(out) as List<dynamic>;
+  }
+
+  Map<String, dynamic> docsDelete(String id) => _call1(_docsDelete, id);
 
   Map<String, dynamic> _call1(
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>) f, String a) {

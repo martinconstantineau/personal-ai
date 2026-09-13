@@ -3,12 +3,12 @@
 
 use clap::{Parser, Subcommand};
 use pai_agent::{
-    AgentDefinition, AgentEvent, AgentRuntime, AutoApprove, CancelToken, ConversationStore,
-    Persistence, RunRequest, RunStore,
+    AgentDefinition, AgentEvent, AgentRuntime, ApprovalHandler, AutoApprove, CancelToken,
+    ConversationStore, Persistence, RunRequest, RunStore,
 };
 use pai_core::*;
 use pai_inference::{EchoProvider, LlamaServerProvider};
-use pai_memory::{MemoryBackend, MemoryScopeQuery, RecallQuery, SqliteMemory};
+use pai_memory::{Embedder, MemoryBackend, MemoryScopeQuery, RecallQuery, SqliteMemory};
 use pai_permissions::{all_permissions, Permission, PolicyEngine, PolicyTable};
 use pai_storage::Store;
 use pai_tools::Tool;
@@ -40,6 +40,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the vertical slice end-to-end: remember → recall → tool → audit.
+    /// Manage the document store
+    Docs {
+        #[command(subcommand)]
+        cmd: DocsCmd,
+    },
     Demo,
     /// Interactive chat REPL (persistent; see `pai conversations`).
     Chat {
@@ -162,7 +167,20 @@ enum MemCmd {
     Forget { target: String },
 }
 
+#[derive(Subcommand)]
+enum DocsCmd {
+    /// Ingest a file (txt/md/html) into the document store.
+    Ingest { path: String },
+    /// List ingested documents.
+    List,
+    /// Search document sections.
+    Search { query: String },
+    /// Remove a document and its sections.
+    Delete { id: String },
+}
 struct Ctx {
+    store: Arc<Store>,
+    documents: Arc<pai_documents::DocumentStore>,
     agent: AgentRuntime,
     memory: Arc<dyn MemoryBackend>,
     audit: Arc<pai_audit::AuditLog>,
@@ -173,7 +191,7 @@ struct Ctx {
     model: Option<String>,
 }
 
-fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
+async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
     let cfg = match &cli.data_dir {
         Some(d) => pai_config::Config {
             data_dir: d.into(),
@@ -186,7 +204,8 @@ fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
         None => pai_config::Config::load(None)?,
     };
     std::fs::create_dir_all(&cfg.data_dir).map_err(|e| Error::Storage(e.to_string()))?;
-    let store = Arc::new(Store::open(&cfg.data_dir)?);
+    let store_key = pai_identity::keystore::store_key(&cfg.data_dir);
+    let store = Arc::new(Store::open(&cfg.data_dir, store_key.as_ref())?);
 
     // Identity: reuse existing user/device or create on first run.
     let ids = pai_identity::IdentityStore::new(store.clone());
@@ -213,7 +232,6 @@ fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
         (user, device)
     };
 
-    let memory: Arc<dyn MemoryBackend> = Arc::new(SqliteMemory::new(store.clone()));
     let audit = Arc::new(pai_audit::AuditLog::new(store.clone()));
     let conversations = Arc::new(ConversationStore::new(store.clone()));
     let runs = Arc::new(RunStore::new(store.clone()));
@@ -224,10 +242,7 @@ fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
     let mut model = cli.model.clone();
     let mut server_url = cfg.inference.local_server_url.clone();
     if provider_name == "auto" {
-        let rt = tokio::runtime::Runtime::new().map_err(|e| Error::Other(e.to_string()))?;
-        match rt.block_on(pai_inference::detect_endpoints(
-            std::time::Duration::from_secs(2),
-        )) {
+        match pai_inference::detect_endpoints(std::time::Duration::from_secs(2)).await {
             found if !found.is_empty() => {
                 let ep = &found[0];
                 eprintln!("auto: using {} at {}", ep.provider, ep.base_url);
@@ -243,6 +258,28 @@ fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             }
         }
     }
+
+    // Vector recall: probe the resolved server for an Ollama embedding
+    // model (/api/tags is Ollama-only, so detection is self-gating).
+    let embedder: Option<Arc<pai_memory::OllamaEmbedder>> =
+        pai_memory::OllamaEmbedder::detect(&server_url, std::time::Duration::from_secs(2))
+            .await
+            .map(Arc::new);
+    if let Some(e) = &embedder {
+        eprintln!("embedder: {}", e.id());
+    }
+    let mut mem_impl = SqliteMemory::new(store.clone());
+    let mut doc_impl = pai_documents::DocumentStore::new(store.clone());
+    if let Some(e) = &embedder {
+        mem_impl = mem_impl.with_embedder(e.clone());
+        doc_impl = doc_impl.with_embedder(e.clone());
+    }
+    let memory: Arc<dyn MemoryBackend> = Arc::new(mem_impl);
+    let documents = Arc::new(doc_impl);
+    // Model-driven file reads are jailed to <data_dir>/inbox; user-driven
+    // `pai docs ingest <path>` bypasses the jail.
+    let inbox = cfg.data_dir.join("inbox");
+    std::fs::create_dir_all(&inbox).ok();
 
     let mut providers = pai_inference::ProviderRegistry::default();
     providers.register(Arc::new(EchoProvider));
@@ -266,6 +303,8 @@ fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             conversations: conversations.clone(),
             runs: runs.clone(),
         }),
+        documents: Some(documents.clone()),
+        allowed_roots: vec![inbox],
     };
 
     Ok((
@@ -278,6 +317,8 @@ fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             session,
             provider_name,
             model,
+            documents,
+            store,
         },
         cfg,
     ))
@@ -361,6 +402,7 @@ async fn send(
     text: &str,
     conversation: Option<ConversationId>,
     resume_from: Option<AgentRunId>,
+    approval: &dyn ApprovalHandler,
 ) -> Result<SendOutcome> {
     let streamed = Arc::new(AtomicBool::new(false));
     let flag = streamed.clone();
@@ -381,7 +423,7 @@ async fn send(
             history,
             input: text.to_string(),
             conversation,
-            approval: &AutoApprove,
+            approval,
             cancel: CancelToken::default(),
             emit: &emit,
             stream: true,
@@ -394,12 +436,41 @@ async fn send(
     })
 }
 
+/// Interactive approval handler for `chat`: prints the request and reads a
+/// y/n answer on stdin. Blocking inside `decide` is fine — the REPL owns
+/// the loop, and a run has nothing else to do while awaiting approval.
+pub struct CliApproval;
+
+#[async_trait::async_trait]
+impl ApprovalHandler for CliApproval {
+    async fn decide(&self, req: &pai_permissions::ApprovalRequest) -> bool {
+        println!("  ┌─ approval needed ───────────────────────────");
+        println!("  │ tool:        {}", req.tool);
+        println!("  │ action:      {}", req.summary);
+        println!("  │ permissions: {:?}", req.permissions);
+        println!("  │ risk:        {:?}", req.risk);
+        print!("  └─ allow? [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            return false;
+        }
+        matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+    }
+}
+
 fn parse_uuid(s: &str, what: &str) -> Result<uuid::Uuid> {
     uuid::Uuid::parse_str(s).map_err(|_| Error::InvalidInput(format!("invalid {what} id '{s}'")))
 }
 
 async fn run_models(cmd: &ModelsCmd, cfg: &pai_config::Config) -> Result<()> {
-    let mgr = pai_models::ModelManager::new(Arc::new(Store::open(&cfg.data_dir)?), &cfg.data_dir);
+    let mgr = pai_models::ModelManager::new(
+        Arc::new(Store::open(
+            &cfg.data_dir,
+            pai_identity::keystore::store_key(&cfg.data_dir).as_ref(),
+        )?),
+        &cfg.data_dir,
+    );
     for m in pai_models::builtin_catalog() {
         mgr.register(&m)?;
     }
@@ -554,9 +625,62 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let (ctx, cfg) = build(&cli)?;
+    let (ctx, cfg) = build(&cli).await?;
 
     match cli.cmd {
+        Cmd::Docs { cmd } => match cmd {
+            DocsCmd::Ingest { path } => {
+                // User-initiated: no jail — they named the file.
+                let canon = std::fs::canonicalize(&path)
+                    .map_err(|e| Error::InvalidInput(format!("{path}: {e}")))?;
+                let bytes = std::fs::read(&canon)
+                    .map_err(|e| Error::InvalidInput(format!("{canon:?}: {e}")))?;
+                let mime = match canon
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "md" | "markdown" => "text/markdown",
+                    "html" | "htm" => "text/html",
+                    _ => "text/plain",
+                };
+                let id = ctx
+                    .documents
+                    .ingest(&bytes, mime, canon.file_name().and_then(|n| n.to_str()))
+                    .await?;
+                println!("ingested: {id}");
+            }
+            DocsCmd::List => {
+                for (id, title, mime, at, sections) in ctx.documents.list()? {
+                    println!(
+                        "  {}  {:<28} {:<14} {} sections  {}",
+                        &id.to_string()[..8],
+                        title.unwrap_or_else(|| "untitled".into()),
+                        mime,
+                        sections,
+                        at.format("%Y-%m-%d")
+                    );
+                }
+            }
+            DocsCmd::Search { query } => {
+                for h in ctx.documents.search(&query, 10).await? {
+                    println!(
+                        "  {:.2}  {}  {}  {}",
+                        h.score,
+                        &h.document_id.to_string()[..8],
+                        h.title.unwrap_or_else(|| "untitled".into()),
+                        h.snippet.replace('\n', " ")
+                    );
+                }
+            }
+            DocsCmd::Delete { id } => {
+                ctx.documents
+                    .delete(DocumentId(parse_uuid(&id, "document")?))?;
+                println!("deleted {id}");
+            }
+        },
         Cmd::Demo => {
             let def = agent_def(&ctx.provider_name, ctx.model.clone());
             let conv = ctx
@@ -571,6 +695,7 @@ async fn main() -> Result<()> {
                 "Remember that I prefer local models",
                 Some(conv.id),
                 None,
+                &AutoApprove,
             )
             .await?;
             if !r.streamed {
@@ -585,6 +710,7 @@ async fn main() -> Result<()> {
                 "What do I prefer for AI models?",
                 Some(conv.id),
                 None,
+                &AutoApprove,
             )
             .await?;
             if !r.streamed {
@@ -593,7 +719,15 @@ async fn main() -> Result<()> {
             println!();
 
             println!("user: What is 41 + 1?");
-            let r = send(&ctx, &def, "What is 41 + 1?", Some(conv.id), None).await?;
+            let r = send(
+                &ctx,
+                &def,
+                "What is 41 + 1?",
+                Some(conv.id),
+                None,
+                &AutoApprove,
+            )
+            .await?;
             if !r.streamed {
                 println!("assistant: {}", r.answer.unwrap_or_default());
             }
@@ -655,7 +789,7 @@ async fn main() -> Result<()> {
                 if line.is_empty() || line == "quit" {
                     break;
                 }
-                match send(&ctx, &def, line, Some(conv), None).await {
+                match send(&ctx, &def, line, Some(conv), None, &CliApproval).await {
                     Ok(o) if o.streamed => println!(),
                     Ok(o) => match o.answer {
                         Some(a) => println!("pai> {a}"),
@@ -748,7 +882,7 @@ async fn main() -> Result<()> {
             RunsCmd::Resume { id } => {
                 let rid = AgentRunId(parse_uuid(&id, "run")?);
                 let def = agent_def(&ctx.provider_name, ctx.model.clone());
-                send(&ctx, &def, "", None, Some(rid)).await?;
+                send(&ctx, &def, "", None, Some(rid), &CliApproval).await?;
             }
             RunsCmd::Abandon { id } => {
                 ctx.runs.abandon(AgentRunId(parse_uuid(&id, "run")?))?;
@@ -774,7 +908,7 @@ async fn main() -> Result<()> {
                     .map_err(|_| Error::InvalidInput(format!("unknown policy '{policy}'")))?;
                 ctx.agent.permissions.set_policy(p, pol);
                 // Persist.
-                let store = Store::open(&cfg.data_dir)?;
+                let store = ctx.store.as_ref();
                 store.with_conn(|c| {
                     c.execute(
                         "INSERT INTO policies(permission, policy, updated_at) VALUES(?1,?2,?3)
@@ -843,6 +977,8 @@ async fn main() -> Result<()> {
                     device: ctx.agent.device,
                     memory: Some(ctx.memory.as_ref()),
                     memory_scope: None,
+                    documents: Some(ctx.documents.as_ref()),
+                    allowed_roots: &[],
                 };
                 // CLI user is the operator — direct invocation, still audited
                 // via the audit log write below.
