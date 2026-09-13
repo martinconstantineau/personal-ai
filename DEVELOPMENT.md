@@ -21,11 +21,35 @@
 cargo build --workspace              # everything
 cargo test --workspace               # unit + integration tests
 cargo clippy --workspace --all-targets -- -D warnings
+cargo audit                          # vulnerability scan (CI enforces)
+cargo deny check                     # licenses/bans/sources (CI enforces)
 cargo run -p pai-cli -- demo         # vertical slice
 cargo run -p pai-cli -- chat --provider llama-server \
     --server-url http://127.0.0.1:8080 --model local-model
 cd apps/desktop && flutter analyze && flutter test
 ```
+
+## CLI surface (V1)
+
+```bash
+pai chat [--conversation <id>] [--isolated]      # persistent, scoped chat
+pai models list|install|uninstall|runnable       # catalog + hf:// refs
+pai models detect                                # probe local servers/binaries
+pai models search <q>                            # Hugging Face GGUF repos
+pai models files <owner/repo> [--revision r]     # .gguf files in a repo
+pai models serve <slug> [--port 8080]            # run via llama-server
+pai conversations list|new|rename|delete|history|scope
+pai runs interrupted|resume|abandon              # crash-safe run recovery
+pai policies list|set <PERMISSION> <POLICY>      # persisted policy edits
+pai memories                                     # memory browser
+pai memories forget <uuid|query>
+pai audit [--limit N]
+```
+
+Model sources: `pai models install` accepts a catalog **slug** or an
+`hf://<owner>/<repo>/<file.gguf>[@revision]` reference — resolved against
+the Hugging Face hub (size + sha256 from `x-linked-*` headers, verified on
+install).
 
 ## Adding a tool
 
@@ -41,8 +65,11 @@ cd apps/desktop && flutter analyze && flutter test
 Implement `InferenceProvider` (`generate` + `capabilities` + `stream`):
 parse model output with `parse_action`, honor `AIRequest.tools` by
 appending `protocol_prompt()` or native tool calling, and tag untrusted
-observations. Free/local providers only may be marked `ComputePolicy::Local*`
--compatible; anything remote stays behind `CloudAllowed`/`CloudPreferred`.
+observations. `stream` yields raw model text as `StreamEvent::Delta`
+chunks — the agent decodes the action protocol itself, so providers never
+parse their own stream. Free/local providers only may be marked
+`ComputePolicy::Local*`-compatible; anything remote stays behind
+`CloudAllowed`/`CloudPreferred`.
 
 ## Adding a crate
 

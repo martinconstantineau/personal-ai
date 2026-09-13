@@ -33,6 +33,10 @@ pub struct MemoryItem {
     pub entities: Vec<String>,
     /// Optional embedding (provider-supplied); brute-force cosine in V1.
     pub embedding: Option<Vec<f32>>,
+    /// Conversation this memory is scoped to. `None` = global (shared by
+    /// every conversation); `Some(c)` = visible only inside conversation `c`.
+    #[serde(default)]
+    pub conversation: Option<ConversationId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -45,6 +49,21 @@ pub struct RecallQuery {
     pub limit: usize,
     /// Query embedding for semantic ranking.
     pub embedding: Option<Vec<f32>>,
+    /// Visibility filter for conversation-scoped memories.
+    pub memory_scope: MemoryScopeQuery,
+}
+
+/// Which memories a recall is allowed to see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryScopeQuery {
+    /// No filtering — memory browser and admin views.
+    #[default]
+    All,
+    /// Only global (unscoped) memories — runs outside any conversation.
+    GlobalOnly,
+    /// `Scoped(c, include_global)`: `c`'s own memories, plus global memories
+    /// when `include_global` — i.e. a "shared" vs "isolated" conversation.
+    Scoped(ConversationId, bool),
 }
 
 #[derive(Debug, Clone)]
@@ -139,11 +158,29 @@ impl SqliteMemory {
                     .filter_map(|c| <[u8; 4]>::try_from(c).ok().map(f32::from_le_bytes))
                     .collect()
             }),
+            conversation: r.get::<_, Option<String>>(11)?.map(|s| {
+                ConversationId(uuid::Uuid::parse_str(&s).unwrap_or_else(|_| uuid::Uuid::nil()))
+            }),
         })
     }
 
     const COLS: &'static str = "id, type, content, source, created_at, updated_at, confidence,
-         importance, privacy_level, entities_json, embedding";
+         importance, privacy_level, entities_json, embedding, conversation_id";
+}
+
+/// SQL fragment implementing [`RecallQuery::memory_scope`]. The id renders
+/// as a UUID literal — hex + dashes only, so direct interpolation is safe.
+fn conversation_clause(q: &RecallQuery) -> String {
+    match q.memory_scope {
+        MemoryScopeQuery::All => String::new(),
+        MemoryScopeQuery::GlobalOnly => " AND conversation_id IS NULL".into(),
+        MemoryScopeQuery::Scoped(c, true) => {
+            format!(" AND (conversation_id IS NULL OR conversation_id = '{c}')")
+        }
+        MemoryScopeQuery::Scoped(c, false) => {
+            format!(" AND conversation_id = '{c}'")
+        }
+    }
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -171,8 +208,9 @@ impl MemoryBackend for SqliteMemory {
             c.execute(
                 "INSERT INTO memories(id, type, content, source, created_at,
                     updated_at, confidence, importance, privacy_level,
-                    entities_json, embedding, deleted, sync_scope)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12)",
+                    entities_json, embedding, deleted, sync_scope,
+                    conversation_id)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,?13)",
                 params![
                     item.id.to_string(),
                     Self::scope_name(item.scope),
@@ -190,6 +228,7 @@ impl MemoryBackend for SqliteMemory {
                     serde_json::to_string(&item.entities).unwrap(),
                     emb,
                     "synchronized",
+                    item.conversation.map(|c| c.to_string()),
                 ],
             )
         })?;
@@ -235,6 +274,7 @@ impl MemoryBackend for SqliteMemory {
     async fn recall(&self, query: &RecallQuery) -> Result<Vec<ScoredMemory>> {
         let mut out: Vec<ScoredMemory> = Vec::new();
         let limit = query.limit.max(1);
+        let conv = conversation_clause(query);
 
         if let Some(text) = &query.text {
             // FTS5 keyword path — OR over tokens so natural-language queries
@@ -252,7 +292,7 @@ impl MemoryBackend for SqliteMemory {
                 let mut stmt = c.prepare(&format!(
                     "SELECT {} FROM memories m
                      JOIN memories_fts ON memories_fts.rowid = m.rowid
-                     WHERE memories_fts MATCH ?1 AND m.deleted=0
+                     WHERE memories_fts MATCH ?1 AND m.deleted=0{conv}
                      ORDER BY rank LIMIT ?2",
                     Self::COLS
                         .split(',')
@@ -275,7 +315,7 @@ impl MemoryBackend for SqliteMemory {
         if let Some(qe) = &query.embedding {
             let rows: Vec<MemoryItem> = self.store.with_conn(|c| {
                 let mut stmt = c.prepare(&format!(
-                    "SELECT {} FROM memories WHERE embedding IS NOT NULL AND deleted=0",
+                    "SELECT {} FROM memories WHERE embedding IS NOT NULL AND deleted=0{conv}",
                     Self::COLS
                 ))?;
                 let rows = stmt.query_map([], Self::row_to_item)?;
@@ -298,7 +338,7 @@ impl MemoryBackend for SqliteMemory {
         if query.text.is_none() && query.embedding.is_none() {
             let rows: Vec<MemoryItem> = self.store.with_conn(|c| {
                 let mut stmt = c.prepare(&format!(
-                    "SELECT {} FROM memories WHERE deleted=0
+                    "SELECT {} FROM memories WHERE deleted=0{conv}
                      ORDER BY updated_at DESC LIMIT ?1",
                     Self::COLS
                 ))?;
@@ -366,6 +406,7 @@ impl WorkingMemory {
             privacy: PrivacyLevel::Normal,
             entities: vec![],
             embedding: None,
+            conversation: None,
         });
     }
 
@@ -388,6 +429,7 @@ pub fn user_fact(content: impl Into<String>, importance: f32) -> MemoryItem {
         privacy: PrivacyLevel::Normal,
         entities: vec![],
         embedding: None,
+        conversation: None,
     }
 }
 

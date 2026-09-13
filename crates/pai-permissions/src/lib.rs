@@ -31,6 +31,7 @@ pub enum Permission {
     ContactsRead,
     MemoryWrite,
     MemoryRead,
+    MemoryDelete,
     ComputeLocal,
     ComputeTrustedDevice,
     ComputeCloud,
@@ -78,6 +79,7 @@ impl PolicyTable {
             (ContactsRead, AskUser),
             (MemoryWrite, AlwaysAllow),
             (MemoryRead, AlwaysAllow),
+            (MemoryDelete, AskUser),
             (ComputeLocal, AlwaysAllow),
             (ComputeTrustedDevice, AskUser),
             (ComputeCloud, AskUser),
@@ -94,29 +96,88 @@ impl PolicyTable {
     pub fn get(&self, p: Permission) -> Option<ExecutionPolicy> {
         self.rules.get(&p).copied()
     }
+
+    /// Iterate the full rule set (for the policy editor / serialization).
+    pub fn iter(&self) -> impl Iterator<Item = (Permission, ExecutionPolicy)> + '_ {
+        self.rules.iter().map(|(p, pol)| (*p, *pol))
+    }
 }
 
+/// All permissions the platform knows about — drives the policy editor UI.
+pub fn all_permissions() -> Vec<Permission> {
+    use Permission::*;
+    vec![
+        EmailRead,
+        EmailSearch,
+        EmailLabel,
+        EmailArchive,
+        EmailDelete,
+        EmailDraft,
+        EmailSend,
+        CalendarRead,
+        CalendarCreate,
+        CalendarUpdate,
+        CalendarDelete,
+        FilesRead,
+        FilesWrite,
+        FilesDelete,
+        MicrophoneAccess,
+        CameraAccess,
+        ContactsRead,
+        MemoryWrite,
+        MemoryRead,
+        MemoryDelete,
+        ComputeLocal,
+        ComputeTrustedDevice,
+        ComputeCloud,
+    ]
+}
+
+/// Live policy engine. The table is mutable so the app can apply user
+/// policy changes without rebuilding the runtime; callers persist edits.
 pub struct PolicyEngine {
-    table: PolicyTable,
+    table: std::sync::RwLock<PolicyTable>,
 }
 
 impl PolicyEngine {
     pub fn new(table: PolicyTable) -> Self {
-        Self { table }
+        Self {
+            table: std::sync::RwLock::new(table),
+        }
     }
 
     /// Decide whether `permissions` may run. Multiple required permissions
     /// resolve to the *most restrictive* verdict.
     pub fn decide(&self, permissions: &[Permission]) -> PermissionDecision {
+        let table = self.table.read().unwrap();
         let mut decision = PermissionDecision::Allow;
         for p in permissions {
-            match self.table.get(*p).unwrap_or(ExecutionPolicy::AskUser) {
+            match table.get(*p).unwrap_or(ExecutionPolicy::AskUser) {
                 ExecutionPolicy::NeverAllow => return PermissionDecision::Deny,
                 ExecutionPolicy::AskUser => decision = PermissionDecision::AskUser,
                 ExecutionPolicy::AllowWithRule | ExecutionPolicy::AlwaysAllow => {}
             }
         }
         decision
+    }
+
+    /// Apply a user policy edit in memory. Persistence is the caller's job.
+    pub fn set_policy(&self, p: Permission, policy: ExecutionPolicy) {
+        self.table.write().unwrap().set(p, policy);
+    }
+
+    /// Effective policy for one permission (default when no rule exists).
+    pub fn effective(&self, p: Permission) -> ExecutionPolicy {
+        self.table
+            .read()
+            .unwrap()
+            .get(p)
+            .unwrap_or(ExecutionPolicy::AskUser)
+    }
+
+    /// Snapshot of all rules, for serialization / the policy editor.
+    pub fn rules(&self) -> Vec<(Permission, ExecutionPolicy)> {
+        self.table.read().unwrap().iter().collect()
     }
 }
 

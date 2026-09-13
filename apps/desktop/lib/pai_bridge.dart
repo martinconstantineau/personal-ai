@@ -1,17 +1,29 @@
 /// Isolate bridge: `pai_send` blocks on inference, so all FFI work happens
-/// inside a dedicated worker isolate that owns the runtime handle.
+/// inside a dedicated worker isolate that owns the runtime handle. Live run
+/// events (token deltas, approval requests, tool progress) stream back
+/// through the reply port while a send is in flight.
 library;
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:ffi';
 import 'dart:isolate';
+import 'package:ffi/ffi.dart';
 import 'pai_ffi.dart';
+
+/// Handle for one in-flight `send`: live [events] then the final [result].
+class SendHandle {
+  SendHandle(this.events, this.result);
+  final Stream<Map<String, dynamic>> events;
+  final Future<Map<String, dynamic>> result;
+}
 
 class PaiBridge {
   PaiBridge._(this._requests);
 
   final SendPort _requests;
   int _nextId = 0;
-  final _pending = <int, Completer<dynamic>>{};
+  final _pending = <int, _Pending>{};
 
   /// Spawns the worker isolate and initializes the Rust runtime inside it.
   static Future<PaiBridge> start(Map<String, dynamic> config) async {
@@ -23,28 +35,85 @@ class PaiBridge {
     }
     final requests = handshake as SendPort;
     final bridge = PaiBridge._(requests);
-    // Route replies back by id.
+    // Route replies back by id; `_event` payloads go to the event stream.
     final replies = ReceivePort();
     requests.send(_Subscribe(replies.sendPort));
     replies.listen((msg) {
       final (id, value) = msg as (int, dynamic);
-      bridge._pending.remove(id)?.complete(value);
+      final p = bridge._pending[id];
+      if (p == null) return;
+      if (value is Map && value['_event'] != null) {
+        final decoded = jsonDecode(value['_event'] as String);
+        if (decoded is Map<String, dynamic>) p.events?.add(decoded);
+      } else {
+        bridge._pending.remove(id);
+        p.completer.complete(value);
+        p.events?.close();
+      }
     });
     return bridge;
   }
 
-  Future<Map<String, dynamic>> send(String text) async =>
-      (await _call(_Op.send, text)) as Map<String, dynamic>;
+  /// Send a message; live AgentEvents arrive on `events` while `result`
+  /// completes with the final `{answer, events, run_id, ...}` payload.
+  SendHandle sendStreaming(String text) {
+    final events = StreamController<Map<String, dynamic>>();
+    return SendHandle(events.stream, _call(_Op.send, arg: text, events: events));
+  }
+
+  /// Back-compatible: wait for the run to finish, return the result map.
+  Future<Map<String, dynamic>> send(String text) =>
+      sendStreaming(text).result;
+
+  Future<Map<String, dynamic>> resume(String runId) =>
+      _call(_Op.resume, arg: runId).then((v) => v as Map<String, dynamic>);
+
+  /// Resolve a pending approval (tool_call_id → allow/deny).
+  Future<bool> approve(String callId, bool granted) async =>
+      (await _call(_Op.approve,
+          arg: jsonEncode({'id': callId, 'granted': granted}))) as bool;
+
+  /// Cancel the in-flight run.
+  Future<void> cancel() => _call(_Op.cancel).then((_) {});
 
   Future<List<dynamic>> memories() async =>
       (await _call(_Op.memories)) as List<dynamic>;
-
   Future<List<dynamic>> audit() async => (await _call(_Op.audit)) as List<dynamic>;
+  Future<List<dynamic>> runs() async => (await _call(_Op.runs)) as List<dynamic>;
+  Future<List<dynamic>> conversations() async =>
+      (await _call(_Op.conversations)) as List<dynamic>;
+  Future<List<dynamic>> history() async =>
+      (await _call(_Op.history)) as List<dynamic>;
+  Future<List<dynamic>> policies() async =>
+      (await _call(_Op.policies)) as List<dynamic>;
+  Future<Map<String, dynamic>> detect() async =>
+      (await _call(_Op.detect)) as Map<String, dynamic>;
 
-  Future<dynamic> _call(_Op op, [String? arg]) {
+  Future<Map<String, dynamic>> conversationNew({bool isolated = false}) async =>
+      (await _call(_Op.convNew, arg: isolated ? 'isolated' : 'shared'))
+          as Map<String, dynamic>;
+  Future<Map<String, dynamic>> conversationSelect(String id) async =>
+      (await _call(_Op.convSelect, arg: id)) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> conversationDelete(String id) async =>
+      (await _call(_Op.convDelete, arg: id)) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> conversationRename(String id, String title) async =>
+      (await _call(_Op.convRename,
+          arg: jsonEncode({'id': id, 'title': title}))) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> conversationSetMemory(
+          String id, String mode) async =>
+      (await _call(_Op.convSetMemory, arg: jsonEncode({'id': id, 'mode': mode})))
+          as Map<String, dynamic>;
+  Future<Map<String, dynamic>> forget(String memoryId) async =>
+      (await _call(_Op.forget, arg: memoryId)) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> setPolicy(String permission, String policy) async =>
+      (await _call(_Op.setPolicy,
+          arg: jsonEncode({'p': permission, 'x': policy}))) as Map<String, dynamic>;
+
+  Future<dynamic> _call(_Op op,
+      {String? arg, StreamController<Map<String, dynamic>>? events}) {
     final id = _nextId++;
     final c = Completer<dynamic>();
-    _pending[id] = c;
+    _pending[id] = _Pending(c, events);
     _requests.send(_Request(id, op, arg));
     return c.future;
   }
@@ -53,9 +122,17 @@ class PaiBridge {
     final (ready, config) = args;
     final inbox = ReceivePort();
     SendPort? replies;
+    // The event callback is invoked synchronously on this isolate's thread
+    // during client.send — `isolateLocal` is exactly that contract.
+    int activeSend = 0;
+    _eventSink = NativeCallable<NativeEventCallback>.isolateLocal(
+        (Pointer<Utf8> evt, Pointer<Void> _) {
+          replies?.send((activeSend, {'_event': evt.toDartString()}));
+        });
     final PaiClient client;
     try {
       client = PaiClient.init(config);
+      client.setEventCallback(_eventSink!.nativeFunction);
     } catch (e) {
       ready.send(_InitError(e.toString()));
       return;
@@ -69,11 +146,56 @@ class PaiBridge {
       final req = msg as _Request;
       dynamic result;
       try {
-        result = switch (req.op) {
-          _Op.send => client.send(req.arg!),
-          _Op.memories => client.memories(),
-          _Op.audit => client.audit(),
-        };
+        switch (req.op) {
+          case _Op.send:
+            activeSend = req.id;
+            result = client.send(req.arg!);
+            activeSend = 0;
+          case _Op.resume:
+            activeSend = req.id;
+            result = client.resume(req.arg!);
+            activeSend = 0;
+          case _Op.approve:
+            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+            result = client.approve(a['id'] as String, a['granted'] as bool);
+          case _Op.cancel:
+            client.cancel();
+            result = {'ok': true};
+          case _Op.memories:
+            result = client.memories();
+          case _Op.audit:
+            result = client.audit();
+          case _Op.runs:
+            result = client.runs();
+          case _Op.conversations:
+            result = client.conversations();
+          case _Op.history:
+            result = client.history();
+          case _Op.policies:
+            result = client.policies();
+          case _Op.detect:
+            result = client.detect();
+          case _Op.convNew:
+            result = client.conversationNew(isolated: req.arg == 'isolated');
+          case _Op.convSelect:
+            result = client.conversationSelect(req.arg!);
+          case _Op.convDelete:
+            result = client.conversationDelete(req.arg!);
+          case _Op.convRename:
+            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+            result = client.conversationRename(
+                a['id'] as String, a['title'] as String);
+          case _Op.convSetMemory:
+            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+            result = client.conversationSetMemory(
+                a['id'] as String, a['mode'] as String);
+          case _Op.forget:
+            result = client.forget(req.arg!);
+          case _Op.setPolicy:
+            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+            result =
+                client.setPolicy(a['p'] as String, a['x'] as String);
+        }
       } catch (e) {
         result = {'error': e.toString()};
       }
@@ -82,7 +204,36 @@ class PaiBridge {
   }
 }
 
-enum _Op { send, memories, audit }
+/// Retained for the process lifetime: the Rust side may invoke this
+/// callback at any time during a `pai_send` call.
+NativeCallable<NativeEventCallback>? _eventSink;
+
+class _Pending {
+  _Pending(this.completer, this.events);
+  final Completer<dynamic> completer;
+  final StreamController<Map<String, dynamic>>? events;
+}
+
+enum _Op {
+  send,
+  resume,
+  approve,
+  cancel,
+  memories,
+  audit,
+  runs,
+  conversations,
+  history,
+  policies,
+  detect,
+  convNew,
+  convSelect,
+  convDelete,
+  convRename,
+  convSetMemory,
+  forget,
+  setPolicy,
+}
 
 class _InitError {
   _InitError(this.message);

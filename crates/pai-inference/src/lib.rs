@@ -91,11 +91,9 @@ pub trait InferenceProvider: Send + Sync {
     async fn available_models(&self) -> Result<Vec<String>>;
     async fn generate(&self, request: &AIRequest) -> Result<GenerateResponse>;
 
-    /// Streaming generation. Default: run `generate` and replay as one event.
-    fn stream<'a>(&'a self, request: AIRequest) -> EventStream<'a>
-    where
-        Self: Sized,
-    {
+    /// Streaming generation. Object-safe so the provider registry can call it.
+    /// Default: run `generate` and replay as a single `Done` event.
+    fn stream<'a>(&'a self, request: AIRequest) -> EventStream<'a> {
         let fut = async move {
             match self.generate(&request).await {
                 Ok(resp) => Ok(StreamEvent::Done(resp)),
@@ -287,6 +285,31 @@ impl InferenceProvider for EchoProvider {
             ..Default::default()
         })
     }
+
+    /// Echoes stream their raw protocol text in a few chunks so the whole
+    /// streaming pipeline (provider → runtime → FFI → UI) is exercisable
+    /// offline. Chunks land mid-JSON on purpose — token boundaries are
+    /// arbitrary in real providers.
+    fn stream<'a>(&'a self, request: AIRequest) -> EventStream<'a> {
+        let fut = async move {
+            let resp = match self.generate(&request).await {
+                Ok(r) => r,
+                Err(e) => return vec![Ok(StreamEvent::Error(e.to_string()))],
+            };
+            let mut events: Vec<Result<StreamEvent>> = Vec::new();
+            let text = resp.text.clone();
+            let n = text.len();
+            let (a, b) = (n / 3, 2 * n / 3);
+            for chunk in [&text[..a], &text[a..b], &text[b..]] {
+                if !chunk.is_empty() {
+                    events.push(Ok(StreamEvent::Delta(chunk.to_string())));
+                }
+            }
+            events.push(Ok(StreamEvent::Done(resp)));
+            events
+        };
+        Box::pin(futures::stream::once(fut).flat_map(futures::stream::iter))
+    }
 }
 
 fn last_text(req: &AIRequest, role: Role) -> Option<String> {
@@ -297,8 +320,11 @@ fn last_text(req: &AIRequest, role: Role) -> Option<String> {
         .and_then(|m| m.content.iter().find_map(|c| c.as_text().map(String::from)))
 }
 
+/// The trailing tool observation, if the *last* message is one. Persisted
+/// transcripts contain older tool results — those are history, not a fresh
+/// observation to summarize.
 fn last_tool_result(req: &AIRequest) -> Option<(String, serde_json::Value)> {
-    req.messages.iter().rev().find_map(|m| {
+    req.messages.last().and_then(|m| {
         m.content.iter().find_map(|c| match c {
             Content::ToolResult { tool, output, .. } => Some((tool.clone(), output.clone())),
             _ => None,
@@ -336,6 +362,20 @@ fn scripted_action(req: &AIRequest) -> ModelAction {
                 "content": content,
                 "memory_type": "semantic",
             }),
+        };
+    }
+
+    // "forget that X" / "forget about X" → memory.forget (query path).
+    if lower.starts_with("forget ") {
+        let q = user[7..]
+            .trim()
+            .trim_end_matches('.')
+            .trim_start_matches("that ")
+            .trim_start_matches("about ")
+            .to_string();
+        return ModelAction::ToolCall {
+            name: "memory.forget".into(),
+            arguments: serde_json::json!({"query": q}),
         };
     }
 
@@ -521,6 +561,261 @@ impl InferenceProvider for LlamaServerProvider {
                 .map(String::from),
         })
     }
+
+    /// Real SSE streaming: `stream: true` chat completions → per-token
+    /// `Delta` events, then one `Done` carrying the parsed response.
+    fn stream<'a>(&'a self, request: AIRequest) -> EventStream<'a> {
+        let body = serde_json::json!({
+            "model": request.model.clone().unwrap_or_else(|| self.model.clone()),
+            "messages": self.to_wire(&request),
+            "temperature": request.temperature.unwrap_or(0.2),
+            "max_tokens": request.max_tokens.unwrap_or(512),
+            "stream": true,
+            "stream_options": {"include_usage": true},
+        });
+        let fut = self
+            .client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .timeout(self.timeout)
+            .json(&body)
+            .send();
+        Box::pin(futures::stream::unfold(
+            SseState::Connecting(Box::pin(fut)),
+            |st| async move { st.next().await },
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE decoding for streaming completions
+// ---------------------------------------------------------------------------
+
+use futures::StreamExt;
+use std::collections::VecDeque;
+use std::future::Future;
+
+/// Splits an arbitrary byte stream into complete SSE `data:` payloads.
+/// Splitting only on `\n` is byte-safe: UTF-8 continuation bytes never
+/// contain 0x0A, so a line is always decoded once it is fully buffered.
+#[derive(Default)]
+struct SseDecoder {
+    buf: Vec<u8>,
+    data: VecDeque<String>,
+}
+
+impl SseDecoder {
+    fn push(&mut self, chunk: &[u8]) {
+        self.buf.extend_from_slice(chunk);
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let raw: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&raw);
+            let line = line.trim_end();
+            if let Some(rest) = line.trim_start().strip_prefix("data:") {
+                self.data.push_back(rest.trim().to_string());
+            }
+        }
+    }
+}
+
+enum SseState {
+    Connecting(Pin<Box<dyn Future<Output = reqwest::Result<reqwest::Response>> + Send>>),
+    Active(Box<ActiveSse>),
+    Done,
+}
+
+struct ActiveSse {
+    bytes: EventByteStream,
+    decoder: SseDecoder,
+    events: VecDeque<Result<StreamEvent>>,
+    text: String,
+    model: Option<String>,
+    usage: Option<serde_json::Value>,
+    finished: bool,
+}
+
+type EventByteStream =
+    Pin<Box<dyn Stream<Item = std::result::Result<Vec<u8>, reqwest::Error>> + Send>>;
+
+impl ActiveSse {
+    fn handle_data(&mut self, data: &str) {
+        if data.trim() == "[DONE]" {
+            self.finished = true;
+            return;
+        }
+        let v: serde_json::Value = match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(_) => return, // keep-alive comments / partial payloads
+        };
+        if let Some(m) = v["model"].as_str() {
+            self.model = Some(m.to_string());
+        }
+        if v.get("usage").is_some_and(|u| u.is_object()) {
+            self.usage = Some(v["usage"].clone());
+        }
+        let delta = v["choices"][0]["delta"]["content"].as_str().unwrap_or("");
+        if !delta.is_empty() {
+            self.text.push_str(delta);
+            self.events
+                .push_back(Ok(StreamEvent::Delta(delta.to_string())));
+        }
+        if v["choices"][0]["finish_reason"].is_string() {
+            self.finished = true;
+        }
+    }
+
+    fn into_response(self) -> GenerateResponse {
+        let usage = self.usage.unwrap_or_default();
+        GenerateResponse {
+            action: parse_action(&self.text),
+            text: self.text,
+            model: self.model,
+            input_tokens: usage["prompt_tokens"].as_u64().map(|v| v as u32),
+            output_tokens: usage["completion_tokens"].as_u64().map(|v| v as u32),
+            finish_reason: None,
+        }
+    }
+}
+
+impl SseState {
+    async fn next(mut self) -> Option<(Result<StreamEvent>, SseState)> {
+        loop {
+            match self {
+                SseState::Done => return None,
+                SseState::Connecting(fut) => {
+                    self = match fut.await {
+                        Ok(resp) if resp.status().is_success() => {
+                            SseState::Active(Box::new(ActiveSse {
+                                bytes: Box::pin(resp.bytes_stream().map(|r| r.map(|b| b.to_vec()))),
+                                decoder: SseDecoder::default(),
+                                events: VecDeque::new(),
+                                text: String::new(),
+                                model: None,
+                                usage: None,
+                                finished: false,
+                            }))
+                        }
+                        Ok(resp) => {
+                            return Some((
+                                Ok(StreamEvent::Error(format!("HTTP {}", resp.status()))),
+                                SseState::Done,
+                            ))
+                        }
+                        Err(e) => {
+                            return Some((
+                                Ok(StreamEvent::Error(format!("connect: {e}"))),
+                                SseState::Done,
+                            ))
+                        }
+                    };
+                }
+                SseState::Active(mut s) => {
+                    if let Some(ev) = s.events.pop_front() {
+                        return Some((ev, SseState::Active(s)));
+                    }
+                    if s.finished {
+                        return Some((Ok(StreamEvent::Done(s.into_response())), SseState::Done));
+                    }
+                    match s.bytes.next().await {
+                        Some(Ok(chunk)) => {
+                            s.decoder.push(&chunk);
+                            while let Some(data) = s.decoder.data.pop_front() {
+                                s.handle_data(&data);
+                            }
+                            self = SseState::Active(s);
+                        }
+                        Some(Err(e)) => {
+                            return Some((Ok(StreamEvent::Error(e.to_string())), SseState::Done))
+                        }
+                        None => {
+                            // Connection closed without [DONE]: finish with
+                            // whatever text was accumulated.
+                            s.finished = true;
+                            self = SseState::Active(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Local endpoint + binary auto-detection
+// ---------------------------------------------------------------------------
+
+/// Well-known free local inference endpoints, most specific first.
+/// All speak the OpenAI-compatible `/v1` protocol.
+pub const LOCAL_ENDPOINT_CANDIDATES: &[(&str, &str)] = &[
+    ("llama-server", "http://127.0.0.1:8080"),
+    ("ollama", "http://127.0.0.1:11434"),
+    ("lm-studio", "http://127.0.0.1:1234"),
+];
+
+/// A live local inference endpoint found by [`detect_endpoints`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectedEndpoint {
+    /// "llama-server" | "ollama" | "lm-studio"
+    pub provider: String,
+    pub base_url: String,
+    /// Models the endpoint reports via `/v1/models` (may be empty).
+    pub models: Vec<String>,
+}
+
+/// Probe every candidate's `/v1/models` concurrently; return the live ones.
+pub async fn detect_endpoints(timeout: Duration) -> Vec<DetectedEndpoint> {
+    let client = reqwest::Client::new();
+    let probes = LOCAL_ENDPOINT_CANDIDATES.iter().map(|(name, url)| {
+        let client = client.clone();
+        async move {
+            let resp = client
+                .get(format!("{url}/v1/models"))
+                .timeout(timeout)
+                .send()
+                .await
+                .ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            let body: serde_json::Value = resp.json().await.ok()?;
+            let models = body["data"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m["id"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(DetectedEndpoint {
+                provider: name.to_string(),
+                base_url: url.to_string(),
+                models,
+            })
+        }
+    });
+    futures::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Locate an executable on PATH (handles `.exe` on Windows). Returns the
+/// first match as a displayable path.
+pub fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let exe = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    for dir in std::env::split_paths(&path_var) {
+        for cand in [dir.join(&exe), dir.join(name)] {
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

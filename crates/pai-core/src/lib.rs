@@ -149,6 +149,21 @@ pub struct Conversation {
     pub created_at: Timestamp,
     /// Sync-scoped: conversations may roam across devices.
     pub sync_scope: SyncScope,
+    /// Whether memory written here is global or scoped to this conversation.
+    #[serde(default)]
+    pub memory: MemoryIsolation,
+}
+
+/// Per-conversation memory partitioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryIsolation {
+    /// Sees global memory plus its own; writes land in global scope.
+    #[default]
+    Shared,
+    /// Sees only its own memories; writes stay scoped to this conversation.
+    /// Use for sensitive contexts that must not leak into other chats.
+    Isolated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

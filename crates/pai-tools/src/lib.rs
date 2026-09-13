@@ -63,6 +63,10 @@ pub struct ToolContext<'a> {
     pub run: AgentRunId,
     pub device: DeviceId,
     pub memory: Option<&'a dyn pai_memory::MemoryBackend>,
+    /// When the run's conversation has isolated memory, this is `Some(conv)`:
+    /// memory writes are tagged to that conversation and memory reads stay
+    /// inside its scope. `None` = shared (global) memory.
+    pub memory_scope: Option<ConversationId>,
 }
 
 #[derive(Default)]
@@ -219,6 +223,7 @@ impl Tool for MemoryRemember {
         let item = MemoryItem {
             scope,
             importance: args["importance"].as_f64().unwrap_or(0.8) as f32,
+            conversation: ctx.memory_scope,
             ..pai_memory::user_fact(content, 0.8)
         };
         mem.put(&item).await?;
@@ -229,11 +234,97 @@ impl Tool for MemoryRemember {
     }
 }
 
+/// `memory.forget` — soft-delete a memory by id, or by the top text match.
+/// Deletion is destructive: it requires [`Permission::MemoryDelete`], which
+/// defaults to `AskUser` so the model can never erase data silently.
+pub struct MemoryForget;
+
+#[async_trait]
+impl Tool for MemoryForget {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "memory.forget".into(),
+            description: "Forget (delete) a memory — by exact memory_id, or by \
+                          a text query matching the memory's content."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string"},
+                    "query": {"type": "string"}
+                }
+            }),
+            output_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "deleted_id": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["deleted_id"]
+            }),
+            required_permissions: vec![Permission::MemoryDelete],
+            risk: RiskLevel::Medium,
+            execution: ExecutionMode::Local,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let mem = ctx
+            .memory
+            .ok_or_else(|| Error::Other("memory backend unavailable".into()))?;
+
+        let item = if let Some(id) = args["memory_id"].as_str() {
+            let id = uuid::Uuid::parse_str(id)
+                .map_err(|_| Error::InvalidInput("memory_id must be a uuid".into()))?;
+            let item = mem.get(MemoryId(id)).await?;
+            mem.delete(item.id).await?;
+            item
+        } else if let Some(q) = args["query"].as_str() {
+            let hits = mem
+                .recall(&pai_memory::RecallQuery {
+                    text: Some(q.to_string()),
+                    limit: 1,
+                    // Forget only what this run is allowed to see.
+                    memory_scope: match ctx.memory_scope {
+                        Some(c) => pai_memory::MemoryScopeQuery::Scoped(c, true),
+                        None => pai_memory::MemoryScopeQuery::GlobalOnly,
+                    },
+                    ..Default::default()
+                })
+                .await?;
+            let scored = hits
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::NotFound(format!("no memory matching '{q}'")))?;
+            mem.delete(scored.item.id).await?;
+            scored.item
+        } else {
+            return Err(Error::InvalidInput(
+                "memory.forget needs 'memory_id' or 'query'".into(),
+            ));
+        };
+
+        Ok(ToolOutput {
+            value: serde_json::json!({
+                "deleted_id": item.id.to_string(),
+                "content": item.content,
+            }),
+            summary: format!("forgot: {}", item.content),
+        })
+    }
+}
+
 /// A registry pre-loaded with the safe built-ins.
 pub fn builtin_registry() -> ToolRegistry {
     let mut r = ToolRegistry::default();
     r.register(Arc::new(CalculatorAdd));
     r.register(Arc::new(MemoryRemember));
+    r.register(Arc::new(MemoryForget));
     r
 }
 
@@ -251,6 +342,7 @@ mod tests {
             run: AgentRunId::new(),
             device: DeviceId::new(),
             memory: None,
+            memory_scope: None,
         };
         let out = tool
             .execute(serde_json::json!({"a":2,"b":3}), &ctx)

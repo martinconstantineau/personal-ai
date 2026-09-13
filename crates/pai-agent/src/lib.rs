@@ -17,10 +17,10 @@
 //! - Model output is data; tool results are tagged untrusted.
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use pai_core::*;
-use pai_inference::{AIRequest, GenerateResponse, ModelAction, ToolSpec};
-use pai_memory::{MemoryBackend, RecallQuery};
+use pai_inference::{AIRequest, GenerateResponse, ModelAction, StreamEvent, ToolSpec};
+use pai_memory::{MemoryBackend, MemoryScopeQuery, RecallQuery};
 use pai_permissions::{PermissionDecision, PolicyEngine};
 use pai_tools::{validate_args, ToolContext, ToolRegistry};
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,10 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+pub mod store;
+use store::run_state_name;
+pub use store::{ConversationStore, RunStore};
 
 /// What the outside world observes while a run executes.
 #[derive(Debug, Clone, Serialize)]
@@ -106,7 +110,8 @@ pub struct RunRequest<'a> {
     pub definition: &'a AgentDefinition,
     /// Conversation so far; the new user message is appended internally.
     pub history: Vec<Message>,
-    /// The user's new input text.
+    /// The user's new input text. Ignored when `resume_from` is set — the
+    /// original input is restored from the checkpoint.
     pub input: String,
     pub conversation: Option<ConversationId>,
     /// Who decides AskUser-gated actions.
@@ -114,6 +119,12 @@ pub struct RunRequest<'a> {
     pub cancel: CancelToken,
     /// Sink for [`AgentEvent`]s — UI updates, log taps, test probes.
     pub emit: &'a (dyn Fn(AgentEvent) + Send + Sync),
+    /// Stream model tokens through [`AgentEvent::TextDelta`] as they arrive
+    /// (only the `final` answer's content is streamed — tool-call JSON is
+    /// never tokenized to the UI).
+    pub stream: bool,
+    /// Resume a previously checkpointed run (requires `persistence`).
+    pub resume_from: Option<AgentRunId>,
 }
 
 /// Static definition of an agent (see [`pai_core::Agent`] for the persisted form).
@@ -130,6 +141,14 @@ pub struct AgentDefinition {
     pub model: Option<String>,
 }
 
+/// Optional persistence wiring. Without it the runtime is fully functional
+/// but keeps no transcripts, checkpoints, or resumable runs.
+#[derive(Clone)]
+pub struct Persistence {
+    pub conversations: Arc<ConversationStore>,
+    pub runs: Arc<RunStore>,
+}
+
 /// The runtime. Cheap to construct; holds `Arc`s into shared subsystems.
 pub struct AgentRuntime {
     pub providers: pai_inference::ProviderRegistry,
@@ -141,6 +160,7 @@ pub struct AgentRuntime {
     pub step_timeout: Duration,
     /// Who this runtime acts for.
     pub device: DeviceId,
+    pub persistence: Option<Persistence>,
 }
 
 pub struct RunOutcome {
@@ -149,6 +169,24 @@ pub struct RunOutcome {
 }
 
 impl AgentRuntime {
+    /// Memory visibility for a run: shared conversations see global + own
+    /// memories; isolated ones see only their own; runs without a
+    /// conversation see global memory only.
+    fn memory_query(&self, conversation: Option<ConversationId>) -> MemoryScopeQuery {
+        match conversation {
+            None => MemoryScopeQuery::GlobalOnly,
+            Some(c) => {
+                let isolated = self
+                    .persistence
+                    .as_ref()
+                    .and_then(|p| p.conversations.get(c).ok())
+                    .map(|conv| conv.memory == MemoryIsolation::Isolated)
+                    .unwrap_or(false);
+                MemoryScopeQuery::Scoped(c, !isolated)
+            }
+        }
+    }
+
     /// Assemble the model request: system protocol + recalled memories +
     /// prior messages + the new user input.
     async fn build_request(
@@ -156,6 +194,7 @@ impl AgentRuntime {
         def: &AgentDefinition,
         history: &[Message],
         user_text: &str,
+        mem_query: MemoryScopeQuery,
     ) -> Vec<Message> {
         let mut messages: Vec<Message> = Vec::new();
 
@@ -167,6 +206,7 @@ impl AgentRuntime {
                     text: Some(user_text.to_string()),
                     scopes: def.memory_scopes.clone(),
                     limit: 8,
+                    memory_scope: mem_query,
                     ..Default::default()
                 })
                 .await
@@ -214,6 +254,10 @@ impl AgentRuntime {
 
     /// Run `req` to completion (or cancellation/timeout/step-limit),
     /// pushing [`AgentEvent`]s to `req.emit`.
+    ///
+    /// With `persistence` wired, every step is checkpointed into
+    /// `agent_runs` and every transcript message lands in `messages` — a
+    /// crash mid-run leaves a resumable checkpoint (see [`RunStore`]).
     pub async fn run(&self, req: RunRequest<'_>) -> Result<RunOutcome> {
         let RunRequest {
             definition: def,
@@ -223,62 +267,95 @@ impl AgentRuntime {
             approval,
             cancel,
             emit,
+            stream,
+            resume_from,
         } = req;
-        let run = AgentRun {
-            id: AgentRunId::new(),
-            agent: AgentId::new(),
-            conversation,
-            started_at: now(),
-            ended_at: None,
-            state: RunState::Running,
-        };
-        let mut run = run;
-        emit(AgentEvent::RunStarted { run: run.id });
-        self.audit(
-            &run,
-            AuditKind::RunStarted,
-            AuditOutcome::Ok,
-            None,
-            serde_json::json!({"provider": def.provider, "model": def.model}),
-        );
 
         let provider = self
             .providers
             .get(&def.provider)
             .ok_or_else(|| Error::Provider(format!("no provider '{}'", def.provider)))?;
 
-        let conv = conversation.unwrap_or_default();
-        let mut messages = self.build_request(def, &history, &user_text).await;
-        messages.push(Message {
-            id: MessageId::new(),
-            conversation: conv,
-            role: Role::User,
-            created_at: now(),
-            content: vec![Content::text(&user_text)],
-            trust: TrustLevel::User,
-        });
+        // Fresh run vs. resume-from-checkpoint: both end up as
+        // (run, messages, first step to execute).
+        let (run, mut messages, mut step) = match resume_from {
+            Some(rid) => {
+                let runs = self
+                    .persistence
+                    .as_ref()
+                    .map(|p| p.runs.clone())
+                    .ok_or_else(|| Error::InvalidInput("resume requires persistence".into()))?;
+                let (mut r, step, msgs, _input) = runs.load(rid)?;
+                r.state = RunState::Running;
+                emit(AgentEvent::RunStarted { run: r.id });
+                self.audit(
+                    &r,
+                    AuditKind::RunStarted,
+                    AuditOutcome::Ok,
+                    None,
+                    serde_json::json!({"provider": def.provider, "model": def.model, "resumed": true}),
+                );
+                (r, msgs, step)
+            }
+            None => {
+                let run = AgentRun {
+                    id: AgentRunId::new(),
+                    agent: AgentId::new(),
+                    conversation,
+                    started_at: now(),
+                    ended_at: None,
+                    state: RunState::Running,
+                };
+                emit(AgentEvent::RunStarted { run: run.id });
+                self.audit(
+                    &run,
+                    AuditKind::RunStarted,
+                    AuditOutcome::Ok,
+                    None,
+                    serde_json::json!({"provider": def.provider, "model": def.model}),
+                );
+                if let Some(p) = &self.persistence {
+                    let _ = p.runs.begin(&run, &user_text);
+                }
+                let conv = conversation.unwrap_or_default();
+                let mut messages = self
+                    .build_request(def, &history, &user_text, self.memory_query(conversation))
+                    .await;
+                let user_msg = Message {
+                    id: MessageId::new(),
+                    conversation: conv,
+                    role: Role::User,
+                    created_at: now(),
+                    content: vec![Content::text(&user_text)],
+                    trust: TrustLevel::User,
+                };
+                if let (Some(p), true) = (&self.persistence, conversation.is_some()) {
+                    let _ = p.conversations.append(&user_msg);
+                    let _ = p.conversations.set_title_if_empty(conv, &user_text);
+                }
+                messages.push(user_msg);
+                (run, messages, 0)
+            }
+        };
+        let conv = run.conversation.unwrap_or_default();
+        // Isolated conversations tag their memory writes to themselves.
+        let mem_scope = match self.memory_query(run.conversation) {
+            MemoryScopeQuery::Scoped(c, false) => Some(c),
+            _ => None,
+        };
         let tools = self.tool_specs(def);
         let mut answer: Option<String> = None;
 
-        for step in 0..self.max_steps {
+        while step < self.max_steps {
             if cancel.cancelled() {
-                run.state = RunState::Cancelled;
-                run.ended_at = Some(now());
-                self.audit(
-                    &run,
-                    AuditKind::RunFinished,
-                    AuditOutcome::Cancelled,
-                    None,
-                    serde_json::json!({"state": "cancelled"}),
-                );
-                emit(AgentEvent::Done {
-                    run: run.id,
-                    state: run.state,
-                    answer: None,
-                });
-                return Ok(RunOutcome { run, answer });
+                return Ok(self.finish_run(run, answer, RunState::Cancelled, emit));
             }
             emit(AgentEvent::Step { index: step });
+            // Checkpoint *before* the model call: on crash we resume having
+            // seen exactly these messages.
+            if let Some(p) = &self.persistence {
+                let _ = p.runs.checkpoint(&run, step, &messages);
+            }
 
             let req = AIRequest {
                 messages: messages.clone(),
@@ -287,43 +364,17 @@ impl AgentRuntime {
                 require_structured: true,
                 ..Default::default()
             };
-            let resp = match tokio::time::timeout(self.step_timeout, provider.generate(&req)).await
-            {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
+            let (resp, streamed) = match self.generate_step(&provider, req, stream, emit).await {
+                Ok(x) => x,
+                Err(e) => {
                     self.audit_error(&run, &e);
-                    run.state = RunState::Failed;
-                    run.ended_at = Some(now());
-                    self.audit(
-                        &run,
-                        AuditKind::RunFinished,
-                        AuditOutcome::Error,
-                        None,
-                        serde_json::json!({"state": "failed"}),
-                    );
-                    emit(AgentEvent::Done {
-                        run: run.id,
-                        state: run.state,
-                        answer: None,
-                    });
+                    let state = if matches!(e, Error::Timeout) {
+                        RunState::TimedOut
+                    } else {
+                        RunState::Failed
+                    };
+                    self.finish_run(run, None, state, emit);
                     return Err(e);
-                }
-                Err(_) => {
-                    run.state = RunState::TimedOut;
-                    run.ended_at = Some(now());
-                    self.audit(
-                        &run,
-                        AuditKind::RunFinished,
-                        AuditOutcome::Error,
-                        None,
-                        serde_json::json!({"state": "timed_out"}),
-                    );
-                    emit(AgentEvent::Done {
-                        run: run.id,
-                        state: run.state,
-                        answer: None,
-                    });
-                    return Err(Error::Timeout);
                 }
             };
             self.audit(
@@ -348,22 +399,22 @@ impl AgentRuntime {
             match self.dispatch(def, &run, conv, resp).await? {
                 Dispatch::Final { text } => {
                     answer = Some(text.clone());
-                    run.state = RunState::Completed;
-                    run.ended_at = Some(now());
-                    self.audit(
-                        &run,
-                        AuditKind::RunFinished,
-                        AuditOutcome::Ok,
-                        None,
-                        serde_json::json!({"state": "completed"}),
-                    );
-                    emit(AgentEvent::TextDelta { text: text.clone() });
-                    emit(AgentEvent::Done {
-                        run: run.id,
-                        state: run.state,
-                        answer: Some(text),
-                    });
-                    return Ok(RunOutcome { run, answer });
+                    if let (Some(p), true) = (&self.persistence, run.conversation.is_some()) {
+                        let _ = p.conversations.append(&Message {
+                            id: MessageId::new(),
+                            conversation: conv,
+                            role: Role::Assistant,
+                            created_at: now(),
+                            content: vec![Content::text(&text)],
+                            trust: TrustLevel::Generated,
+                        });
+                    }
+                    // When streaming, the answer was already emitted token by
+                    // token; only emit the full text as a fallback.
+                    if !streamed {
+                        emit(AgentEvent::TextDelta { text: text.clone() });
+                    }
+                    return Ok(self.finish_run(run, answer, RunState::Completed, emit));
                 }
                 Dispatch::ToolRequested {
                     call_id,
@@ -378,29 +429,107 @@ impl AgentRuntime {
                             arguments,
                             approval,
                             emit,
+                            conv,
+                            memory_scope: mem_scope,
                         })
                         .await;
+                    if let (Some(p), true) = (&self.persistence, run.conversation.is_some()) {
+                        let _ = p.conversations.append(&msg);
+                    }
                     messages.push(msg);
                 }
             }
+            step += 1;
         }
 
         // Ran out of steps — fail closed.
-        run.state = RunState::Failed;
+        self.finish_run(run, answer, RunState::Failed, emit);
+        Err(Error::Other("max agent steps exceeded".into()))
+    }
+
+    /// Terminal bookkeeping for a run: state, audit, `Done` event, and the
+    /// checkpoint store's finish marker.
+    fn finish_run(
+        &self,
+        mut run: AgentRun,
+        answer: Option<String>,
+        state: RunState,
+        emit: &(dyn Fn(AgentEvent) + Send + Sync),
+    ) -> RunOutcome {
+        run.state = state;
         run.ended_at = Some(now());
+        let outcome = match state {
+            RunState::Cancelled => AuditOutcome::Cancelled,
+            RunState::Completed => AuditOutcome::Ok,
+            _ => AuditOutcome::Error,
+        };
         self.audit(
             &run,
             AuditKind::RunFinished,
-            AuditOutcome::Error,
+            outcome,
             None,
-            serde_json::json!({"state": "failed", "reason": "max_steps exceeded"}),
+            serde_json::json!({"state": run_state_name(state)}),
         );
+        if let Some(p) = &self.persistence {
+            let _ = p.runs.finish(&run);
+        }
         emit(AgentEvent::Done {
             run: run.id,
-            state: run.state,
-            answer,
+            state,
+            answer: answer.clone(),
         });
-        Err(Error::Other("max agent steps exceeded".into()))
+        RunOutcome { run, answer }
+    }
+
+    /// One model call. When `stream` is set, token deltas are decoded
+    /// through [`FinalStream`] so only the *final answer's* content reaches
+    /// the UI as `TextDelta` — structured tool-call JSON never leaks
+    /// token-by-token. Returns the response plus whether the answer was
+    /// streamed (so the caller doesn't emit the text twice).
+    async fn generate_step(
+        &self,
+        provider: &Arc<dyn pai_inference::InferenceProvider>,
+        req: AIRequest,
+        stream: bool,
+        emit: &(dyn Fn(AgentEvent) + Send + Sync),
+    ) -> Result<(GenerateResponse, bool)> {
+        if !stream {
+            return match tokio::time::timeout(self.step_timeout, provider.generate(&req)).await {
+                Ok(Ok(r)) => Ok((r, false)),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(Error::Timeout),
+            };
+        }
+        let mut s = provider.stream(req);
+        let mut extractor = FinalStream::new();
+        let mut streamed = false;
+        let mut result: Option<GenerateResponse> = None;
+        let consume = async {
+            while let Some(item) = s.next().await {
+                match item {
+                    Ok(StreamEvent::Delta(d)) => {
+                        if let Some(t) = extractor.push(&d) {
+                            if !t.is_empty() {
+                                emit(AgentEvent::TextDelta { text: t });
+                                streamed = true;
+                            }
+                        }
+                    }
+                    Ok(StreamEvent::Done(r)) => {
+                        result = Some(r);
+                        break;
+                    }
+                    Ok(StreamEvent::Error(e)) => return Err(Error::Provider(e)),
+                    Err(e) => return Err(e),
+                }
+            }
+            result.ok_or_else(|| Error::Provider("stream ended without Done".into()))
+        };
+        match tokio::time::timeout(self.step_timeout, consume).await {
+            Ok(Ok(r)) => Ok((r, streamed)),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(Error::Timeout),
+        }
     }
 
     async fn dispatch(
@@ -435,6 +564,8 @@ impl AgentRuntime {
             arguments,
             approval,
             emit,
+            conv,
+            memory_scope,
         } = t;
         let tool = match self.tools.get(name) {
             Some(t) => t,
@@ -447,6 +578,7 @@ impl AgentRuntime {
                     serde_json::json!({"reason": "unknown tool"}),
                 );
                 return ToolStep::Observation(tool_result_msg(
+                    conv,
                     *call_id,
                     name,
                     serde_json::json!({"error": "unknown tool"}),
@@ -478,6 +610,7 @@ impl AgentRuntime {
                 serde_json::json!({"reason": e.to_string()}),
             );
             return ToolStep::Observation(tool_result_msg(
+                conv,
                 *call_id,
                 name,
                 serde_json::json!({"error": e.to_string()}),
@@ -500,6 +633,7 @@ impl AgentRuntime {
                     tool: name.into(),
                 });
                 return ToolStep::Observation(tool_result_msg(
+                    conv,
                     *call_id,
                     name,
                     serde_json::json!({"error": "permission denied by policy"}),
@@ -549,6 +683,7 @@ impl AgentRuntime {
                         tool: name.into(),
                     });
                     return ToolStep::Observation(tool_result_msg(
+                        conv,
                         *call_id,
                         name,
                         serde_json::json!({"error": "user denied approval"}),
@@ -579,6 +714,7 @@ impl AgentRuntime {
             run: run.id,
             device: self.device,
             memory: Some(self.memory.as_ref()),
+            memory_scope,
         };
         match tool.execute(arguments, &ctx).await {
             Ok(out) => {
@@ -597,13 +733,21 @@ impl AgentRuntime {
                         Some(name),
                         out.value.clone(),
                     );
+                } else if name == "memory.forget" {
+                    self.audit(
+                        run,
+                        AuditKind::MemoryDeleted,
+                        AuditOutcome::Ok,
+                        Some(name),
+                        out.value.clone(),
+                    );
                 }
                 emit(AgentEvent::ToolExecuted {
                     call: *call_id,
                     tool: name.into(),
                     summary: out.summary,
                 });
-                ToolStep::Observation(tool_result_msg(*call_id, name, out.value, false))
+                ToolStep::Observation(tool_result_msg(conv, *call_id, name, out.value, false))
             }
             Err(e) => {
                 self.audit(
@@ -614,6 +758,7 @@ impl AgentRuntime {
                     serde_json::json!({"error": e.to_string()}),
                 );
                 ToolStep::Observation(tool_result_msg(
+                    conv,
                     *call_id,
                     name,
                     serde_json::json!({"error": e.to_string()}),
@@ -676,9 +821,14 @@ struct ToolInvocation<'a> {
     arguments: serde_json::Value,
     approval: &'a dyn ApprovalHandler,
     emit: &'a (dyn Fn(AgentEvent) + Send + Sync),
+    /// Conversation the observation message belongs to.
+    conv: ConversationId,
+    /// Isolated-conversation tag for memory writes inside the tool.
+    memory_scope: Option<ConversationId>,
 }
 
 fn tool_result_msg(
+    conv: ConversationId,
     call: ToolCallId,
     tool: &str,
     output: serde_json::Value,
@@ -686,7 +836,7 @@ fn tool_result_msg(
 ) -> Message {
     Message {
         id: MessageId::new(),
-        conversation: ConversationId::new(),
+        conversation: conv,
         role: Role::Tool,
         created_at: now(),
         // Tool output is untrusted data — never instructions.
@@ -698,4 +848,195 @@ fn tool_result_msg(
             is_error,
         }],
     }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming final-answer extraction
+// ---------------------------------------------------------------------------
+
+/// Incremental extractor for the structured-output protocol. Fed with raw
+/// model text as it streams; emits only the decoded `content` of a
+/// `{"type":"final",...}` action (JSON escapes handled), or plain text when
+/// the model didn't emit protocol JSON at all.
+///
+/// - `{"type":"tool_call",...}` → suppressed (never streams JSON to the UI)
+/// - `{"type":"final","content":"..."}` → streams the decoded string
+/// - no `{` early in the output → raw passthrough
+#[derive(Default)]
+struct FinalStream {
+    buf: String,
+    pos: usize,
+    state: StreamParse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StreamParse {
+    /// Still looking for the protocol object.
+    #[default]
+    Scanning,
+    /// Inside `content`'s string value.
+    InContent,
+    /// Just saw a backslash inside `content`.
+    Escaped,
+    /// Collecting \uXXXX (remaining nibbles, accumulated code point).
+    Unicode(u8, u32),
+    /// Content string closed.
+    Done,
+    /// Not a streamable shape (tool call / unparseable) — emit nothing.
+    Suppressed,
+    /// Model produced plain text, not protocol JSON — stream raw.
+    Raw,
+}
+
+impl FinalStream {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed a raw token chunk; returns decoded answer text to emit, if any.
+    fn push(&mut self, chunk: &str) -> Option<String> {
+        self.buf.push_str(chunk);
+        let mut out = String::new();
+        loop {
+            match self.state {
+                StreamParse::Scanning => {
+                    if !self.scan() {
+                        return (!out.is_empty()).then_some(out);
+                    }
+                }
+                StreamParse::Raw => {
+                    out.push_str(&self.buf[self.pos..]);
+                    self.pos = self.buf.len();
+                    return Some(out);
+                }
+                StreamParse::InContent => match self.buf[self.pos..].chars().next() {
+                    None => return (!out.is_empty()).then_some(out),
+                    Some('"') => {
+                        self.pos += 1;
+                        self.state = StreamParse::Done;
+                    }
+                    Some('\\') => {
+                        self.pos += 1;
+                        self.state = StreamParse::Escaped;
+                    }
+                    Some(c) => {
+                        out.push(c);
+                        self.pos += c.len_utf8();
+                    }
+                },
+                StreamParse::Escaped => match self.buf[self.pos..].chars().next() {
+                    None => return (!out.is_empty()).then_some(out),
+                    Some(c) => {
+                        self.pos += c.len_utf8();
+                        match c {
+                            '"' => out.push('"'),
+                            '\\' => out.push('\\'),
+                            '/' => out.push('/'),
+                            'b' => out.push('\u{0008}'),
+                            'f' => out.push('\u{000C}'),
+                            'n' => out.push('\n'),
+                            'r' => out.push('\r'),
+                            't' => out.push('\t'),
+                            'u' => {
+                                self.state = StreamParse::Unicode(4, 0);
+                                continue;
+                            }
+                            other => out.push(other),
+                        }
+                        self.state = StreamParse::InContent;
+                    }
+                },
+                StreamParse::Unicode(rem, acc) => match self.buf[self.pos..].chars().next() {
+                    None => return (!out.is_empty()).then_some(out),
+                    Some(c) => {
+                        match c.to_digit(16) {
+                            Some(d) => {
+                                self.pos += c.len_utf8();
+                                let acc = acc * 16 + d;
+                                if rem == 1 {
+                                    if let Some(ch) = char::from_u32(acc) {
+                                        out.push(ch);
+                                    }
+                                    self.state = StreamParse::InContent;
+                                } else {
+                                    self.state = StreamParse::Unicode(rem - 1, acc);
+                                }
+                            }
+                            // Malformed escape — skip it, keep streaming.
+                            None => {
+                                self.pos += c.len_utf8();
+                                self.state = StreamParse::InContent;
+                            }
+                        }
+                    }
+                },
+                StreamParse::Done | StreamParse::Suppressed => {
+                    return (!out.is_empty()).then_some(out)
+                }
+            }
+        }
+    }
+
+    /// Advance the Scanning state: locate the protocol object, read its
+    /// `"type"`, and position `pos` inside `content`'s opening quote.
+    /// Returns false when more input is needed (or the state moved to
+    /// Raw/Suppressed, in which case the main loop takes over).
+    fn scan(&mut self) -> bool {
+        // Plain-text fast path: no '{' within the first 64 chars.
+        if self.pos == 0 {
+            match self.buf.find('{') {
+                Some(i) => self.pos = i,
+                None => {
+                    if self.buf.len() >= 64 {
+                        self.state = StreamParse::Raw;
+                    }
+                    return self.state != StreamParse::Scanning;
+                }
+            }
+        }
+        let rest = &self.buf[self.pos..];
+        match find_json_string_value(rest, "type") {
+            Some((value, end)) if value == "final" => {
+                // Position just inside `content`'s opening quote.
+                match find_key_open_quote(&rest[end..], "content") {
+                    Some(open) => {
+                        self.pos += end + open;
+                        self.state = StreamParse::InContent;
+                    }
+                    None if self.buf.len() > 4096 => self.state = StreamParse::Suppressed,
+                    None => return false,
+                }
+            }
+            Some(_) => self.state = StreamParse::Suppressed,
+            None => {
+                if self.buf.len() > 4096 {
+                    self.state = StreamParse::Suppressed;
+                } else {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// Find `"key"` followed by `:` then a `"` — returns byte offset of the
+/// position just after that opening quote (i.e. inside the string value).
+/// Returns None when the pattern isn't complete yet.
+fn find_key_open_quote(s: &str, key: &str) -> Option<usize> {
+    let pat = format!("\"{key}\"");
+    let kstart = s.find(&pat)?;
+    let after = &s[kstart + pat.len()..];
+    let colon = after.find(':')?;
+    let q = after[colon + 1..].find('"')?;
+    Some(kstart + pat.len() + colon + 1 + q + 1)
+}
+
+/// Find `"key": "<value>"` — returns (value, offset just past the closing
+/// quote). Used for the `"type"` discriminant (values are simple strings).
+fn find_json_string_value(s: &str, key: &str) -> Option<(String, usize)> {
+    let open = find_key_open_quote(s, key)?;
+    let rest = &s[open..];
+    let close = rest.find('"')?;
+    Some((rest[..close].to_string(), open + close + 1))
 }

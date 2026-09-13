@@ -3,21 +3,32 @@
 Phases are *capability* milestones, not dates. Each keeps the platform
 green: `scripts/test.sh` passes on every merge.
 
-## ✅ V0 — Groundwork (this PR)
+## ✅ V0 — Groundwork
 
 Monorepo, Rust core crates, FFI boundary, Flutter shell, vertical slice
 (remember → recall → calculator → permission → audit), CLI, docs + ADRs.
 
-## V1 — Usable local assistant
+## ✅ V1 — Usable local assistant
 
-- Interactive approval UI in Flutter (`ApprovalRequest` sheets, policy editor)
-- Streaming token events through FFI (`EventStream` → Dart stream)
-- llama.cpp auto-detect: find `llama-server`/Ollama, suggest installable
-  models from the catalog, one-command `pai models install` + serve
-- Conversation management (list/rename/delete, per-conversation memory scope)
-- `memory.forget` tool + memory browser screen
-- Crash-safe run resume (persist run state per step)
-- `cargo audit` + `cargo deny` in CI; signed commits policy
+- Interactive approval UI in Flutter (`ApprovalRequest` sheets → `pai_approve`,
+  policy editor backed by the persisted `policies` table)
+- Streaming token events through FFI (`EventStream` + SSE for llama.cpp/
+  OpenAI-compatible servers → `pai_set_event_callback` → Dart stream;
+  `FinalStream` decodes only the `final` action's content)
+- Local inference auto-detect (`pai models detect` / `provider: "auto"`;
+  llama-server / Ollama / LM Studio `/v1/models` probing + PATH binaries)
+- Hugging Face as a first-class model source: `hf://owner/repo/file.gguf`
+  refs, `pai models search` / `pai models files`, LFS sha256 verification,
+  `pai models serve` via a local `llama-server`
+- Conversation management (persisted sessions/conversations/messages,
+  list/rename/delete/select, per-conversation shared|isolated memory scope)
+- `memory.forget` tool (approval-gated via `Permission::MemoryDelete`) +
+  memory browser screen
+- Crash-safe run resume (`agent_runs` checkpoints per step, `pai_runs` /
+  `pai_resume`, `pai runs interrupted|resume|abandon`)
+- `cargo audit` + `cargo deny` in CI (`deny.toml`); signed-commit policy in
+  docs/SECURITY.md
+- Schema v2 migration (ADR 0012); FFI event/approval design (ADR 0013)
 
 ## V1.1 — Hardening & device features
 
@@ -52,10 +63,12 @@ Monorepo, Rust core crates, FFI boundary, Flutter shell, vertical slice
 | Device keys file-backed | keystore is per-OS work | V1.1 |
 | LWW merge only | CRDT per-kind is V2 design | V2 |
 | Brute-force cosine recall | fine <100k memories | `sqlite-vec` in V2 |
-| Auto-approve in CLI demo | approval UX is UI work | V1.1 |
+| Auto-approve in CLI (`chat` still uses it) | interactive CLI prompts | V1.1 |
 | `pai_send` blocking per handle | run-per-runtime model | V1 concurrency |
+| Resume re-asks approvals (no double-charge guarantee) | approval is ephemeral by design | revisit in V2 |
 | Approval has no rate-limit/audit-escalation | needs UX spec | V1.1 |
 | No provider health/failover | single provider config | V2 broker |
+| `hf://` resolve isn't pinned by default | `@rev` supported; pin for reproducibility | V1.1 |
 
 ## Cross-cutting risks
 

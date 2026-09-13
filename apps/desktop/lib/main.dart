@@ -1,44 +1,50 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import 'pai_bridge.dart';
 
-void main() {
-  runApp(const PaiApp());
-}
+void main() => runApp(const PaiApp());
 
 class PaiApp extends StatelessWidget {
   const PaiApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Personal AI',
-      theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
-      home: const ChatScreen(),
-    );
-  }
+  Widget build(BuildContext context) => MaterialApp(
+        title: 'Personal AI',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF6C5CE7), brightness: Brightness.dark),
+          useMaterial3: true,
+        ),
+        home: const ChatScreen(),
+      );
 }
 
+/// One chat transcript row. `streaming` marks the in-flight assistant reply.
 class _Entry {
-  _Entry(this.role, this.text);
-  final String role; // 'you' | 'ai' | 'system'
+  _Entry({required this.role, this.text = '', this.sub = '', this.streaming = false, this.isError = false});
+  final String role; // you | ai | system
   String text;
+  String sub;
+  bool streaming;
+  bool isError;
 }
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
-
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
 class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
-  final _entries = <_Entry>[];
-  PaiBridge? _bridge;
+  final _scroll = ScrollController();
+  PaiBridge? _pai;
   String? _error;
-  bool _busy = false;
+  bool _sending = false;
+  final _entries = <_Entry>[];
+  List<dynamic> _convs = const [];
+  List<dynamic> _interrupted = const [];
 
   @override
   void initState() {
@@ -47,120 +53,699 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _init() async {
+    final dataDir = Platform.environment['PAI_DATA_DIR'] ??
+        '${Directory.current.path}/.pai-data';
+    // 'auto' probes llama-server / Ollama / LM Studio, falls back to echo.
+    final provider = Platform.environment['PAI_PROVIDER'] ?? 'auto';
     try {
-      final dir = await getApplicationSupportDirectory();
-      // Default to the deterministic offline provider; set provider to
-      // 'llama-server' + a running local server for real model output.
-      _bridge = await PaiBridge.start({
-        'data_dir': '${dir.path}/personal-ai',
-        'provider': Platform.environment['PAI_PROVIDER'] ?? 'echo',
-        'server_url':
-            Platform.environment['PAI_SERVER'] ?? 'http://127.0.0.1:8080',
-        if (Platform.environment['PAI_MODEL'] != null)
-          'model': Platform.environment['PAI_MODEL'],
-      });
-      setState(() {
-        _entries.add(_Entry('system',
-            'Local-first · free models · every action is permission-gated and audited.'));
-      });
+      final bridge = await PaiBridge.start(
+          {'data_dir': dataDir, 'provider': provider});
+      if (!mounted) return;
+      setState(() => _pai = bridge);
+      await _loadHistory();
+      await _refreshConvs();
+      final runs = await _pai!.runs();
+      if (mounted) setState(() => _interrupted = runs);
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => _error = 'Core init failed: $e\n'
+          '(build the core: cargo build -p pai-ffi)');
     }
+  }
+
+  Future<void> _refreshConvs() async {
+    if (_pai == null) return;
+    final convs = await _pai!.conversations();
+    if (mounted) setState(() => _convs = convs);
+  }
+
+  Future<void> _loadHistory() async {
+    if (_pai == null) return;
+    final msgs = await _pai!.history();
+    if (!mounted) return;
+    setState(() {
+      _entries
+        ..clear()
+        ..addAll(msgs.map(_messageToEntry).whereType<_Entry>());
+    });
+  }
+
+  _Entry? _messageToEntry(dynamic m) {
+    if (m is! Map) return null;
+    final role = m['role'];
+    if (role == 'system' || role == 'tool') return null;
+    final text = (m['content'] as List? ?? [])
+        .where((c) => c is Map && c['type'] == 'text')
+        .map((c) => c['text'] as String? ?? '')
+        .join('');
+    return _Entry(role: role == 'user' ? 'you' : 'ai', text: text);
+  }
+
+  void _scrollDown() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
   }
 
   Future<void> _send() async {
     final text = _input.text.trim();
-    if (text.isEmpty || _bridge == null) return;
+    if (text.isEmpty || _pai == null || _sending) return;
     _input.clear();
+    final user = _Entry(role: 'you', text: text);
+    final ai = _Entry(role: 'ai', streaming: true);
     setState(() {
-      _entries.add(_Entry('you', text));
-      _busy = true;
+      _entries.add(user);
+      _entries.add(ai);
+      _sending = true;
     });
-    final result = await _bridge!.send(text);
-    setState(() {
-      _busy = false;
-      for (final e in (result['events'] as List? ?? [])) {
-        if (e['kind'] == 'tool_executed') {
-          _entries.add(_Entry('system', '⚙ ${e['tool']}: ${e['summary']}'));
-        }
-        if (e['kind'] == 'tool_denied') {
-          _entries.add(_Entry('system', '⛔ denied: ${e['tool']}'));
-        }
+    _scrollDown();
+
+    var streamed = false;
+    final handle = _pai!.sendStreaming(text);
+    // Drain the event stream to completion: pending `add`s are flushed
+    // before the controller closes, which happens when `result` arrives.
+    final eventsDone = () async {
+      await for (final ev in handle.events) {
+        _onEvent(ev, ai, () => streamed = true, () => streamed);
       }
-      _entries.add(_Entry('ai',
-          result['answer'] as String? ?? result['error'] as String? ?? '…'));
+    }();
+    final result = await handle.result;
+    await eventsDone;
+    if (!mounted) return;
+    setState(() {
+      ai.streaming = false;
+      if (!streamed && result['answer'] != null) {
+        ai.text = result['answer'] as String;
+      }
+      if (result['error'] != null && ai.text.isEmpty) {
+        ai
+          ..isError = true
+          ..text = 'error: ${result['error']}';
+      }
+      _sending = false;
     });
+    _scrollDown();
+  }
+
+  void _onEvent(Map<String, dynamic> ev, _Entry ai, void Function() markStreamed,
+      bool Function() isStreamed) {
+    if (!mounted) return;
+    switch (ev['type']) {
+      case 'run_started':
+        setState(() => ai.sub = 'run ${(ev['run'] as String? ?? '').substring(0, 8)}');
+      case 'step':
+        setState(() => ai.sub = 'step ${ev['index']}');
+      case 'tool_call_requested':
+        setState(() => _entries.add(_Entry(
+            role: 'system', text: 'tool call: ${ev['tool']} (${ev['risk']})')));
+      case 'approval_needed':
+        _showApproval(ev['request'] as Map<String, dynamic>);
+      case 'tool_executed':
+        setState(() => _entries.add(_Entry(
+            role: 'system', text: '${ev['tool']}: ${ev['summary']}')));
+      case 'tool_denied':
+        setState(() => _entries
+            .add(_Entry(role: 'system', text: 'denied: ${ev['tool']}')));
+      case 'text_delta':
+        markStreamed();
+        setState(() => ai.text += (ev['text'] as String? ?? ''));
+        _scrollDown();
+      case 'done':
+        setState(() {
+          ai.streaming = false;
+          if (!isStreamed() && ev['answer'] != null) {
+            ai.text = ev['answer'] as String;
+          }
+          ai.sub = 'state: ${ev['state']}';
+        });
+    }
+  }
+
+  Future<void> _showApproval(Map<String, dynamic> req) async {
+    final granted = await showModalBottomSheet<bool>(
+      context: context,
+      isDismissible: false,
+      enableDrag: false,
+      builder: (ctx) => _ApprovalSheet(req: req),
+    );
+    await _pai!.approve(req['tool_call'] as String, granted ?? false);
+  }
+
+  Future<void> _selectConversation(String id) async {
+    final res = await _pai!.conversationSelect(id);
+    if (res['error'] == null) {
+      final msgs = res['messages'] as List? ?? [];
+      setState(() {
+        _entries
+          ..clear()
+          ..addAll(msgs.map(_messageToEntry).whereType<_Entry>());
+      });
+      await _refreshConvs();
+    }
+    if (mounted) Navigator.of(context).maybePop();
+  }
+
+  Future<void> _newConversation({bool isolated = false}) async {
+    await _pai!.conversationNew(isolated: isolated);
+    setState(_entries.clear);
+    await _refreshConvs();
+    if (mounted) Navigator.of(context).maybePop();
+  }
+
+  Future<void> _resumeRun(String runId) async {
+    if (_sending) return;
+    final ai = _Entry(role: 'ai', streaming: true, sub: 'resuming…');
+    setState(() {
+      _sending = true;
+      _entries.add(ai);
+    });
+    final res = await _pai!.resume(runId);
+    if (!mounted) return;
+    setState(() {
+      ai.streaming = false;
+      ai.sub = 'resumed run';
+      ai.text = (res['answer'] as String?) ?? (res['error'] as String?) ?? '';
+      _sending = false;
+    });
+    final runs = await _pai!.runs();
+    if (mounted) setState(() => _interrupted = runs);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Personal AI'),
+        actions: [
+          if (_sending)
+            IconButton(
+              icon: const Icon(Icons.stop_circle_outlined),
+              tooltip: 'Cancel run',
+              onPressed: () => _pai?.cancel(),
+            ),
+          IconButton(
+            icon: const Icon(Icons.psychology_outlined),
+            tooltip: 'Memories',
+            onPressed: _pai == null
+                ? null
+                : () => Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => MemoriesScreen(bridge: _pai!))),
+          ),
+          IconButton(
+            icon: const Icon(Icons.policy_outlined),
+            tooltip: 'Permissions',
+            onPressed: _pai == null
+                ? null
+                : () => Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => PoliciesScreen(bridge: _pai!))),
+          ),
+        ],
+      ),
+      drawer: _pai == null
+          ? null
+          : _ConvDrawer(
+              convs: _convs,
+              interrupted: _interrupted,
+              onSelect: _selectConversation,
+              onNew: _newConversation,
+              onResume: _resumeRun,
+              onRename: (id, title) async {
+                await _pai!.conversationRename(id, title);
+                await _refreshConvs();
+              },
+              onDelete: (id) async {
+                await _pai!.conversationDelete(id);
+                await _refreshConvs();
+                await _loadHistory();
+              },
+              onScope: (id, mode) async {
+                await _pai!.conversationSetMemory(id, mode);
+                await _refreshConvs();
+              },
+            ),
+      body: Column(children: [
+        if (_error != null)
+          MaterialBanner(
+              content: Text(_error!),
+              actions: const [SizedBox.shrink()],
+              backgroundColor: cs.errorContainer),
+        if (_interrupted.isNotEmpty)
+          MaterialBanner(
+            content: Text(
+                '${_interrupted.length} interrupted run(s) — resume from the drawer'),
+            actions: const [SizedBox.shrink()],
+          ),
+        Expanded(
+          child: _entries.isEmpty
+              ? Center(
+                  child: Text(
+                    _pai == null
+                        ? (_error == null ? 'starting…' : '')
+                        : 'local-first · private · auditable',
+                    style: TextStyle(color: cs.onSurfaceVariant),
+                  ))
+              : ListView.builder(
+                  controller: _scroll,
+                  padding: const EdgeInsets.all(12),
+                  itemCount: _entries.length,
+                  itemBuilder: (_, i) => _Bubble(entry: _entries[i]),
+                ),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _input,
+                onSubmitted: (_) => _send(),
+                decoration: InputDecoration(
+                  hintText: _pai == null
+                      ? 'waiting for core…'
+                      : 'message — try "remember that I like tea"',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton.filled(
+                onPressed: _send, icon: const Icon(Icons.send)),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
+class _Bubble extends StatelessWidget {
+  const _Bubble({required this.entry});
+  final _Entry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final e = entry;
+    final isYou = e.role == 'you';
+    final isSys = e.role == 'system';
+    return Align(
+      alignment: isYou ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        constraints: const BoxConstraints(maxWidth: 560),
+        decoration: BoxDecoration(
+          color: isYou
+              ? cs.primaryContainer
+              : isSys
+                  ? cs.surfaceContainerHighest.withValues(alpha: 0.5)
+                  : cs.secondaryContainer,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(
+            isYou ? 'you' : isSys ? 'event' : 'ai',
+            style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: cs.onSecondaryContainer.withValues(alpha: 0.6)),
+          ),
+          if (e.text.isNotEmpty || !e.streaming) Text(e.text),
+          if (e.streaming && e.text.isEmpty)
+            const SizedBox(
+                height: 16,
+                width: 16,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+          if (e.sub.isNotEmpty)
+            Text(e.sub,
+                style: TextStyle(
+                    fontSize: 10,
+                    color: cs.onSecondaryContainer.withValues(alpha: 0.5))),
+        ]),
+      ),
+    );
+  }
+}
+
+/// Modal approval sheet — Approve/Deny resolve the pending tool call via
+/// `pai_approve`; closing without a choice denies (fail closed).
+class _ApprovalSheet extends StatelessWidget {
+  const _ApprovalSheet({required this.req});
+  final Map<String, dynamic> req;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final perms = (req['permissions'] as List? ?? []).join(', ');
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.shield_outlined, color: cs.primary),
+            const SizedBox(width: 8),
+            Text('Approval needed',
+                style: Theme.of(context).textTheme.titleLarge),
+          ]),
+          const SizedBox(height: 16),
+          Text('${req['tool']}',
+              style: const TextStyle(fontWeight: FontWeight.bold)),
+          Text('${req['summary']}'),
+          const SizedBox(height: 8),
+          Wrap(spacing: 6, children: [
+            Chip(
+              label: Text('risk: ${req['risk']}',
+                  style: const TextStyle(fontSize: 11)),
+              visualDensity: VisualDensity.compact,
+            ),
+            Chip(
+              label: Text(perms, style: const TextStyle(fontSize: 11)),
+              visualDensity: VisualDensity.compact,
+            ),
+          ]),
+          const SizedBox(height: 20),
+          Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Deny'),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(true),
+              icon: const Icon(Icons.check),
+              label: const Text('Approve'),
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConvDrawer extends StatelessWidget {
+  const _ConvDrawer({
+    required this.convs,
+    required this.interrupted,
+    required this.onSelect,
+    required this.onNew,
+    required this.onResume,
+    required this.onRename,
+    required this.onDelete,
+    required this.onScope,
+  });
+  final List<dynamic> convs;
+  final List<dynamic> interrupted;
+  final void Function(String id) onSelect;
+  final void Function({bool isolated}) onNew;
+  final void Function(String runId) onResume;
+  final void Function(String id, String title) onRename;
+  final void Function(String id) onDelete;
+  final void Function(String id, String mode) onScope;
+
+  @override
+  Widget build(BuildContext context) {
+    return Drawer(
+      child: SafeArea(
+        child: ListView(children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(children: [
+              Text('Chats', style: Theme.of(context).textTheme.titleMedium),
+              const Spacer(),
+              IconButton(
+                  tooltip: 'New chat',
+                  icon: const Icon(Icons.add),
+                  onPressed: () => onNew()),
+              IconButton(
+                  tooltip: 'New isolated chat (private memory)',
+                  icon: const Icon(Icons.enhanced_encryption_outlined),
+                  onPressed: () => onNew(isolated: true)),
+            ]),
+          ),
+          for (final c in convs)
+            ListTile(
+              selected: c['active'] == true,
+              leading: Icon(c['memory'] == 'isolated'
+                  ? Icons.lock_outline
+                  : Icons.chat_bubble_outline),
+              title: Text('${c['title'] ?? 'Untitled'}',
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text('${c['memory']}',
+                  style: const TextStyle(fontSize: 11)),
+              onTap: () => onSelect(c['id'] as String),
+              trailing: PopupMenuButton<String>(
+                itemBuilder: (_) => [
+                  const PopupMenuItem(value: 'rename', child: Text('Rename')),
+                  PopupMenuItem(
+                      value: 'scope',
+                      child: Text(c['memory'] == 'isolated'
+                          ? 'Share memory'
+                          : 'Isolate memory')),
+                  const PopupMenuItem(value: 'delete', child: Text('Delete')),
+                ],
+                onSelected: (v) => _menu(context, v, c),
+              ),
+            ),
+          if (interrupted.isNotEmpty) ...[
+            const Divider(),
+            const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('Interrupted runs')),
+            for (final r in interrupted)
+              ListTile(
+                leading: const Icon(Icons.replay),
+                title: Text('${(r['id'] as String).substring(0, 8)} · ${r['state']}'),
+                subtitle: Text('${r['started_at']}',
+                    style: const TextStyle(fontSize: 11)),
+                trailing: IconButton(
+                    icon: const Icon(Icons.play_arrow),
+                    onPressed: () => onResume(r['id'] as String)),
+              ),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  void _menu(BuildContext context, String v, dynamic c) {
+    switch (v) {
+      case 'rename':
+        final ctrl = TextEditingController(text: c['title'] as String? ?? '');
+        showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+                  title: const Text('Rename chat'),
+                  content: TextField(controller: ctrl, autofocus: true),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text('Cancel')),
+                    FilledButton(
+                        onPressed: () {
+                          onRename(c['id'] as String, ctrl.text.trim());
+                          Navigator.pop(ctx);
+                        },
+                        child: const Text('Save')),
+                  ],
+                ));
+      case 'scope':
+        onScope(c['id'] as String,
+            c['memory'] == 'isolated' ? 'shared' : 'isolated');
+      case 'delete':
+        showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+                  title: const Text('Delete chat?'),
+                  content:
+                      const Text('Messages are removed; memories are kept.'),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text('Cancel')),
+                    FilledButton(
+                        style: FilledButton.styleFrom(
+                            backgroundColor:
+                                Theme.of(ctx).colorScheme.error),
+                        onPressed: () {
+                          onDelete(c['id'] as String);
+                          Navigator.pop(ctx);
+                        },
+                        child: const Text('Delete')),
+                  ],
+                ));
+    }
+  }
+}
+
+/// Memory browser: every remembered item with scope/privacy provenance and
+/// a forget action (soft-delete + audit record).
+class MemoriesScreen extends StatefulWidget {
+  const MemoriesScreen({super.key, required this.bridge});
+  final PaiBridge bridge;
+  @override
+  State<MemoriesScreen> createState() => _MemoriesScreenState();
+}
+
+class _MemoriesScreenState extends State<MemoriesScreen> {
+  List<dynamic> _items = const [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final items = await widget.bridge.memories();
+    if (mounted) setState(() { _items = items; _loading = false; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Memories')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _items.isEmpty
+              ? const Center(child: Text('nothing remembered yet'))
+              : ListView.builder(
+                  itemCount: _items.length,
+                  itemBuilder: (_, i) {
+                    final m = _items[i];
+                    final conv = m['conversation'];
+                    return Card(
+                      margin: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 4),
+                      child: ListTile(
+                        title: Text('${m['content']}'),
+                        subtitle: Wrap(spacing: 6, children: [
+                          Chip(
+                              label: Text('${m['scope']}',
+                                  style: const TextStyle(fontSize: 10)),
+                              visualDensity: VisualDensity.compact),
+                          Chip(
+                              label: Text('${m['source']}',
+                                  style: const TextStyle(fontSize: 10)),
+                              visualDensity: VisualDensity.compact),
+                          Chip(
+                              label: Text(
+                                  conv == null
+                                      ? 'global'
+                                      : 'chat ${(conv as String).substring(0, 8)}',
+                                  style: const TextStyle(fontSize: 10)),
+                              visualDensity: VisualDensity.compact),
+                          Chip(
+                              label: Text('${m['privacy']}',
+                                  style: const TextStyle(fontSize: 10)),
+                              visualDensity: VisualDensity.compact),
+                        ]),
+                        trailing: IconButton(
+                          icon: Icon(Icons.delete_outline, color: cs.error),
+                          tooltip: 'Forget',
+                          onPressed: () => _forget(m),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+    );
+  }
+
+  Future<void> _forget(dynamic m) async {
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              title: const Text('Forget this?'),
+              content: Text('"${m['content']}"'),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('Cancel')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Forget')),
+              ],
+            ));
+    if (ok == true) {
+      await widget.bridge.forget(m['id'] as String);
+      await _load();
+    }
+  }
+}
+
+/// Policy editor — every permission, its current policy, and a selector.
+/// Changes apply immediately and persist in the local DB.
+class PoliciesScreen extends StatefulWidget {
+  const PoliciesScreen({super.key, required this.bridge});
+  final PaiBridge bridge;
+  @override
+  State<PoliciesScreen> createState() => _PoliciesScreenState();
+}
+
+class _PoliciesScreenState extends State<PoliciesScreen> {
+  List<dynamic> _rows = const [];
+  bool _loading = true;
+
+  static const _policies = [
+    'ALWAYS_ALLOW',
+    'ASK_USER',
+    'ALLOW_WITH_RULE',
+    'NEVER_ALLOW',
+  ];
+  static const _labels = {
+    'ALWAYS_ALLOW': 'Always allow',
+    'ASK_USER': 'Ask me first',
+    'ALLOW_WITH_RULE': 'Allow by rule',
+    'NEVER_ALLOW': 'Never allow',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final rows = await widget.bridge.policies();
+    if (mounted) setState(() { _rows = rows; _loading = false; });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Personal AI')),
-      body: Column(
-        children: [
-          if (_error != null)
-            MaterialBanner(
-              content: Text('Init failed: $_error'),
-              actions: [TextButton(onPressed: _init, child: const Text('Retry'))],
-            ),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: _entries.length,
-              itemBuilder: (context, i) {
-                final e = _entries[i];
-                final isYou = e.role == 'you';
-                final isSys = e.role == 'system';
-                return Align(
-                  alignment:
-                      isYou ? Alignment.centerRight : Alignment.centerLeft,
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(vertical: 4),
-                    padding: const EdgeInsets.all(10),
-                    constraints: const BoxConstraints(maxWidth: 480),
-                    decoration: BoxDecoration(
-                      color: isSys
-                          ? Theme.of(context).colorScheme.surfaceContainerHighest
-                          : isYou
-                              ? Theme.of(context).colorScheme.primaryContainer
-                              : Theme.of(context).colorScheme.secondaryContainer,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(e.text,
-                        style: isSys
-                            ? Theme.of(context).textTheme.bodySmall
-                            : Theme.of(context).textTheme.bodyMedium),
+      appBar: AppBar(title: const Text('Permissions')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView.builder(
+              itemCount: _rows.length,
+              itemBuilder: (_, i) {
+                final r = _rows[i];
+                return ListTile(
+                  title: Text('${r['permission']}',
+                      style: const TextStyle(
+                          fontFamily: 'monospace', fontSize: 13)),
+                  trailing: DropdownButton<String>(
+                    value: '${r['policy']}',
+                    underline: const SizedBox.shrink(),
+                    items: _policies
+                        .map((p) => DropdownMenuItem(
+                            value: p, child: Text(_labels[p] ?? p)))
+                        .toList(),
+                    onChanged: (v) async {
+                      if (v == null) return;
+                      await widget.bridge
+                          .setPolicy('${r['permission']}', v);
+                      await _load();
+                    },
                   ),
                 );
               },
             ),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _input,
-                      onSubmitted: (_) => _send(),
-                      decoration: const InputDecoration(
-                        hintText: 'Say something — "remember that…", "what is 2 + 3?"',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton.filled(
-                    onPressed: _busy ? null : _send,
-                    icon: const Icon(Icons.send),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
