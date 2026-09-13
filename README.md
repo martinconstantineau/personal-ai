@@ -6,6 +6,9 @@ documents stay on your devices; inference runs on free, local models.
 
 **The model is replaceable. The platform is not.**
 
+Canonical repo: [GitLab](https://gitlab.com/martin.constantineau.ca/personal-ai)
+(GitHub is a read mirror that also runs CI).
+
 - 🖥️ **Cross-platform** — Rust core compiles to Linux, macOS, Windows, iOS,
   Android. Flutter UI shares one codebase across all of them.
 - 🆓 **Free models only** — inference via `llama-server` (llama.cpp), Ollama,

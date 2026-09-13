@@ -29,7 +29,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/martinconstantineau/personal-ai"
+repository = "https://gitlab.com/martin.constantineau.ca/personal-ai"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
