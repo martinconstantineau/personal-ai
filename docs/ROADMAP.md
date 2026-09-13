@@ -30,14 +30,24 @@ Monorepo, Rust core crates, FFI boundary, Flutter shell, vertical slice
   docs/SECURITY.md
 - Schema v2 migration (ADR 0012); FFI event/approval design (ADR 0013)
 
-## V1.1 — Hardening & device features
+## ✅ V1.1 — Hardening & device features
 
-- At-rest encryption for `store.db` (SQLCipher or age-wrapped key)
-- OS-keystore-backed device keys (iOS Keychain / Android Keystore / libsecret)
-- Sandboxed tool execution profiles (`ExecutionMode` → seccomp/AppArmor)
-- Interactive approvals in CLI (replace `AutoApprove` in `chat`)
-- Ollama provider polish + embedding endpoint for vector recall
-- Document ingest UI + RAG answers with citations
+- At-rest encryption: SQLCipher (vendored, `rusqlite` `bundled-sqlcipher`)
+  for `personal-ai.db`; raw 256-bit key via OS keystore (Windows Credential
+  Manager / macOS Keychain / Secret Service) with 0600 file fallback;
+  plaintext DBs auto-migrate via `sqlcipher_export` (ADR 0014)
+- Device keys (Ed25519 + store key) in `pai_identity::keystore`; schema v3
+  records `devices.key_storage`
+- Interactive CLI approvals: `pai chat`/`pai runs resume` prompt on
+  AskUser policies (tool, action, permissions, risk); deny fails closed
+- Ollama embeddings: `Embedder` trait + `OllamaEmbedder` (`/api/tags`
+  auto-detect, `nomic-embed-text` et al.); auto-embed on `memory.put`
+  and `recall`, brute-force cosine merged with FTS
+- Documents: `DocumentStore` (txt/md/html → chunks → FTS + section
+  embeddings), `documents.search`/`documents.ingest` tools with `[Dn]`
+  citations, `pai docs` CLI + FFI + Flutter Documents screen
+- Filesystem jail for model-driven file reads (`ToolContext::allowed_roots`
+  = `<data_dir>/inbox`); user-initiated ingest bypasses
 
 ## V2 — Connected devices
 
@@ -59,16 +69,16 @@ Monorepo, Rust core crates, FFI boundary, Flutter shell, vertical slice
 
 | Item | Why it's deferred | Exit |
 |---|---|---|
-| Store not encrypted at rest | needs key mgmt decision | V1.1 |
-| Device keys file-backed | keystore is per-OS work | V1.1 |
 | LWW merge only | CRDT per-kind is V2 design | V2 |
 | Brute-force cosine recall | fine <100k memories | `sqlite-vec` in V2 |
-| Auto-approve in CLI (`chat` still uses it) | interactive CLI prompts | V1.1 |
 | `pai_send` blocking per handle | run-per-runtime model | V1 concurrency |
 | Resume re-asks approvals (no double-charge guarantee) | approval is ephemeral by design | revisit in V2 |
-| Approval has no rate-limit/audit-escalation | needs UX spec | V1.1 |
+| Approval has no rate-limit/audit-escalation | needs UX spec | V2 |
 | No provider health/failover | single provider config | V2 broker |
-| `hf://` resolve isn't pinned by default | `@rev` supported; pin for reproducibility | V1.1 |
+| `hf://` resolve isn't pinned by default | `@rev` supported; pin for reproducibility | V2 |
+| Tool sandbox is in-process (path jail + capability ctx), not OS-level | seccomp/AppArmor needs subprocess isolation | V2 |
+| OS-keystore key loss = data loss | same trust domain as OS login | passphrase wrap option, V2 |
+| PDF/EPUB/DOCX extractors declared not implemented | adapters needed | V2 |
 
 ## Cross-cutting risks
 

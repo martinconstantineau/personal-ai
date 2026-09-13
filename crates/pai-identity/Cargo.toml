@@ -16,3 +16,5 @@ chrono.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
 rusqlite.workspace = true
+keyring.workspace = true
+tracing.workspace = true

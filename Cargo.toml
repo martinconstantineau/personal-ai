@@ -40,7 +40,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 futures = "0.3"
@@ -53,6 +53,8 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+  keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "sync-secret-service"] }
+  chacha20poly1305 = "0.10"
 
 pai-core = { path = "crates/pai-core" }
 pai-config = { path = "crates/pai-config" }

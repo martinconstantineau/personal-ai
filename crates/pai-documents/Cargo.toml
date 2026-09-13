@@ -14,5 +14,6 @@ uuid.workspace = true
 chrono.workspace = true
 pai-storage.workspace = true
 pai-inference.workspace = true
+pai-memory.workspace = true
 rusqlite.workspace = true
 tracing.workspace = true

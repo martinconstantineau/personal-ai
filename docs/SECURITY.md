@@ -44,8 +44,26 @@ Emergency/manual commits by maintainers follow the same rule — no
 
 - Everything lives in `~/.local/share/personal-ai/` (or `--data-dir`);
   nothing leaves the device unless you install a connector.
+- **`personal-ai.db` is encrypted at rest** (SQLCipher, AES-256-CBC). The
+  256-bit key lives in the OS keystore — Windows Credential Manager, macOS
+  Keychain, or Linux Secret Service — falling back to a `store.key` file
+  with owner-only permissions where no keystore exists (headless Linux).
+  Plaintext databases are migrated on first open; `PAI_PLAINTEXT_STORE=1`
+  is the documented escape hatch for debugging/recovery.
+- Device Ed25519 signing keys use the same keystore path, recorded in
+  `devices.key_storage`.
 - Audit log (`pai audit`) records every tool execution, approval decision,
   memory write/delete, and policy change — check it first when something
   looks wrong.
-- Known gaps being tracked on the roadmap: at-rest encryption, OS keystore
-  for the device key, sandboxed tool execution (V1.1).
+
+## Threat-model limits (honest)
+
+- At-rest encryption protects the file at rest — not a running process's
+  memory, and not against malware running as your user (the OS keystore
+  answers any process in your session).
+- Tool sandboxing is **in-process**: capability-scoped `ToolContext` plus a
+  filesystem jail (`allowed_roots`, default `<data_dir>/inbox`) for
+  model-driven file reads. It is not an OS sandbox — real seccomp/
+  AppArmor-style isolation needs a subprocess boundary and is V2 work.
+- A lost OS-keystore key = a lost database. Keep the `store.key` fallback
+  file backed up if you rely on the file path.

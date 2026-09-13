@@ -59,6 +59,7 @@ pub struct PaiRuntime {
     cancel: Arc<Mutex<CancelToken>>,
     store: Arc<Store>,
     device: DeviceId,
+    documents: Arc<pai_documents::DocumentStore>,
 }
 
 #[derive(Deserialize)]
@@ -97,7 +98,9 @@ impl ApprovalHandler for UiApproval {
 
 fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
     let data_dir = std::path::PathBuf::from(&cfg.data_dir);
-    let store = Arc::new(Store::open(&data_dir)?);
+    std::fs::create_dir_all(&data_dir).map_err(|e| Error::Storage(e.to_string()))?;
+    let key = pai_identity::keystore::store_key(&data_dir);
+    let store = Arc::new(Store::open(&data_dir, key.as_ref())?);
     let rt = tokio::runtime::Runtime::new().map_err(|e| Error::Other(e.to_string()))?;
 
     let ids = pai_identity::IdentityStore::new(store.clone());
@@ -111,7 +114,6 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         &key_dir,
     )?;
 
-    let memory: Arc<dyn MemoryBackend> = Arc::new(SqliteMemory::new(store.clone()));
     let audit = Arc::new(pai_audit::AuditLog::new(store.clone()));
     let conversations = Arc::new(ConversationStore::new(store.clone()));
     let runs = Arc::new(RunStore::new(store.clone()));
@@ -137,6 +139,26 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         }
     }
 
+    // Vector recall: probe the resolved server for an Ollama embedding
+    // model (/api/tags is Ollama-only, so detection is self-gating).
+    let embedder = rt
+        .block_on(pai_memory::OllamaEmbedder::detect(
+            &server_url,
+            Duration::from_secs(2),
+        ))
+        .map(Arc::new);
+    let mut mem_impl = SqliteMemory::new(store.clone());
+    let mut doc_impl = pai_documents::DocumentStore::new(store.clone());
+    if let Some(e) = &embedder {
+        mem_impl = mem_impl.with_embedder(e.clone());
+        doc_impl = doc_impl.with_embedder(e.clone());
+    }
+    let memory: Arc<dyn MemoryBackend> = Arc::new(mem_impl);
+    let documents = Arc::new(doc_impl);
+    // Tool-file jail: model-driven reads confined to <data_dir>/inbox.
+    let inbox = data_dir.join("inbox");
+    std::fs::create_dir_all(&inbox).ok();
+
     let mut providers = pai_inference::ProviderRegistry::default();
     providers.register(Arc::new(EchoProvider));
     providers.register(Arc::new(
@@ -157,6 +179,8 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
             conversations: conversations.clone(),
             runs: runs.clone(),
         }),
+        documents: Some(documents.clone()),
+        allowed_roots: vec![inbox],
     };
 
     // Active conversation: restored, or a fresh one.
@@ -206,6 +230,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         cancel: Arc::new(Mutex::new(CancelToken::default())),
         store,
         device: device.id,
+        documents,
     })
 }
 
@@ -809,6 +834,124 @@ pub unsafe extern "C" fn pai_forget(
             let _ = rt.audit.record(&e);
             to_c(serde_json::json!({"deleted_id": id.to_string(), "content": item.content}))
         }
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Documents — ingest/list/search/delete for the Flutter Documents screen
+// ---------------------------------------------------------------------------
+
+/// List ingested documents.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_docs(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    match rt.documents.list() {
+        Ok(rows) => to_c(
+            rows.iter()
+                .map(|(id, title, mime, at, sections)| {
+                    serde_json::json!({
+                        "id": id.to_string(),
+                        "title": title,
+                        "mime": mime,
+                        "created_at": at.to_rfc3339(),
+                        "sections": sections,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Ingest a file path — user-initiated, so no tool jail applies.
+/// # Safety
+/// `handle` must come from `pai_init`; `path` is NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_docs_ingest(
+    handle: *mut PaiRuntime,
+    path: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let path = match read_str(path) {
+        Ok(p) => p,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let out = rt.rt.block_on(async {
+        let canon =
+            std::fs::canonicalize(path).map_err(|e| Error::InvalidInput(format!("{path}: {e}")))?;
+        let bytes =
+            std::fs::read(&canon).map_err(|e| Error::InvalidInput(format!("{canon:?}: {e}")))?;
+        let mime = match canon
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
+            "md" | "markdown" => "text/markdown",
+            "html" | "htm" => "text/html",
+            _ => "text/plain",
+        };
+        rt.documents
+            .ingest(&bytes, mime, canon.file_name().and_then(|n| n.to_str()))
+            .await
+    });
+    match out {
+        Ok(id) => to_c(serde_json::json!({"document_id": id.to_string()})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Search document sections (hybrid FTS + vector when an embedder is live).
+/// # Safety
+/// `handle` must come from `pai_init`; `query` is NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_docs_search(
+    handle: *mut PaiRuntime,
+    query: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let q = match read_str(query) {
+        Ok(q) => q,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let out = rt.rt.block_on(async { rt.documents.search(q, 10).await });
+    match out {
+        Ok(hits) => to_c(
+            hits.iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "document": h.document_id.to_string(),
+                        "title": h.title,
+                        "section": h.section,
+                        "snippet": h.snippet,
+                        "score": h.score,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Delete a document and its sections.
+/// # Safety
+/// `handle` must come from `pai_init`; `id` is a NUL-terminated uuid.
+#[no_mangle]
+pub unsafe extern "C" fn pai_docs_delete(
+    handle: *mut PaiRuntime,
+    id: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let id = match read_str(id).and_then(|s| parse_uuid(s, "document").map(DocumentId)) {
+        Ok(i) => i,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    match rt.documents.delete(id) {
+        Ok(()) => to_c(serde_json::json!({"deleted_id": id.to_string()})),
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
     }
 }

@@ -15,6 +15,7 @@ pai-permissions.workspace = true
 pai-tools.workspace = true
 pai-agent.workspace = true
 pai-audit.workspace = true
+pai-documents.workspace = true
 pai-config.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

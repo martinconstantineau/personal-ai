@@ -111,6 +111,15 @@ class PaiBridge {
       (await _call(_Op.setPolicy,
           arg: jsonEncode({'p': permission, 'x': policy}))) as Map<String, dynamic>;
 
+  /// Ingested documents.
+  Future<List<dynamic>> docs() async => (await _call(_Op.docs)) as List<dynamic>;
+  Future<Map<String, dynamic>> docsIngest(String path) async =>
+      (await _call(_Op.docsIngest, arg: path)) as Map<String, dynamic>;
+  Future<List<dynamic>> docsSearch(String query) async =>
+      (await _call(_Op.docsSearch, arg: query)) as List<dynamic>;
+  Future<Map<String, dynamic>> docsDelete(String id) async =>
+      (await _call(_Op.docsDelete, arg: id)) as Map<String, dynamic>;
+
   Future<dynamic> _call(_Op op,
       {String? arg, StreamController<Map<String, dynamic>>? events}) {
     final id = _nextId++;
@@ -197,6 +206,14 @@ class PaiBridge {
             final a = jsonDecode(req.arg!) as Map<String, dynamic>;
             result =
                 client.setPolicy(a['p'] as String, a['x'] as String);
+          case _Op.docs:
+            result = client.docs();
+          case _Op.docsIngest:
+            result = client.docsIngest(req.arg!);
+          case _Op.docsSearch:
+            result = client.docsSearch(req.arg!);
+          case _Op.docsDelete:
+            result = client.docsDelete(req.arg!);
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -235,6 +252,10 @@ enum _Op {
   convSetMemory,
   forget,
   setPolicy,
+  docs,
+  docsIngest,
+  docsSearch,
+  docsDelete,
 }
 
 class _InitError {
