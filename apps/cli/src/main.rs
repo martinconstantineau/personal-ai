@@ -379,10 +379,14 @@ enum BrokerCmd {
     },
     /// Send one request to a paired peer and wait for its response.
     Call {
-        /// Peer device id or unambiguous prefix (see `broker devices`).
+        /// Peer device id or unambiguous prefix (see `broker devices`),
+        /// or the literal `any` to route by announced capability.
         device: String,
         /// Operation: stt | tts | infer | describe.
         op: String,
+        /// Stream the response — chunks print as they arrive (infer).
+        #[arg(long)]
+        stream: bool,
         /// UTF-8 payload (tts/infer/describe prompt) — or --file for bytes.
         #[arg(long)]
         text: Option<String>,
@@ -1022,15 +1026,19 @@ struct BrokerOps {
 }
 
 impl BrokerOps {
-    fn describe(&self) -> String {
-        let mut v = vec!["infer", "describe"];
+    fn ops(&self) -> Vec<String> {
+        let mut v = vec!["infer".to_string(), "describe".to_string()];
         if self.stt.is_some() {
-            v.push("stt");
+            v.push("stt".into());
         }
         if self.tts.is_some() {
-            v.push("tts");
+            v.push("tts".into());
         }
-        v.join(", ")
+        v
+    }
+
+    fn describe(&self) -> String {
+        self.ops().join(", ")
     }
 }
 
@@ -1099,6 +1107,56 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
             }
             other => Err(Error::InvalidInput(format!("unknown broker op {other}"))),
         }
+    }
+
+    /// Streaming infer: llama-server deltas become broker chunks.
+    /// Everything else falls back to one-chunk `handle`.
+    async fn handle_stream(
+        &self,
+        op: &str,
+        payload: &[u8],
+        tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) -> Result<()> {
+        use futures::StreamExt;
+        use pai_inference::InferenceProvider;
+        if op != "infer" {
+            let out = self.handle(op, payload).await?;
+            let _ = tx.send(out).await;
+            return Ok(());
+        }
+        let prompt = String::from_utf8(payload.to_vec())
+            .map_err(|_| Error::InvalidInput("infer payload must be UTF-8".into()))?;
+        let p = LlamaServerProvider::new(&self.server_url, self.model.clone());
+        let req = pai_inference::AIRequest {
+            messages: vec![Message {
+                id: MessageId::new(),
+                conversation: ConversationId::new(),
+                role: Role::User,
+                created_at: now(),
+                content: vec![Content::Text { text: prompt }],
+                trust: TrustLevel::User,
+            }],
+            tools: vec![],
+            model: Some(self.model.clone()),
+            temperature: None,
+            max_tokens: None,
+            require_structured: false,
+        };
+        let mut stream = p.stream(req);
+        while let Some(ev) = stream.next().await {
+            match ev? {
+                pai_inference::StreamEvent::Delta(text) => {
+                    if tx.send(text.into_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+                pai_inference::StreamEvent::Done(_) => break,
+                pai_inference::StreamEvent::Error(e) => {
+                    return Err(Error::Provider(e));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1303,7 +1361,8 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     Error::Sync("no vault key — pair a device first (pai pair)".into())
                 })?;
                 let ops = broker_ops(&cfg, cli).await;
-                let mut srv = pai_broker::rpc::BrokerServer::new(&*t, &vault, device.id, &ops);
+                let mut srv = pai_broker::rpc::BrokerServer::new(&*t, &vault, device.id, &ops)
+                    .with_ops(ops.ops());
                 println!(
                     "broker serving {} on {} — ops: {}",
                     device.id,
@@ -1315,6 +1374,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             BrokerCmd::Call {
                 device: dev,
                 op,
+                stream,
                 text,
                 file,
                 out,
@@ -1323,11 +1383,20 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 relay,
                 token,
             } => {
-                let to = resolve_peer(&store, dev)?;
                 let t = sync_transport(dir, relay, token)?;
                 let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
                     Error::Sync("no vault key — pair a device first (pai pair)".into())
                 })?;
+                let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id);
+                let to = if dev == "any" {
+                    client.find_peer(op).await?.ok_or_else(|| {
+                        Error::NotFound(format!(
+                            "no paired device advertises '{op}' — is `pai broker serve` running?"
+                        ))
+                    })?
+                } else {
+                    resolve_peer(&store, dev)?
+                };
                 let payload = if let Some(f) = file {
                     std::fs::read(f).map_err(|e| Error::InvalidInput(format!("{f}: {e}")))?
                 } else if let Some(t) = text {
@@ -1335,15 +1404,19 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 } else {
                     return Err(Error::InvalidInput("pass --text or --file".into()));
                 };
-                let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id);
-                let resp = client
-                    .call(
-                        to,
-                        op,
-                        &payload,
-                        std::time::Duration::from_secs(*timeout_secs),
-                    )
-                    .await?;
+                let timeout = std::time::Duration::from_secs(*timeout_secs);
+                let resp = if *stream {
+                    client
+                        .call_stream(to, op, &payload, timeout, &mut |chunk| {
+                            if let Ok(s) = std::str::from_utf8(chunk) {
+                                print!("{s}");
+                                std::io::Write::flush(&mut std::io::stdout()).ok();
+                            }
+                        })
+                        .await?
+                } else {
+                    client.call(to, op, &payload, timeout).await?
+                };
                 if let Some(f) = out {
                     std::fs::write(f, &resp).map_err(|e| Error::Storage(e.to_string()))?;
                     println!("wrote {f} ({} bytes)", resp.len());

@@ -132,8 +132,21 @@ this device has providers for (`stt` whisper-server, `tts` piper,
 `infer`/`describe` llama-server), `call` targets a peer and waits.
 Verified live: request → peer executes on Ollama → sealed reply.
 
-- Broker: richer scheduling (capability-based pick vs explicit target),
-  request expiry/GC for stale `breq`s, streaming ops
+**V2m done (2026-09-15):** broker scheduling + GC + streaming —
+`SyncTransport::delete` (folder unlink, relay `DELETE` endpoint, default
+no-op for transports that can't) makes object GC real. `pai broker
+serve` announces `bcap/<device>` capability objects (sealed,
+timestamped, refreshed every 60s, 5-min TTL); `pai broker call any <op>`
+routes to the lowest-id fresh announcer instead of a named peer.
+Requests carry `expires_at_ms` — workers skip *and delete* work the
+caller already gave up on; served `breq`s, consumed `bres`es, and stream
+chunks are deleted too, so transports stop accumulating broker objects.
+`OpHandler::handle_stream` (default: one chunk via `handle`) drives
+`bres/<to>/<id>/<seq>` chunk objects + the usual final marker; `call
+--stream` prints infer deltas as they arrive — llama-server `Delta`s
+become chunks on the worker. Verified live: `call any --stream infer`
+routed by capability, streamed qwen's tokens, and left zero broker
+objects on the transport.
 **V2i done (2026-09-14):** Flutter voice UI + FFI ops — `pai_voice_status`
 ({stt,tts,mic,speaker,whisper_url}), `pai_voice_listen` (blocking
 mic→whisper, {heard,text?,wav_b64}), `pai_voice_transcribe` (WAV path),

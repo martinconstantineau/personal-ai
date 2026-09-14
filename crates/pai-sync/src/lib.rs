@@ -30,6 +30,11 @@ pub trait SyncTransport: Send + Sync {
     async fn list(&self) -> Result<Vec<SyncObjectMeta>>;
     async fn push(&self, obj: &SyncObject) -> Result<()>;
     async fn pull(&self, key: &str) -> Result<Option<SyncObject>>;
+    /// Remove an object. Transports that can't delete simply keep it —
+    /// callers treat this as best-effort GC, never a correctness step.
+    async fn delete(&self, _key: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Lets `SyncEngine` take a runtime-picked transport (folder vs relay).
@@ -46,6 +51,9 @@ impl SyncTransport for Box<dyn SyncTransport> {
     }
     async fn pull(&self, key: &str) -> Result<Option<SyncObject>> {
         (**self).pull(key).await
+    }
+    async fn delete(&self, key: &str) -> Result<()> {
+        (**self).delete(key).await
     }
 }
 
@@ -156,6 +164,14 @@ impl SyncTransport for FolderTransport {
         let raw = std::fs::read(&path).map_err(|e| Error::Sync(e.to_string()))?;
         let w: Wire = serde_json::from_slice(&raw).map_err(|e| Error::Sync(e.to_string()))?;
         Ok(Some(w.obj))
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        match std::fs::remove_file(self.path(key)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Sync(e.to_string())),
+        }
     }
 }
 

@@ -1549,6 +1549,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "futures",
  "pai-agent",
  "pai-audit",
  "pai-broker",
@@ -1622,6 +1623,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "chrono",
  "pai-config",
  "pai-core",
  "pai-storage",

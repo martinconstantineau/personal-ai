@@ -4,9 +4,10 @@
 //! API (all bodies are the transport `Wire` JSON):
 //!
 //! ```text
-//! GET  /v1/objects           → {"objects": [SyncObjectMeta]}
-//! GET  /v1/objects/{key}     → Wire | 404
-//! PUT  /v1/objects/{key}     → Wire → 204
+//! GET     /v1/objects           → {"objects": [SyncObjectMeta]}
+//! GET     /v1/objects/{key}     → Wire | 404
+//! PUT     /v1/objects/{key}     → Wire → 204
+//! DELETE  /v1/objects/{key}     → 204 (404s are fine — idempotent GC)
 //! ```
 //!
 //! `Authorization: Bearer <token>` is required only when the server was
@@ -151,6 +152,13 @@ fn handle(
                 Err(e) => json_response(500, serde_json::json!({"error": e.to_string()})),
             }
         }
+        ("DELETE", p) if p.starts_with(key_prefix) => {
+            let key = urldec(&p[key_prefix.len()..]);
+            match block_on(store.delete(&key)) {
+                Ok(()) => json_response(204, serde_json::json!({})),
+                Err(e) => json_response(500, serde_json::json!({"error": e.to_string()})),
+            }
+        }
         _ => json_response(404, serde_json::json!({"error": "not found"})),
     }
 }
@@ -249,5 +257,21 @@ impl SyncTransport for RelayTransport {
         }
         let w: Wire = resp.json().await.map_err(http_err)?;
         Ok(Some(w.obj))
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        let resp = self
+            .req(
+                reqwest::Method::DELETE,
+                format!("{}/v1/objects/{}", self.base, urlenc(key)),
+            )
+            .send()
+            .await
+            .map_err(http_err)?;
+        // 404 = already gone; GC is idempotent.
+        if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
+            return Err(http_err(format!("HTTP {} on delete {key}", resp.status())));
+        }
+        Ok(())
     }
 }
