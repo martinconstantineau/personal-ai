@@ -14,6 +14,12 @@
   TLS goes through rustls+ring+webpki-roots, which ship prebuilt objects.
   If a future dep reintroduces the failure (`error calling dlltool`),
   prefer a pure-Rust alternative over installing binutils.
+  Note `windows-sys` 0.61 already enters the tree via `chrono` and
+  generates import libs at link time — `cargo test`/`cargo build` on
+  this machine therefore needs GNU binutils on PATH
+  (`export PATH="$HOME/scoop/apps/mingw/current/bin:$PATH"`, Scoop's
+  `mingw` package provides `as`/`dlltool`; the rust-mingw component
+  ships `dlltool` but not `as`, so the bundled copy alone fails).
 
 ```bash
 ./scripts/setup.sh     # Debian/Ubuntu system deps + rust components
@@ -52,6 +58,8 @@ pai policies list|set <PERMISSION> <POLICY>      # persisted policy edits
 pai memories                                     # memory browser
 pai memories forget <uuid|query>
 pai audit [--limit N]
+pai apps sign|verify|list                        # app package signing + registry
+pai deploy <dir>                                 # verify + install a signed app package
 ```
 
 Model sources: `pai models install` accepts a catalog **slug** or an

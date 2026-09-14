@@ -1551,6 +1551,7 @@ dependencies = [
  "clap",
  "futures",
  "pai-agent",
+ "pai-apps",
  "pai-audit",
  "pai-broker",
  "pai-config",
@@ -1602,6 +1603,21 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "pai-apps"
+version = "0.1.0"
+dependencies = [
+ "pai-core",
+ "pai-identity",
+ "pai-storage",
+ "serde",
+ "sha2",
+ "thiserror 2.0.20",
+ "toml",
  "tracing",
  "uuid",
 ]

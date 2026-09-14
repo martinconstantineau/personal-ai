@@ -142,6 +142,34 @@ enum Cmd {
         #[arg(long, default_value = "Describe this image in detail.")]
         prompt: String,
     },
+    /// Install a signed app package (see `pai apps sign` to produce one).
+    /// Unsigned or unverifiable packages are refused — nothing is run.
+    Deploy {
+        /// Package directory containing manifest.toml.
+        path: String,
+    },
+    /// App package operations: sign, verify, list installed.
+    Apps {
+        #[command(subcommand)]
+        cmd: AppsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppsCmd {
+    /// List installed apps.
+    List,
+    /// Sign a package in place with this device's key (writes
+    /// signature.bin over manifest + content digest).
+    Sign {
+        /// Package directory containing manifest.toml.
+        path: String,
+    },
+    /// Verify a package's signature without installing it.
+    Verify {
+        /// Package directory containing manifest.toml.
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1330,11 +1358,81 @@ async fn broker_ops(cfg: &pai_config::Config, cli: &Cli) -> BrokerOps {
     }
 }
 
+fn load_package(path: &str) -> Result<pai_apps::AppPackage> {
+    pai_apps::AppPackage::load(std::path::Path::new(path))
+        .map_err(|e| Error::InvalidInput(e.to_string()))
+}
+
 /// `pai pair` + `pai sync` — store/identity only, no inference stack.
 async fn run_sync_cmds(cli: &Cli) -> Result<()> {
     use pai_sync::{crypto, engine, pair, SyncTransport};
-    let (cfg, store, ids, key_dir, _user, device) = base(cli).await?;
+    let (cfg, store, ids, key_dir, user, device) = base(cli).await?;
     match &cli.cmd {
+        Cmd::Deploy { path } => {
+            let pkg = load_package(path)?;
+            let devices = ids.list_devices(user.id)?;
+            let signer = pkg
+                .verify_any(&ids, &devices)
+                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+            let signer_dev = devices
+                .iter()
+                .find(|d| d.id == signer)
+                .expect("verify_any returned a listed device");
+            let dest = pai_apps::AppRegistry::new(&cfg.data_dir)
+                .install(&pkg, &ids, signer_dev)
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            println!(
+                "deployed {} {} ({:?}) -> {}",
+                pkg.manifest.app_id(),
+                pkg.manifest.app.version,
+                pkg.manifest.app.runtime,
+                dest.display()
+            );
+            println!("signed by device {:.8}", signer.to_string());
+            println!("note: package installed but no runtime yet - apps are not executed");
+        }
+        Cmd::Apps { cmd } => match cmd {
+            AppsCmd::List => {
+                let apps = pai_apps::AppRegistry::new(&cfg.data_dir)
+                    .list()
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+                if apps.is_empty() {
+                    println!("(no apps installed - `pai deploy <dir>`)");
+                }
+                for (id, m) in apps {
+                    println!(
+                        "  {:<28} {:<10} {:<6} {}",
+                        id,
+                        m.app.version,
+                        format!("{:?}", m.app.runtime).to_lowercase(),
+                        m.app.name
+                    );
+                }
+            }
+            AppsCmd::Sign { path } => {
+                let pkg = load_package(path)?;
+                pkg.sign(&ids, &device, &key_dir)
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                println!(
+                    "signed {} with device {:.8}",
+                    pkg.manifest.app_id(),
+                    device.id
+                );
+            }
+            AppsCmd::Verify { path } => {
+                let pkg = load_package(path)?;
+                let devices = ids.list_devices(user.id)?;
+                match pkg.verify_any(&ids, &devices) {
+                    Ok(signer) => println!(
+                        "{} {} - signature ok (device {:.8})",
+                        pkg.manifest.app_id(),
+                        pkg.manifest.app.version,
+                        signer.to_string()
+                    ),
+                    Err(e) => return Err(Error::InvalidInput(e.to_string())),
+                }
+            }
+        },
         Cmd::Pair { cmd } => match cmd {
             PairCmd::Offer { out } => {
                 let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
@@ -2702,6 +2800,8 @@ async fn main() -> Result<()> {
             | Cmd::Email { .. }
             | Cmd::Circle { .. }
             | Cmd::Describe { .. }
+            | Cmd::Deploy { .. }
+            | Cmd::Apps { .. }
     ) {
         return run_sync_cmds(&cli).await;
     }
@@ -3144,7 +3244,9 @@ async fn main() -> Result<()> {
         | Cmd::Sync { .. }
         | Cmd::Broker { .. }
         | Cmd::Email { .. }
-        | Cmd::Describe { .. } => {
+        | Cmd::Describe { .. }
+        | Cmd::Deploy { .. }
+        | Cmd::Apps { .. } => {
             unreachable!("handled before build")
         }
     }
