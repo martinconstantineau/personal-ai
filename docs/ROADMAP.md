@@ -88,7 +88,9 @@ FK chain, `pai conv sync`/`pai docs sync` scope toggles + `docs ingest
 --sync`. Schema v5 adds `updated_at`/`deleted` to conversations and
 `sync_scope`/`updated_at`/`deleted` to documents.
 
-- E2EE sync: relay behind TLS for off-LAN use
+- E2EE sync: relay-behind-TLS deployment notes shipped at
+  `docs/deployment/relay-tls.md` (Caddy + nginx configs, token
+  handling, mTLS/allowlist hardening, and the honest metadata floor).
 **V2l done (2026-09-15):** synced tasks with claim/lease — schema v6
 persists `trigger_json`/`payload_json`/`result_json` plus `claimed_by`/
 `lease_expires_at`/`updated_at`/`deleted`. `task/<id>` objects ride the
@@ -175,8 +177,21 @@ data-URIs), `pai describe <image> [--prompt]`, and the `vision.describe`
 tool so the agent can inspect images inside the filesystem jail
 (`FilesRead`, Low risk, untrusted output).
 
-- Vision: ONNX/MLX-VLM adapters; grounding/detections when models expose
-  them; image ingest into documents (OCR text into the document store)
+**V2p done (2026-09-16):** process-based vision adapter —
+`ProcessVisionProvider` spawns a user-configured VLM runner per
+describe (same external-boundary philosophy as whisper-server/piper/
+llama-server — no linked ONNX/C++ runtime on windows-gnu). `<data_dir>/
+vision.json` `process` block: `{command, args[], timeout_secs}` with
+`{image}`/`{prompt}` argv placeholders — covers ONNX Runtime CLIs,
+MLX-VLM on Apple silicon, `llama-mtmd-cli`, any local runner. Image
+bytes land in a temp file (cleaned up after); stderr surfaces on
+non-zero exit; a wall-clock kill bounds hung/slow first-run loads.
+Selection: `vision.json` wins when its command resolves on PATH, else
+llama-server — `pai describe`, the `vision.describe` tool, and the FFI
+surface all pick it up transparently.
+
+- Vision: grounding/detections when models expose them; image ingest
+  into documents (OCR text into the document store)
 **V2j done (2026-09-14):** SMTP send — `email.json` gains an optional
 `smtp` block ({host, port, tls: tls|starttls|none, user?}); a
 hand-rolled submission client (EHLO→STARTTLS→AUTH PLAIN→DATA, dot-

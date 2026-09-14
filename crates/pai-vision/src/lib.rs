@@ -8,7 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod process;
 pub mod provider;
+pub use process::{ProcessVisionConfig, ProcessVisionProvider, VisionFileConfig};
 pub use provider::{mime_for_ext, LlamaVisionProvider};
 
 /// A question about an image blob.

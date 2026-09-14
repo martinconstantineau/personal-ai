@@ -646,16 +646,18 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             .unwrap_or_else(|| cfg.inference.default_model.clone()),
     )));
 
-    // Vision: only llama-server speaks the OpenAI image_url protocol —
-    // constructing it for other providers would just fail at call time.
-    let vision: Option<Arc<dyn pai_inference::ImageUnderstandingProvider>> =
-        (provider_name == "llama-server").then(|| {
-            Arc::new(pai_vision::LlamaVisionProvider::new(
-                &server_url,
-                model
-                    .clone()
-                    .unwrap_or_else(|| cfg.inference.default_model.clone()),
-            )) as _
+    // Vision: a process adapter from vision.json wins when configured;
+    // else llama-server (the only OpenAI-image_url provider we know).
+    let vision: Option<Arc<dyn pai_inference::ImageUnderstandingProvider>> = vision_provider(&cfg)
+        .or_else(|| {
+            (provider_name == "llama-server").then(|| {
+                Arc::new(pai_vision::LlamaVisionProvider::new(
+                    &server_url,
+                    model
+                        .clone()
+                        .unwrap_or_else(|| cfg.inference.default_model.clone()),
+                )) as _
+            })
         });
 
     let agent = AgentRuntime {
@@ -1441,7 +1443,6 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
         },
         Cmd::Email { cmd } => run_email_cmds(cmd, &cfg).await?,
         Cmd::Describe { image, prompt } => {
-            use pai_inference::ImageUnderstandingProvider;
             let path = std::path::Path::new(image);
             let mime = path
                 .extension()
@@ -1451,15 +1452,29 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             let bytes =
                 std::fs::read(path).map_err(|e| Error::InvalidInput(format!("{image}: {e}")))?;
             let model = cfg.inference.default_model.clone();
-            let p = pai_vision::LlamaVisionProvider::new(&cfg.inference.local_server_url, model);
+            let p: Arc<dyn pai_inference::ImageUnderstandingProvider> = vision_provider(&cfg)
+                .unwrap_or_else(|| {
+                    Arc::new(pai_vision::LlamaVisionProvider::new(
+                        &cfg.inference.local_server_url,
+                        model,
+                    ))
+                });
             match p.describe(&bytes, mime, prompt).await {
                 Ok(text) => println!("{text}"),
                 Err(e) => {
                     eprintln!("{e}");
-                    eprintln!(
-                        "hint: serve a multimodal model — e.g. llama-server \
-                         -m model.gguf --mmproj mmproj.gguf --port 8080"
-                    );
+                    if p.id() == "llama-vision" {
+                        eprintln!(
+                            "hint: serve a multimodal model — e.g. llama-server \
+                             -m model.gguf --mmproj mmproj.gguf --port 8080, or \
+                             configure a process adapter in vision.json"
+                        );
+                    } else {
+                        eprintln!(
+                            "hint: check the `process` block in vision.json \
+                             (command on PATH, placeholders {{image}}/{{prompt}})"
+                        );
+                    }
                     return Err(e);
                 }
             }
@@ -1467,6 +1482,20 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
         _ => unreachable!(),
     }
     Ok(())
+}
+
+/// Vision provider selection: a `process` block in `vision.json` wins
+/// (its command must resolve on PATH); otherwise None — callers fall
+/// back to llama-server.
+fn vision_provider(
+    cfg: &pai_config::Config,
+) -> Option<Arc<dyn pai_inference::ImageUnderstandingProvider>> {
+    let pc = pai_vision::VisionFileConfig::load(&cfg.data_dir)
+        .ok()
+        .flatten()?
+        .process?;
+    let p = pai_vision::ProcessVisionProvider::detect(pc)?;
+    Some(Arc::new(p))
 }
 
 /// Voice ops. `transcribe`/`say` use one provider each; `turn` runs the
