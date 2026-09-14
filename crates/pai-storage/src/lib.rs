@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 6;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -233,6 +233,20 @@ ALTER TABLE documents ADD COLUMN sync_scope TEXT NOT NULL DEFAULT 'device_local'
 ALTER TABLE documents ADD COLUMN updated_at TEXT;
 UPDATE documents SET updated_at = created_at;
 ALTER TABLE documents ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;
+"#,
+    r#"
+-- V6: syncable tasks — LWW metadata + tombstones like the other kinds,
+-- persisted trigger/payload/result so a task created on one device can
+-- execute on another, and claim/lease fields (`claimed_by`,
+-- `lease_expires_at`) so only one device runs a due task at a time.
+ALTER TABLE tasks ADD COLUMN updated_at TEXT;
+UPDATE tasks SET updated_at = created_at;
+ALTER TABLE tasks ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN trigger_json TEXT NOT NULL DEFAULT '{"kind":"manual"}';
+ALTER TABLE tasks ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE tasks ADD COLUMN result_json TEXT;
+ALTER TABLE tasks ADD COLUMN claimed_by TEXT;
+ALTER TABLE tasks ADD COLUMN lease_expires_at TEXT;
 "#,
 ];
 

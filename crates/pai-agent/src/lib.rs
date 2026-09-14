@@ -92,6 +92,18 @@ impl ApprovalHandler for AutoApprove {
     }
 }
 
+/// Denies every approval — background/non-interactive execution (synced
+/// task ticks, scheduled jobs) where nobody is present to ask. The run
+/// still respects AlwaysAllow policy; anything interactive is refused
+/// rather than silently granted.
+pub struct DenyApprovals;
+#[async_trait]
+impl ApprovalHandler for DenyApprovals {
+    async fn decide(&self, _req: &pai_permissions::ApprovalRequest) -> bool {
+        false
+    }
+}
+
 /// Cancellation handle shared with a run.
 #[derive(Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);

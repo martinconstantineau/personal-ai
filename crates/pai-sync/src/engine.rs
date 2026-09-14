@@ -6,6 +6,8 @@
 //! - `msg/<id>`  — messages under a synchronized, non-deleted conversation
 //! - `doc/<id>`  — documents with `sync_scope='synchronized'` (blob bytes
 //!   travel inside the sealed payload, base64'd)
+//! - `task/<id>` — tasks with `sync_scope='synchronized'`, claim/lease
+//!   fields included so only one device runs a due task
 //! - `memory/<id>` — memories with `sync_scope='synchronized'` (the default)
 //!
 //! Objects are sealed under the vault key with the object key as AAD;
@@ -30,16 +32,18 @@ use std::sync::Arc;
 const CONV_PREFIX: &str = "conv/";
 const MSG_PREFIX: &str = "msg/";
 const DOC_PREFIX: &str = "doc/";
+const TASK_PREFIX: &str = "task/";
 const MEMORY_PREFIX: &str = "memory/";
 
 /// Apply order on pull: conversations before their messages (FK), then
-/// documents, then memories (which may reference conversations).
+/// documents, then tasks and memories (which may reference conversations).
 fn kind_rank(key: &str) -> Option<u8> {
     match key.split('/').next() {
         Some("conv") => Some(0),
         Some("msg") => Some(1),
         Some("doc") => Some(2),
-        Some("memory") => Some(3),
+        Some("task") => Some(3),
+        Some("memory") => Some(4),
         _ => None,
     }
 }
@@ -115,6 +119,26 @@ struct DocumentPayload {
     updated_at: String,
     trust: String,
     sections: Vec<DocSection>,
+}
+
+/// Versioned plaintext of one synced task row — claim/lease fields ride
+/// along so the claim made by one device suppresses duplicate execution
+/// on every other device once the object lands.
+#[derive(Debug, Serialize, Deserialize)]
+struct TaskPayload {
+    v: u8,
+    id: String,
+    title: String,
+    agent_id: String,
+    created_at: String,
+    run_at: Option<String>,
+    state: String,
+    trigger_json: String,
+    payload_json: String,
+    result_json: Option<String>,
+    claimed_by: Option<String>,
+    lease_expires_at: Option<String>,
+    updated_at: String,
 }
 
 pub struct SyncOutcome {
@@ -239,6 +263,7 @@ impl<T: SyncTransport> SyncEngine<T> {
         self.push_conversations(&mut out).await?;
         self.push_messages(&mut out).await?;
         self.push_documents(&mut out).await?;
+        self.push_tasks(&mut out).await?;
         Ok(out)
     }
 
@@ -436,6 +461,81 @@ impl<T: SyncTransport> SyncEngine<T> {
         Ok(())
     }
 
+    /// `sync_scope='synchronized'` tasks — claim/lease columns included so
+    /// a claim pushed by the runner propagates to peers on the next sync.
+    async fn push_tasks(&self, out: &mut SyncOutcome) -> Result<()> {
+        let rows = self.store.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, title, agent_id, created_at, run_at, state,
+                        trigger_json, payload_json, result_json, claimed_by,
+                        lease_expires_at, COALESCE(updated_at, created_at),
+                        deleted
+                 FROM tasks WHERE sync_scope='synchronized'",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, String>(11)?,
+                    r.get::<_, i64>(12)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        for (
+            id,
+            title,
+            agent,
+            created,
+            run_at,
+            state,
+            trigger,
+            payload,
+            result,
+            claimed,
+            lease,
+            updated,
+            deleted,
+        ) in rows
+        {
+            let updated_at = parse_ts(&updated);
+            let key = format!("{TASK_PREFIX}{id}");
+            let tombstone = deleted != 0;
+            let raw = if tombstone {
+                Vec::new()
+            } else {
+                serde_json::to_vec(&TaskPayload {
+                    v: 1,
+                    id,
+                    title,
+                    agent_id: agent,
+                    created_at: created,
+                    run_at,
+                    state,
+                    trigger_json: trigger,
+                    payload_json: payload,
+                    result_json: result,
+                    claimed_by: claimed,
+                    lease_expires_at: lease,
+                    updated_at: updated.clone(),
+                })
+                .map_err(|e| Error::Sync(e.to_string()))?
+            };
+            self.push_sealed(key, &raw, version_of(&updated), updated_at, tombstone, out)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Pull remote objects newer than our mirror and apply them, in
     /// `kind_rank` order (conversations land before their messages — the
     /// FK chain requires it).
@@ -511,6 +611,14 @@ impl<T: SyncTransport> SyncEngine<T> {
             let p: DocumentPayload = serde_json::from_slice(raw)
                 .map_err(|e| Error::Sync(format!("bad document payload: {e}")))?;
             return self.apply_document(&p);
+        }
+        if let Some(id) = key.strip_prefix(TASK_PREFIX) {
+            if obj.tombstone {
+                return self.apply_task_tombstone(id, obj.updated_at);
+            }
+            let p: TaskPayload = serde_json::from_slice(raw)
+                .map_err(|e| Error::Sync(format!("bad task payload: {e}")))?;
+            return self.apply_task(&p);
         }
         if key.starts_with(MSG_PREFIX) {
             if obj.tombstone {
@@ -745,6 +853,64 @@ impl<T: SyncTransport> SyncEngine<T> {
                 "UPDATE documents SET deleted=1, updated_at=?2
                  WHERE id=?1 AND COALESCE(updated_at, created_at) < ?2",
                 params![id, ts(&remote_updated)],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Task tombstone: mark deleted locally (claim fields irrelevant —
+    /// a tombstoned task never enters the due set).
+    fn apply_task_tombstone(&self, id: &str, remote_updated: Timestamp) -> Result<()> {
+        self.store.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET deleted=1, updated_at=?2
+                 WHERE id=?1 AND COALESCE(updated_at, created_at) < ?2",
+                params![id, ts(&remote_updated)],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Apply a task row LWW-style — the whole row (including claimed_by /
+    /// lease_expires_at) goes to the newest writer, so two devices that
+    /// claimed the same task before seeing each other's push converge on
+    /// whichever claim has the later updated_at. A device only runs a
+    /// task it believes it claimed, so the losing claimant's next due
+    /// scan finds the row already claimed (or done) and skips it.
+    fn apply_task(&self, p: &TaskPayload) -> Result<()> {
+        if p.v != 1 {
+            return Err(Error::Sync(format!("unsupported payload v{}", p.v)));
+        }
+        self.store.with_conn(|c| {
+            c.execute(
+                "INSERT INTO tasks(id, title, agent_id, created_at, run_at,
+                    state, updated_at, deleted, sync_scope, trigger_json,
+                    payload_json, result_json, claimed_by, lease_expires_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,0,'synchronized',?8,?9,?10,?11,?12)
+                 ON CONFLICT(id) DO UPDATE SET
+                    title=excluded.title, run_at=excluded.run_at,
+                    state=excluded.state, updated_at=excluded.updated_at,
+                    trigger_json=excluded.trigger_json,
+                    payload_json=excluded.payload_json,
+                    result_json=excluded.result_json,
+                    claimed_by=excluded.claimed_by,
+                    lease_expires_at=excluded.lease_expires_at, deleted=0
+                 WHERE excluded.updated_at >
+                    COALESCE(tasks.updated_at, tasks.created_at)",
+                params![
+                    p.id,
+                    p.title,
+                    p.agent_id,
+                    p.created_at,
+                    p.run_at,
+                    p.state,
+                    p.updated_at,
+                    p.trigger_json,
+                    p.payload_json,
+                    p.result_json,
+                    p.claimed_by,
+                    p.lease_expires_at,
+                ],
             )
         })?;
         Ok(())

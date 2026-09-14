@@ -60,7 +60,17 @@ the full threat model lives in `docs/security/threat-model.md`.
   `synchronized`, conversations and documents default to `device_local`
   and travel only when the user marks them (`pai conv sync`,
   `pai docs sync`, `docs ingest --sync`). Possession of the vault key is
-  read+write access; `pair remove` does not rotate it.
+  read+write access; `pair remove` alone does not revoke it — run
+  `pai sync rotate` afterwards so remaining devices migrate to a fresh
+  key the removed device never receives.
+- **Synced tasks execute on whichever paired device claims them.** A
+  `synchronized` task's prompt runs with the claiming device's tools and
+  permission policy — every vault member is trusted to run every synced
+  task. Claim/lease suppresses accidental double-execution (two devices
+  racing a due task); it is not a fence against a malicious vault member
+  claiming work it shouldn't — that boundary is the pairing decision
+  itself. Background ticks deny interactive approvals outright, so a
+  synced task cannot escalate to AskUser actions on an unattended device.
 - **Broker RPC rides the same vault.** `pai broker call/serve` moves
   compute requests between paired devices as `breq/<to>/<id>` /
   `bres/<to>/<id>` `SyncObject`s — sealed exactly like sync payloads, so
@@ -109,4 +119,4 @@ contents in reports.
 - [x] encrypt store at rest; [x] keystore-backed device keys; [x] sync
       E2EE implementation; [x] interactive CLI approval; [x] supply-chain:
       lockfile + `cargo audit`/`cargo deny` in CI; [ ] sandboxed tool
-      execution profiles; [ ] vault rotation / device revocation.
+      execution profiles; [x] vault rotation / device revocation.

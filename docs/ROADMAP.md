@@ -86,12 +86,25 @@ sealed-object engine. `conv/`/`msg/`/`doc/` object kinds with LWW
 tombstones, blob bytes inside the sealed payload, session stubs for the
 FK chain, `pai conv sync`/`pai docs sync` scope toggles + `docs ingest
 --sync`. Schema v5 adds `updated_at`/`deleted` to conversations and
-`sync_scope`/`updated_at`/`deleted` to documents. Tasks stay
-device-local on purpose — a synced task could double-execute without a
-claim/lease mechanism.
+`sync_scope`/`updated_at`/`deleted` to documents.
 
-- E2EE sync: relay behind TLS for off-LAN use; task sync once a claim
-  mechanism exists
+- E2EE sync: relay behind TLS for off-LAN use
+**V2l done (2026-09-15):** synced tasks with claim/lease — schema v6
+persists `trigger_json`/`payload_json`/`result_json` plus `claimed_by`/
+`lease_expires_at`/`updated_at`/`deleted`. `task/<id>` objects ride the
+sealed engine (rank 4, no FK deps); `pai task add|list|remove|tick|sync`
+manages them. `tick` claims due tasks via a single-UPDATE CAS
+(unclaimed or expired-lease only), pushes the claim over the transport
+*before* running, then executes — `{"kind":"prompt"}` payloads go
+through the agent with `DenyApprovals` (background runs refuse
+interactive permissions, never silently grant them). `@every Ns`
+triggers requeue via `next_fire`; expired leases make crashed runners'
+tasks claimable again. Conflicting claims converge via the engine's
+LWW — newest `updated_at` wins on every replica. Verified live: task
+created on A → synced to B → B claimed, ran, pushed the result → A's
+tick ran nothing. Honest limit: claims suppress *accidental* double-run,
+not a malicious peer racing inside the sync window — every vault member
+can execute any synchronized task.
 **V2k done (2026-09-14):** vault rotation + peer revocation —
 `pai sync rotate` mints a fresh vault key and pushes it to every paired
 peer as `vrot/<to>/<from>` objects (peer-ECDH sealed — delivery doesn't
