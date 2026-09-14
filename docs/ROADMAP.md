@@ -185,8 +185,19 @@ stuffing) over the same rustls+webpki stack as IMAP — no new deps.
 so `email.send`, `pai email send`, and `pai_email_send` all light up at
 once. Password shared via the `email:<user>` keystore entry.
 
-- Connectors: registry abstraction beyond email; OAuth2 for
-  Gmail/Outlook (app-password is today's auth)
+**V2o done (2026-09-16):** OAuth2 for email — RFC 8628 device-
+authorization flow (works headless; Google `oauth2.googleapis.com` +
+Microsoft `login.microsoftonline.com` presets, custom-IdP overrides for
+device/token URLs and scopes). `pai email configure --oauth
+google|microsoft` prints the user code + verification URL, polls until
+authorized, and stores the refresh token at `email-oauth:<user>` —
+`email.json` gains only the public client_id. With an `oauth` block,
+IMAP switches `LOGIN`→`AUTHENTICATE XOAUTH2` and SMTP `AUTH PLAIN`→`AUTH
+XOAUTH2`; access tokens resolve per session via the refresh grant and
+rotated refresh tokens re-store transparently. App-password auth stays
+the default when no `oauth` block exists.
+
+- Connectors: registry abstraction beyond email
 
 ## V3 — The personal OS layer
 

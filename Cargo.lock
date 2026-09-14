@@ -1660,6 +1660,7 @@ dependencies = [
  "pai-core",
  "pai-identity",
  "pai-permissions",
+ "reqwest",
  "rustls",
  "serde",
  "serde_json",

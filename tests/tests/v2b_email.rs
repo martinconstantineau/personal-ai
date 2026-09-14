@@ -214,6 +214,7 @@ fn imap_config_roundtrip() {
         archive_mailbox: "Archive".into(),
         drafts_mailbox: "Drafts".into(),
         smtp: None,
+        oauth: None,
     };
     cfg.save(&dir).unwrap();
     let back = ImapConfig::load(&dir).unwrap().unwrap();

@@ -9,7 +9,8 @@
 //! password resolves through the same `email:<user>` keystore entry as
 //! IMAP (app passwords cover both protocols).
 
-use crate::imap::{build_draft_message, resolve_password};
+use crate::imap::build_draft_message;
+use crate::oauth::SmtpAuth;
 use crate::Draft;
 use pai_core::*;
 use serde::{Deserialize, Serialize};
@@ -161,22 +162,28 @@ fn tls_wrap(host: &str, tcp: TcpStream) -> Result<Tls> {
     Ok(rustls::StreamOwned::new(conn, tcp))
 }
 
-/// AUTH PLAIN → MAIL FROM → RCPT TO* → DATA → QUIT. Shared by all TLS
-/// modes once the transport is up.
+/// AUTH (PLAIN or XOAUTH2) → MAIL FROM → RCPT TO* → DATA → QUIT.
+/// Shared by all TLS modes once the transport is up.
 fn session<S: Read + Write>(
     d: &mut Dialog<S>,
     ehlo: &str,
     user: &str,
-    pass: Option<&str>,
+    auth: &SmtpAuth,
     draft: &Draft,
 ) -> Result<()> {
     use base64::Engine;
     d.cmd(&format!("EHLO {ehlo}"), 250)?;
-    if let Some(pass) = pass {
-        // AUTH PLAIN: base64("\0user\0pass")
-        let auth = base64::engine::general_purpose::STANDARD
-            .encode(format!("\0{user}\0{pass}").as_bytes());
-        d.cmd(&format!("AUTH PLAIN {auth}"), 235)?;
+    match auth {
+        SmtpAuth::None => {}
+        SmtpAuth::Plain(pass) => {
+            // AUTH PLAIN: base64("\0user\0pass")
+            let a = base64::engine::general_purpose::STANDARD
+                .encode(format!("\0{user}\0{pass}").as_bytes());
+            d.cmd(&format!("AUTH PLAIN {a}"), 235)?;
+        }
+        SmtpAuth::Xoauth2(b64_ir) => {
+            d.cmd(&format!("AUTH XOAUTH2 {b64_ir}"), 235)?;
+        }
     }
     d.cmd(&format!("MAIL FROM:<{user}>"), 250)?;
     let mut rcpts = 0usize;
@@ -201,9 +208,8 @@ impl SmtpProvider {
         Self { cfg, user }
     }
 
-    /// Blocking send — call inside `spawn_blocking`. `pass: None` skips
-    /// AUTH (open relays / localhost test servers).
-    pub fn send_blocking(&self, draft: &Draft, pass: Option<&str>) -> Result<()> {
+    /// Blocking send — call inside `spawn_blocking`.
+    pub fn send_blocking(&self, draft: &Draft, auth: &SmtpAuth) -> Result<()> {
         let cfg = &self.cfg;
         let tcp = TcpStream::connect((cfg.host.as_str(), cfg.port)).map_err(err)?;
         tcp.set_read_timeout(Some(std::time::Duration::from_secs(60)))
@@ -215,7 +221,7 @@ impl SmtpProvider {
             SmtpTls::Tls => {
                 let mut d = Dialog::new(tls_wrap(&cfg.host, tcp)?);
                 d.expect(220)?;
-                session(&mut d, &cfg.host, &self.user, pass, draft)
+                session(&mut d, &cfg.host, &self.user, auth, draft)
             }
             SmtpTls::StartTls => {
                 let mut d = Dialog::new(tcp);
@@ -223,26 +229,25 @@ impl SmtpProvider {
                 d.cmd(&format!("EHLO {}", cfg.host), 250)?;
                 d.cmd("STARTTLS", 220)?;
                 let mut d = Dialog::new(tls_wrap(&cfg.host, d.s)?);
-                session(&mut d, &cfg.host, &self.user, pass, draft)
+                session(&mut d, &cfg.host, &self.user, auth, draft)
             }
             SmtpTls::None => {
                 let mut d = Dialog::new(tcp);
                 d.expect(220)?;
-                session(&mut d, &cfg.host, &self.user, pass, draft)
+                session(&mut d, &cfg.host, &self.user, auth, draft)
             }
         }
     }
 
-    /// Resolve the account password (same `email:<user>` entry as IMAP)
-    /// then send.
-    pub async fn send(&self, draft: &Draft) -> Result<()> {
-        let pass = resolve_password(&self.user)?;
+    /// Send with explicit auth material (password or XOAUTH2 IR —
+    /// resolved by the caller, usually `ImapProvider::send`).
+    pub async fn send_with_auth(&self, draft: &Draft, auth: SmtpAuth) -> Result<()> {
         let d = draft.clone();
         let me = Self {
             cfg: self.cfg.clone(),
             user: self.user.clone(),
         };
-        tokio::task::spawn_blocking(move || me.send_blocking(&d, Some(&pass)))
+        tokio::task::spawn_blocking(move || me.send_blocking(&d, &auth))
             .await
             .map_err(|e| Error::Provider(format!("smtp task: {e}")))?
     }

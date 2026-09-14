@@ -411,7 +411,14 @@ enum BrokerCmd {
 enum EmailCmd {
     /// Configure the IMAP account: writes email.json; the password goes
     /// to the OS keystore (`email:<user>`), never the file.
-    Configure,
+    /// `--oauth google|microsoft` uses the device-authorization flow
+    /// instead — a refresh token replaces the app password.
+    Configure {
+        /// OAuth2 device flow for Gmail/Outlook (needs a client_id from
+        /// your own cloud app registration).
+        #[arg(long)]
+        oauth: Option<String>,
+    },
     /// Show the configured account (never prints the password).
     Status,
     /// Search messages.
@@ -1644,7 +1651,7 @@ async fn email_provider(cfg: &pai_config::Config) -> Result<pai_connector_email:
 async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> {
     use pai_connector_email::EmailProvider;
     match cmd {
-        EmailCmd::Configure => {
+        EmailCmd::Configure { oauth } => {
             let read = |prompt: &str, default: &str| -> Result<String> {
                 print!("{prompt} [{default}]: ");
                 std::io::Write::flush(&mut std::io::stdout()).ok();
@@ -1695,9 +1702,36 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
                     user: None, // same login as IMAP
                 })
             };
-            let password =
+            let oauth_cfg = match oauth.as_deref() {
+                None => None,
+                Some(provider) => {
+                    let client_id = read("OAuth client_id (from your app registration)", "")?;
+                    if client_id.is_empty() {
+                        return Err(Error::InvalidInput(
+                            "client_id is required — register an app first".into(),
+                        ));
+                    }
+                    let tenant = if provider == "microsoft" {
+                        Some(read("Tenant", "common")?)
+                    } else {
+                        None
+                    };
+                    Some(pai_connector_email::OAuthConfig {
+                        provider: provider.to_string(),
+                        client_id,
+                        tenant,
+                        device_url: None,
+                        token_url: None,
+                        scopes: None,
+                    })
+                }
+            };
+            let password = if oauth_cfg.is_none() {
                 rpassword::prompt_password("Password (app password for Gmail/Outlook): ")
-                    .map_err(|e| Error::Other(e.to_string()))?;
+                    .map_err(|e| Error::Other(e.to_string()))?
+            } else {
+                String::new()
+            };
             let c = pai_connector_email::ImapConfig {
                 host,
                 port,
@@ -1706,14 +1740,65 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
                 drafts_mailbox: drafts,
                 archive_mailbox: archive,
                 smtp,
+                oauth: oauth_cfg,
             };
-            c.save(&cfg.data_dir)?;
-            if password.is_empty() {
-                println!("no password stored — set PAI_EMAIL_PASSWORD at run time");
-            } else if pai_connector_email::imap::store_password(&user, &password) {
-                println!("password stored in OS keystore (email:{user})");
+            if let Some(oc) = &c.oauth {
+                // Device-authorization flow: print the code, poll until
+                // the user authorizes (or the grant expires).
+                let grant = pai_connector_email::oauth::device_flow(oc).await?;
+                println!();
+                println!("Go to {}", grant.verification_uri);
+                if let Some(u) = &grant.verification_uri_complete {
+                    println!("  (or directly: {u})");
+                }
+                println!("and enter code: {}", grant.user_code);
+                let mut interval = grant.interval.max(1);
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(grant.expires_in.max(120));
+                let mut consecutive_pendings = 0u32;
+                let tokens = loop {
+                    if std::time::Instant::now() > deadline {
+                        return Err(Error::InvalidInput(
+                            "device grant expired — re-run configure".into(),
+                        ));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                    match pai_connector_email::oauth::poll_token_once(oc, &grant.device_code)
+                        .await?
+                    {
+                        pai_connector_email::oauth::Poll::Pending => {
+                            consecutive_pendings += 1;
+                            if consecutive_pendings == 5 {
+                                interval += 5; // back off gently
+                            }
+                            print!(".");
+                            std::io::Write::flush(&mut std::io::stdout()).ok();
+                        }
+                        pai_connector_email::oauth::Poll::Granted(t) => break t,
+                    }
+                };
+                let refresh = tokens.refresh_token.ok_or_else(|| {
+                    Error::Provider(
+                        "oauth grant returned no refresh_token — add `offline_access` scope".into(),
+                    )
+                })?;
+                c.save(&cfg.data_dir)?;
+                if pai_connector_email::oauth::store_refresh_token(&user, &refresh) {
+                    println!("\nrefresh token stored in OS keystore (email-oauth:{user})");
+                } else {
+                    return Err(Error::Other(
+                        "keystore unavailable — cannot persist the refresh token".into(),
+                    ));
+                }
             } else {
-                println!("keystore unavailable — set PAI_EMAIL_PASSWORD at run time");
+                c.save(&cfg.data_dir)?;
+                if password.is_empty() {
+                    println!("no password stored — set PAI_EMAIL_PASSWORD at run time");
+                } else if pai_connector_email::imap::store_password(&user, &password) {
+                    println!("password stored in OS keystore (email:{user})");
+                } else {
+                    println!("keystore unavailable — set PAI_EMAIL_PASSWORD at run time");
+                }
             }
             println!("account written to {}/email.json", cfg.data_dir.display());
         }
@@ -1728,8 +1813,25 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
                     Some(s) => println!("smtp: {}:{} ({:?}) — send enabled", s.host, s.port, s.tls),
                     None => println!("smtp: not configured — drafts only"),
                 }
-                let pw = pai_connector_email::imap::resolve_password(&c.user).is_ok();
-                println!("password: {}", if pw { "available" } else { "MISSING" });
+                match &c.oauth {
+                    Some(o) => {
+                        let has_rt =
+                            pai_identity::keystore::load(&format!("email-oauth:{}", c.user))
+                                .is_some();
+                        println!(
+                            "auth: oauth2 ({}) — refresh token {}",
+                            o.provider,
+                            if has_rt { "available" } else { "MISSING" }
+                        );
+                    }
+                    None => {
+                        let pw = pai_connector_email::imap::resolve_password(&c.user).is_ok();
+                        println!(
+                            "auth: password — {}",
+                            if pw { "available" } else { "MISSING" }
+                        );
+                    }
+                }
             }
             None => println!("not configured — run `pai email configure`"),
         },

@@ -5,8 +5,10 @@
 //! API onto these types and declare which `Permission` each op needs.
 
 pub mod imap;
+pub mod oauth;
 pub mod smtp;
 pub use imap::{ImapConfig, ImapProvider};
+pub use oauth::OAuthConfig;
 pub use smtp::{SmtpConfig, SmtpProvider, SmtpTls};
 
 use async_trait::async_trait;

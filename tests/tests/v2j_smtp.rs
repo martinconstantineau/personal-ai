@@ -4,6 +4,7 @@
 //! `smtp` block.
 
 use pai_connector_email::imap::ImapConfig;
+use pai_connector_email::oauth::SmtpAuth;
 use pai_connector_email::smtp::SmtpProvider;
 use pai_connector_email::{Draft, EmailAddress, EmailProvider, SmtpConfig, SmtpTls};
 use std::io::{BufRead, BufReader, Write};
@@ -97,7 +98,8 @@ fn smtp_cfg(port: u16) -> SmtpConfig {
 fn smtp_dialog_sends_full_message() {
     let (port, rx) = mock_server();
     let p = SmtpProvider::new(smtp_cfg(port), "me@x.example".into());
-    p.send_blocking(&draft(), Some("secret")).unwrap();
+    p.send_blocking(&draft(), &SmtpAuth::Plain("secret".into()))
+        .unwrap();
     let log = rx.recv().unwrap();
 
     // AUTH PLAIN: base64("\0me@x.example\0secret")
@@ -126,7 +128,10 @@ fn smtp_no_recipients_errors() {
     let mut d = draft();
     d.to.clear();
     d.cc.clear();
-    let err = p.send_blocking(&d, None).unwrap_err().to_string();
+    let err = p
+        .send_blocking(&d, &SmtpAuth::None)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("no recipients"), "unexpected: {err}");
 }
 
@@ -142,6 +147,7 @@ async fn imap_provider_send_delegates_to_smtp() {
         drafts_mailbox: "Drafts".into(),
         archive_mailbox: "Archive".into(),
         smtp: Some(smtp_cfg(port)),
+        oauth: None,
     };
     // send() never touches IMAP — only the smtp block matters.
     pai_connector_email::ImapProvider::new(cfg)
@@ -164,6 +170,7 @@ async fn imap_provider_send_without_smtp_errors() {
         drafts_mailbox: "Drafts".into(),
         archive_mailbox: "Archive".into(),
         smtp: None,
+        oauth: None,
     };
     let err = pai_connector_email::ImapProvider::new(cfg)
         .send(&draft())

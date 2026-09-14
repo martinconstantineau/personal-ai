@@ -39,7 +39,11 @@ the full threat model lives in `docs/security/threat-model.md`.
   in `email.json`, and even then `email.send` still requires approval.
   Passwords resolve from `PAI_EMAIL_PASSWORD` or the OS keystore
   (`email:<user>`) — never from `email.json`, and `pai_audit::redact`
-  masks them in logs.
+  masks them in logs. OAuth2 (`email.json` `oauth` block) switches
+  IMAP/SMTP to XOAUTH2: only the refresh token is persisted, at
+  `email-oauth:<user>` in the keystore; access tokens are resolved
+  fresh per session and rotated refresh tokens are re-stored
+  transparently. `email.json` still holds no secrets either way.
 - **Vision is local-only.** `vision.describe`/`pai describe` send images
   to a localhost llama.cpp server (data-URI in the request body); the
   tool reads only jailed paths and its output is untrusted model text.

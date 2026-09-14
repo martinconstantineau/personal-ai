@@ -46,6 +46,11 @@ pub struct ImapConfig {
     /// SMTP instead of erroring. Same `email:<user>` keystore entry.
     #[serde(default)]
     pub smtp: Option<crate::smtp::SmtpConfig>,
+    /// OAuth2 device-flow auth — when present, IMAP/SMTP authenticate
+    /// via XOAUTH2 and the refresh token (keystore `email-oauth:<user>`)
+    /// replaces the app password.
+    #[serde(default)]
+    pub oauth: Option<crate::oauth::OAuthConfig>,
 }
 
 fn default_port() -> u16 {
@@ -138,16 +143,21 @@ impl ImapProvider {
         Self { cfg }
     }
 
-    fn session(&self) -> Result<Session> {
+    fn session(&self, auth: &crate::oauth::AuthMaterial) -> Result<Session> {
         let cfg = &self.cfg;
-        let pass = resolve_password(&cfg.user)?;
         let tls = tls_stream(&cfg.host, cfg.port)?;
         let mut client = imap::Client::new(tls);
         client.read_greeting().map_err(err)?;
-        client
-            .login(&cfg.user, &pass)
-            .map_err(|(e, _)| err(e))
-            .map_err(err_auth_hint)
+        match auth {
+            crate::oauth::AuthMaterial::Password(pass) => client
+                .login(&cfg.user, pass)
+                .map_err(|(e, _)| err(e))
+                .map_err(err_auth_hint),
+            crate::oauth::AuthMaterial::Xoauth2(ir) => client
+                .authenticate("XOAUTH2", &crate::oauth::SaslIr(ir.clone()))
+                .map_err(|(e, _)| err(e))
+                .map_err(err_auth_hint),
+        }
     }
 
     /// Run `f` on a fresh session in `spawn_blocking`.
@@ -156,7 +166,8 @@ impl ImapProvider {
         f: impl FnOnce(&mut Session, &ImapConfig) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let cfg = self.cfg.clone();
-        let mut s = self.session()?;
+        let auth = crate::oauth::resolve_auth(&self.cfg).await?;
+        let mut s = self.session(&auth)?;
         tokio::task::spawn_blocking(move || {
             let out = f(&mut s, &cfg);
             let _ = s.logout();
@@ -491,7 +502,12 @@ impl EmailProvider for ImapProvider {
             )
         })?;
         let user = smtp.user.clone().unwrap_or_else(|| self.cfg.user.clone());
-        crate::smtp::SmtpProvider::new(smtp, user).send(draft).await
+        // Auth resolves under the *SMTP* login user — an oauth block
+        // applies here too (XOAUTH2 over AUTH XOAUTH2).
+        let auth = crate::oauth::resolve_auth_for(self.cfg.oauth.as_ref(), &user).await?;
+        crate::smtp::SmtpProvider::new(smtp, user)
+            .send_with_auth(draft, crate::oauth::smtp_auth(auth))
+            .await
     }
 
     async fn archive(&self, id: &str) -> Result<()> {
