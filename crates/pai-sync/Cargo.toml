@@ -6,10 +6,20 @@ license.workspace = true
 
 [dependencies]
 pai-core.workspace = true
+pai-storage.workspace = true
+pai-identity.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-pai-storage.workspace = true
+rusqlite.workspace = true
+hex.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+rand_core.workspace = true
+chacha20poly1305.workspace = true
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+tracing.workspace = true

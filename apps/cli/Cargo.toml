@@ -17,6 +17,7 @@ pai-permissions.workspace = true
 pai-tools.workspace = true
 pai-agent.workspace = true
 pai-documents.workspace = true
+pai-sync.workspace = true
 pai-audit.workspace = true
 serde.workspace = true
 serde_json.workspace = true
