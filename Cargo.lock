@@ -1775,6 +1775,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "futures",
  "hex",
  "pai-agent",
  "pai-audit",

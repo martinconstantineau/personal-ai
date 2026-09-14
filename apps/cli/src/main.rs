@@ -675,6 +675,15 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
     let mut provider_name = cli.provider.clone();
     let mut model = cli.model.clone();
     let mut server_url = cfg.inference.local_server_url.clone();
+    // An inference.json process adapter is an explicit on-device
+    // choice — auto prefers it over probing HTTP endpoints.
+    let process_adapter = pai_inference::InferenceFileConfig::load(&cfg.data_dir)?
+        .and_then(|c| c.process)
+        .and_then(pai_inference::ProcessInferenceProvider::detect);
+    if provider_name == "auto" && process_adapter.is_some() {
+        provider_name = "process".into();
+        eprintln!("auto: using process adapter from inference.json");
+    }
     if provider_name == "auto" {
         match pai_inference::detect_endpoints(std::time::Duration::from_secs(2)).await {
             found if !found.is_empty() => {
@@ -728,6 +737,9 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             .clone()
             .unwrap_or_else(|| cfg.inference.default_model.clone()),
     )));
+    if let Some(p) = process_adapter {
+        providers.register(Arc::new(p));
+    }
 
     // Vision: a process adapter from vision.json wins when configured;
     // else llama-server (the only OpenAI-image_url provider we know).

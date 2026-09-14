@@ -76,6 +76,9 @@ pub enum StreamEvent {
     Error(String),
 }
 
+pub mod process;
+pub use process::{InferenceFileConfig, ProcessInferenceConfig, ProcessInferenceProvider};
+
 pub type EventStream<'a> = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'a>>;
 
 // ---------------------------------------------------------------------------

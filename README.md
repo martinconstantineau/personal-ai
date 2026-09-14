@@ -59,6 +59,13 @@ cargo run -p pai-cli -- models install \
 cargo run -p pai-cli -- chat --provider auto
 cargo run -p pai-cli -- chat --provider llama-server \
     --server-url http://127.0.0.1:8080 --model my-model
+
+# Any local runner binary (ExecuTorch, MLC-LLM, llama-cli, a script):
+# write <data_dir>/inference.json —
+#   {"process": {"command": "llama-cli",
+#                "args": ["-m", "model.gguf", "-p", "{prompt}"],
+#                "timeout_secs": 300}}
+# then `--provider process` (or `auto`, which prefers it when present).
 ```
 
 The `demo` command exercises the whole stack: it tells the assistant to

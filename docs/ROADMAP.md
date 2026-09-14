@@ -227,7 +227,21 @@ the default when no `oauth` block exists.
   `NotificationSend`); `--notify` on `pai task add` publishes the result;
   external delivery via notify.json `email_to`/`webhook_url` (opt-in only);
   `pai notify list|open|send|clear|remove|configure|test` + FFI inbox ops.
-- Mobile builds shipping; on-device inference backends (ExecuTorch/MLC)
+- Mobile builds shipping — blocked on a Flutter/Android toolchain in
+  this environment.
+- ~~On-device inference backends (ExecuTorch/MLC)~~ — shipped as the
+  process-boundary adapter (`ProcessInferenceProvider`): any local
+  runner — ExecuTorch runner, MLC-LLM CLI, `llama-cli`, a custom script —
+  plugs in via `<data_dir>/inference.json` `process` block `{command,
+  args[], model?, timeout_secs}`. `{prompt}` in args is substituted as a
+  single argv element (never shell-interpreted); with no placeholder the
+  rendered prompt pipes to stdin. stdout becomes the completion —
+  `{"type":"final",...}` action JSON is parsed, so tool dispatch still
+  flows through the permission gate. Streaming forwards stdout lines as
+  deltas; a wall-clock kill bounds hung loads. `--provider process`
+  selects it explicitly; `--provider auto` prefers it over HTTP probing
+  when `inference.json` resolves. No native runtime linkage — the same
+  boundary philosophy as whisper-server/piper and the V2p vision adapter.
 - Federation story for opt-in shared memories (family/team scopes)
 
 ## Known technical debt (tracked, not hidden)
