@@ -18,6 +18,7 @@ pai-audit.workspace = true
 pai-documents.workspace = true
 pai-config.workspace = true
 pai-sync.workspace = true
+pai-broker.workspace = true
 pai-connector-email.workspace = true
 pai-voice.workspace = true
 pai-vision.workspace = true

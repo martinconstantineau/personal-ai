@@ -7,6 +7,8 @@
 use pai_core::*;
 use serde::{Deserialize, Serialize};
 
+pub mod rpc;
+
 /// A unit of work the broker can place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workload {

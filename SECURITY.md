@@ -59,6 +59,16 @@ the full threat model lives in `docs/security/threat-model.md`.
   and travel only when the user marks them (`pai conv sync`,
   `pai docs sync`, `docs ingest --sync`). Possession of the vault key is
   read+write access; `pair remove` does not rotate it.
+- **Broker RPC rides the same vault.** `pai broker call/serve` moves
+  compute requests between paired devices as `breq/<to>/<id>` /
+  `bres/<to>/<id>` `SyncObject`s — sealed exactly like sync payloads, so
+  only the addressed device (a vault holder) can read a request, and the
+  sync engine ignores the `b*` prefixes. Device targeting is a routing
+  prefix, not an access check: any vault member *can* unseal any broker
+  object — same trust boundary as the rest of the vault. A worker only
+  executes ops it has providers for (whisper/piper/llama-server on
+  localhost) and replies with errors for the rest; prompts, audio, and
+  results are ciphertext on every transport.
 
 ## Known limitations (groundwork stage)
 

@@ -100,7 +100,17 @@ spoken replies, `wav_to_pcm16` decode. `pai voice listen` (mic→STT→text)
 and `pai voice turn --mic` (full spoken turn, reply through speakers);
 `voice status` probes devices. Hardware smoke test behind `--ignored`.
 
-- Trusted-device placement via `pai-broker` (phone asks desktop to run STT)
+**V2h done (2026-09-14):** trusted-device compute brokerage — broker RPC
+over the sealed sync transport. `breq/<to>/<id>` / `bres/<to>/<id>`
+objects (XChaCha20-sealed like every `SyncObject`; the sync engine skips
+the `b*` prefixes) carry requests to a specific paired device and
+responses back. `pai broker devices|serve|call` — `serve` answers ops
+this device has providers for (`stt` whisper-server, `tts` piper,
+`infer`/`describe` llama-server), `call` targets a peer and waits.
+Verified live: request → peer executes on Ollama → sealed reply.
+
+- Broker: richer scheduling (capability-based pick vs explicit target),
+  request expiry/GC for stale `breq`s, streaming ops
 - Voice: streaming STT endpointing (feed whisper mid-utterance);
   Flutter voice UI + FFI ops
 **V2d done (2026-09-14):** vision MVP — `ImageUnderstandingProvider` +

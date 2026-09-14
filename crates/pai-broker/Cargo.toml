@@ -8,7 +8,13 @@ description = "Compute broker: answers 'where should this workload run?' from de
 [dependencies]
 pai-core.workspace = true
 pai-config.workspace = true
+pai-sync.workspace = true
+pai-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+async-trait.workspace = true
 uuid.workspace = true
+base64.workspace = true
+tokio.workspace = true
+tracing.workspace = true

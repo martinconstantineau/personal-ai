@@ -95,6 +95,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SyncCmd,
     },
+    /// Trusted-device compute: serve ops to paired peers or call one.
+    Broker {
+        #[command(subcommand)]
+        cmd: BrokerCmd,
+    },
     /// Email connector (IMAP) — configure + direct ops.
     Email {
         #[command(subcommand)]
@@ -290,6 +295,50 @@ enum SyncCmd {
         #[arg(long, default_value = "127.0.0.1:8787")]
         addr: String,
         /// Require `Authorization: Bearer <token>` (or PAI_SYNC_TOKEN).
+        #[arg(long)]
+        token: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BrokerCmd {
+    /// List paired peer devices (potential trusted executors).
+    Devices,
+    /// Answer broker requests addressed to this device, forever.
+    /// Ops are served by this device's providers: stt (whisper-server),
+    /// tts (piper), infer/describe (llama-server).
+    Serve {
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        /// Poll interval, seconds.
+        #[arg(long, default_value = "2")]
+        poll_secs: u64,
+    },
+    /// Send one request to a paired peer and wait for its response.
+    Call {
+        /// Peer device id or unambiguous prefix (see `broker devices`).
+        device: String,
+        /// Operation: stt | tts | infer | describe.
+        op: String,
+        /// UTF-8 payload (tts/infer/describe prompt) — or --file for bytes.
+        #[arg(long)]
+        text: Option<String>,
+        /// Binary payload file (stt WAV, describe image).
+        #[arg(long)]
+        file: Option<String>,
+        /// Write response bytes to a file instead of stdout.
+        #[arg(long)]
+        out: Option<String>,
+        #[arg(long, default_value = "60")]
+        timeout_secs: u64,
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
         #[arg(long)]
         token: Option<String>,
     },
@@ -869,6 +918,136 @@ fn sync_transport(
     }
 }
 
+/// Match a device-id prefix against paired peers.
+fn resolve_peer(store: &Store, prefix: &str) -> Result<DeviceId> {
+    use pai_sync::pair;
+    let peers = pair::list_peers(store)?;
+    let matches: Vec<_> = peers
+        .iter()
+        .filter(|p| p.device_id.to_string().starts_with(prefix))
+        .collect();
+    match matches.len() {
+        0 => Err(Error::NotFound(format!(
+            "no paired device matching '{prefix}' — `pai broker devices`"
+        ))),
+        1 => Ok(matches[0].device_id),
+        _ => Err(Error::InvalidInput(format!(
+            "'{prefix}' matches {} devices — be more specific",
+            matches.len()
+        ))),
+    }
+}
+
+/// Broker op dispatch for `pai broker serve`: each op resolves through
+/// whatever this device actually runs — whisper-server (stt), piper
+/// (tts), llama-server (infer/describe).
+struct BrokerOps {
+    stt: Option<pai_voice::WhisperServerStt>,
+    tts: Option<pai_voice::PiperTts>,
+    server_url: String,
+    model: String,
+}
+
+impl BrokerOps {
+    fn describe(&self) -> String {
+        let mut v = vec!["infer", "describe"];
+        if self.stt.is_some() {
+            v.push("stt");
+        }
+        if self.tts.is_some() {
+            v.push("tts");
+        }
+        v.join(", ")
+    }
+}
+
+#[async_trait::async_trait]
+impl pai_broker::rpc::OpHandler for BrokerOps {
+    async fn handle(&self, op: &str, payload: &[u8]) -> Result<Vec<u8>> {
+        use base64::Engine as _;
+        use pai_inference::{
+            ImageUnderstandingProvider, InferenceProvider, SpeechToTextProvider,
+            TextToSpeechProvider,
+        };
+        match op {
+            "stt" => {
+                let stt = self
+                    .stt
+                    .as_ref()
+                    .ok_or_else(|| Error::Provider("no whisper-server here".into()))?;
+                Ok(stt.transcribe(payload, "audio/wav").await?.into_bytes())
+            }
+            "tts" => {
+                let tts = self
+                    .tts
+                    .as_ref()
+                    .ok_or_else(|| Error::Provider("no piper here".into()))?;
+                let text = String::from_utf8(payload.to_vec())
+                    .map_err(|_| Error::InvalidInput("tts payload must be UTF-8".into()))?;
+                tts.synthesize(&text, None).await
+            }
+            "infer" => {
+                let prompt = String::from_utf8(payload.to_vec())
+                    .map_err(|_| Error::InvalidInput("infer payload must be UTF-8".into()))?;
+                let p = LlamaServerProvider::new(&self.server_url, self.model.clone());
+                let req = pai_inference::AIRequest {
+                    messages: vec![Message {
+                        id: MessageId::new(),
+                        conversation: ConversationId::new(),
+                        role: Role::User,
+                        created_at: now(),
+                        content: vec![Content::Text { text: prompt }],
+                        trust: TrustLevel::User,
+                    }],
+                    tools: vec![],
+                    model: Some(self.model.clone()),
+                    temperature: None,
+                    max_tokens: None,
+                    require_structured: false,
+                };
+                Ok(p.generate(&req).await?.text.into_bytes())
+            }
+            "describe" => {
+                #[derive(serde::Deserialize)]
+                struct DescribeArgs {
+                    image_b64: String,
+                    mime: String,
+                    prompt: String,
+                }
+                let args: DescribeArgs = serde_json::from_slice(payload)
+                    .map_err(|e| Error::InvalidInput(format!("describe payload JSON: {e}")))?;
+                let img = base64::engine::general_purpose::STANDARD
+                    .decode(&args.image_b64)
+                    .map_err(|e| Error::InvalidInput(format!("describe image_b64: {e}")))?;
+                let p = pai_vision::LlamaVisionProvider::new(&self.server_url, self.model.clone());
+                Ok(p.describe(&img, &args.mime, &args.prompt)
+                    .await?
+                    .into_bytes())
+            }
+            other => Err(Error::InvalidInput(format!("unknown broker op {other}"))),
+        }
+    }
+}
+
+/// Detect this device's serveable ops (whisper/piper via voice config;
+/// llama-server from inference config).
+async fn broker_ops(cfg: &pai_config::Config, cli: &Cli) -> BrokerOps {
+    let (stt, tts) = pai_voice::detect(&cfg.data_dir, std::time::Duration::from_secs(2))
+        .await
+        .map(|v| (v.stt, v.tts))
+        .unwrap_or((None, None));
+    let model = cli
+        .model
+        .clone()
+        .unwrap_or_else(|| cfg.inference.default_model.clone());
+    BrokerOps {
+        stt,
+        tts,
+        server_url: cfg.inference.local_server_url.clone(),
+        model,
+    }
+}
+
 /// `pai pair` + `pai sync` — store/identity only, no inference stack.
 async fn run_sync_cmds(cli: &Cli) -> Result<()> {
     use pai_sync::{crypto, engine, pair, SyncTransport};
@@ -981,6 +1160,85 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     }
                 );
                 pai_sync::relay::serve(srv);
+            }
+        },
+        Cmd::Broker { cmd } => match cmd {
+            BrokerCmd::Devices => {
+                let peers = pair::list_peers(&store)?;
+                if peers.is_empty() {
+                    println!("(no paired devices — `pai pair` first)");
+                }
+                for p in peers {
+                    println!(
+                        "  {}  {:<20} {:<10} paired {}",
+                        p.device_id,
+                        p.name,
+                        p.platform,
+                        p.paired_at.format("%Y-%m-%d")
+                    );
+                }
+            }
+            BrokerCmd::Serve {
+                dir,
+                relay,
+                token,
+                poll_secs,
+            } => {
+                let t = sync_transport(dir, relay, token)?;
+                let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
+                    Error::Sync("no vault key — pair a device first (pai pair)".into())
+                })?;
+                let ops = broker_ops(&cfg, cli).await;
+                let mut srv = pai_broker::rpc::BrokerServer::new(&*t, &vault, device.id, &ops);
+                println!(
+                    "broker serving {} on {} — ops: {}",
+                    device.id,
+                    t.id(),
+                    ops.describe()
+                );
+                srv.serve(std::time::Duration::from_secs(*poll_secs)).await;
+            }
+            BrokerCmd::Call {
+                device: dev,
+                op,
+                text,
+                file,
+                out,
+                timeout_secs,
+                dir,
+                relay,
+                token,
+            } => {
+                let to = resolve_peer(&store, dev)?;
+                let t = sync_transport(dir, relay, token)?;
+                let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
+                    Error::Sync("no vault key — pair a device first (pai pair)".into())
+                })?;
+                let payload = if let Some(f) = file {
+                    std::fs::read(f).map_err(|e| Error::InvalidInput(format!("{f}: {e}")))?
+                } else if let Some(t) = text {
+                    t.clone().into_bytes()
+                } else {
+                    return Err(Error::InvalidInput("pass --text or --file".into()));
+                };
+                let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id);
+                let resp = client
+                    .call(
+                        to,
+                        op,
+                        &payload,
+                        std::time::Duration::from_secs(*timeout_secs),
+                    )
+                    .await?;
+                if let Some(f) = out {
+                    std::fs::write(f, &resp).map_err(|e| Error::Storage(e.to_string()))?;
+                    println!("wrote {f} ({} bytes)", resp.len());
+                } else {
+                    match String::from_utf8(resp.clone()) {
+                        Ok(s) => println!("{s}"),
+                        Err(_) => println!("({} bytes, binary — use --out)", resp.len()),
+                    }
+                }
             }
         },
         Cmd::Email { cmd } => run_email_cmds(cmd, &cfg).await?,
@@ -1336,10 +1594,14 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Pair/sync/email/describe need no agent — skip provider probing.
+    // Pair/sync/broker/email/describe need no agent — skip provider probing.
     if matches!(
         cli.cmd,
-        Cmd::Pair { .. } | Cmd::Sync { .. } | Cmd::Email { .. } | Cmd::Describe { .. }
+        Cmd::Pair { .. }
+            | Cmd::Sync { .. }
+            | Cmd::Broker { .. }
+            | Cmd::Email { .. }
+            | Cmd::Describe { .. }
     ) {
         return run_sync_cmds(&cli).await;
     }
@@ -1744,7 +2006,11 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::Voice { cmd } => run_voice_cmds(&cmd, &ctx, &cfg).await?,
-        Cmd::Pair { .. } | Cmd::Sync { .. } | Cmd::Email { .. } | Cmd::Describe { .. } => {
+        Cmd::Pair { .. }
+        | Cmd::Sync { .. }
+        | Cmd::Broker { .. }
+        | Cmd::Email { .. }
+        | Cmd::Describe { .. } => {
             unreachable!("handled before build")
         }
     }

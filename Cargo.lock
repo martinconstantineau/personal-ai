@@ -1546,9 +1546,11 @@ name = "pai"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "clap",
  "pai-agent",
  "pai-audit",
+ "pai-broker",
  "pai-config",
  "pai-connector-email",
  "pai-core",
@@ -1616,11 +1618,17 @@ dependencies = [
 name = "pai-broker"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "base64",
  "pai-config",
  "pai-core",
+ "pai-storage",
+ "pai-sync",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1759,6 +1767,7 @@ dependencies = [
  "hex",
  "pai-agent",
  "pai-audit",
+ "pai-broker",
  "pai-config",
  "pai-connector-email",
  "pai-core",
