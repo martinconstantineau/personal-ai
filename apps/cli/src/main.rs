@@ -105,6 +105,15 @@ enum Cmd {
         #[command(subcommand)]
         cmd: VoiceCmd,
     },
+    /// Describe/answer a question about an image via a local multimodal
+    /// model (llama.cpp server with --mmproj).
+    Describe {
+        /// Image file (png/jpg/webp/gif/bmp).
+        image: String,
+        /// Question or instruction about the image.
+        #[arg(long, default_value = "Describe this image in detail.")]
+        prompt: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -448,6 +457,18 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             .unwrap_or_else(|| cfg.inference.default_model.clone()),
     )));
 
+    // Vision: only llama-server speaks the OpenAI image_url protocol —
+    // constructing it for other providers would just fail at call time.
+    let vision: Option<Arc<dyn pai_inference::ImageUnderstandingProvider>> =
+        (provider_name == "llama-server").then(|| {
+            Arc::new(pai_vision::LlamaVisionProvider::new(
+                &server_url,
+                model
+                    .clone()
+                    .unwrap_or_else(|| cfg.inference.default_model.clone()),
+            )) as _
+        });
+
     let agent = AgentRuntime {
         providers,
         tools: pai_tools::builtin_registry(),
@@ -463,6 +484,7 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
         }),
         documents: Some(documents.clone()),
         email: email.clone(),
+        vision,
         allowed_roots: vec![inbox],
     };
 
@@ -872,6 +894,30 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             }
         },
         Cmd::Email { cmd } => run_email_cmds(cmd, &cfg).await?,
+        Cmd::Describe { image, prompt } => {
+            use pai_inference::ImageUnderstandingProvider;
+            let path = std::path::Path::new(image);
+            let mime = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .and_then(pai_vision::mime_for_ext)
+                .unwrap_or("image/png");
+            let bytes =
+                std::fs::read(path).map_err(|e| Error::InvalidInput(format!("{image}: {e}")))?;
+            let model = cfg.inference.default_model.clone();
+            let p = pai_vision::LlamaVisionProvider::new(&cfg.inference.local_server_url, model);
+            match p.describe(&bytes, mime, prompt).await {
+                Ok(text) => println!("{text}"),
+                Err(e) => {
+                    eprintln!("{e}");
+                    eprintln!(
+                        "hint: serve a multimodal model — e.g. llama-server \
+                         -m model.gguf --mmproj mmproj.gguf --port 8080"
+                    );
+                    return Err(e);
+                }
+            }
+        }
         _ => unreachable!(),
     }
     Ok(())
@@ -1148,10 +1194,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Pair/sync/email need no inference — skip provider probing entirely.
+    // Pair/sync/email/describe need no agent — skip provider probing.
     if matches!(
         cli.cmd,
-        Cmd::Pair { .. } | Cmd::Sync { .. } | Cmd::Email { .. }
+        Cmd::Pair { .. } | Cmd::Sync { .. } | Cmd::Email { .. } | Cmd::Describe { .. }
     ) {
         return run_sync_cmds(&cli).await;
     }
@@ -1510,6 +1556,7 @@ async fn main() -> Result<()> {
                     memory_scope: None,
                     documents: Some(ctx.documents.as_ref()),
                     email: ctx.email.as_deref(),
+                    vision: None,
                     allowed_roots: &[],
                 };
                 // CLI user is the operator — direct invocation, still audited
@@ -1523,7 +1570,7 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::Voice { cmd } => run_voice_cmds(&cmd, &ctx, &cfg).await?,
-        Cmd::Pair { .. } | Cmd::Sync { .. } | Cmd::Email { .. } => {
+        Cmd::Pair { .. } | Cmd::Sync { .. } | Cmd::Email { .. } | Cmd::Describe { .. } => {
             unreachable!("handled before build")
         }
     }

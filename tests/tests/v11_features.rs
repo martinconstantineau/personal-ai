@@ -240,6 +240,7 @@ async fn documents_search_tool_returns_citations() {
         memory_scope: None,
         documents: Some(&docs),
         email: None,
+        vision: None,
         allowed_roots: &[],
     };
     let out = tool
@@ -263,6 +264,7 @@ async fn documents_search_tool_returns_citations() {
         memory_scope: None,
         documents: Some(&docs),
         email: None,
+        vision: None,
         allowed_roots: std::slice::from_ref(&jail_dir),
     };
     let out = tool

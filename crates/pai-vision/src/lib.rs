@@ -1,11 +1,15 @@
 //! Vision boundary: image understanding + VLM access.
 //!
 //! The trait lives in `pai-inference` (`ImageUnderstandingProvider` joins
-//! the capability model). This crate holds vision-side request types.
-//! Local runtimes targeted: llama.cpp VLMs (LLaVA-family), ONNX, MLX-VLM —
-//! all free/open-weight.
+//! the capability model). This crate holds vision-side request types +
+//! the first concrete adapter ([`LlamaVisionProvider`], llama.cpp
+//! multimodal via OpenAI `image_url` parts). ONNX / MLX-VLM slot in the
+//! same way later — all free/open-weight.
 
 use serde::{Deserialize, Serialize};
+
+pub mod provider;
+pub use provider::{mime_for_ext, LlamaVisionProvider};
 
 /// A question about an image blob.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -38,6 +38,9 @@ the full threat model lives in `docs/security/threat-model.md`.
   no send verb at all (drafts-first by design). Passwords resolve from
   `PAI_EMAIL_PASSWORD` or the OS keystore (`email:<user>`) — never from
   `email.json`, and `pai_audit::redact` masks them in logs.
+- **Vision is local-only.** `vision.describe`/`pai describe` send images
+  to a localhost llama.cpp server (data-URI in the request body); the
+  tool reads only jailed paths and its output is untrusted model text.
 - **Voice is local-only.** STT runs against a `whisper-server` on
   localhost; TTS spawns the local `piper` binary (with a timeout and no
   shell — arguments can't inject commands). No audio leaves the machine.

@@ -1256,6 +1256,7 @@ dependencies = [
  "pai-storage",
  "pai-sync",
  "pai-tools",
+ "pai-vision",
  "pai-voice",
  "rpassword",
  "rusqlite",
@@ -1399,6 +1400,7 @@ dependencies = [
  "pai-permissions",
  "pai-storage",
  "pai-tools",
+ "pai-vision",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1447,6 +1449,7 @@ name = "pai-integration-tests"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "hex",
  "pai-agent",
@@ -1462,6 +1465,7 @@ dependencies = [
  "pai-storage",
  "pai-sync",
  "pai-tools",
+ "pai-vision",
  "pai-voice",
  "serde_json",
  "tokio",
@@ -1595,8 +1599,10 @@ dependencies = [
  "pai-connector-email",
  "pai-core",
  "pai-documents",
+ "pai-inference",
  "pai-memory",
  "pai-permissions",
+ "pai-vision",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1609,12 +1615,15 @@ name = "pai-vision"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "pai-core",
  "pai-inference",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "uuid",
 ]
 

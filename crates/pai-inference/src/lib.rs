@@ -130,6 +130,14 @@ pub trait VoiceActivityProvider: Send + Sync {
 }
 
 #[async_trait]
+pub trait ImageUnderstandingProvider: Send + Sync {
+    fn id(&self) -> &'static str;
+    /// Answer `prompt` about `image` (raw bytes + mime). Text out only —
+    /// grounding/detection is a future extension.
+    async fn describe(&self, image: &[u8], mime: &str, prompt: &str) -> Result<String>;
+}
+
+#[async_trait]
 pub trait ImageGenerationProvider: Send + Sync {
     fn id(&self) -> &'static str;
     async fn generate_image(&self, prompt: &str, size: (u32, u32)) -> Result<Vec<u8>>;

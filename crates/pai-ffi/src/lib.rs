@@ -171,6 +171,14 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
             .with_timeout(Duration::from_secs(120)),
     ));
 
+    let vision: Option<Arc<dyn pai_inference::ImageUnderstandingProvider>> =
+        (provider_name == "llama-server").then(|| {
+            Arc::new(pai_vision::LlamaVisionProvider::new(
+                &server_url,
+                model.clone().unwrap_or_default(),
+            )) as _
+        });
+
     let agent = AgentRuntime {
         providers,
         tools: pai_tools::builtin_registry(),
@@ -186,6 +194,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         }),
         documents: Some(documents.clone()),
         email: email.clone(),
+        vision,
         allowed_roots: vec![inbox],
     };
 

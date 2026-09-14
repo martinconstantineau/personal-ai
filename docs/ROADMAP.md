@@ -78,7 +78,14 @@ capture needs OS audio permissions (cpal) and is the next step.
 - Trusted-device placement via `pai-broker` (phone asks desktop to run STT)
 - Voice: mic capture + playback (cpal), VAD-driven endpointing, streaming
   STT; Flutter voice UI + FFI ops once mic capture lands
-- Vision: llama.cpp multimodal describe/OCR
+**V2d done (2026-09-14):** vision MVP — `ImageUnderstandingProvider` +
+`LlamaVisionProvider` (llama.cpp `--mmproj` models via OpenAI `image_url`
+data-URIs), `pai describe <image> [--prompt]`, and the `vision.describe`
+tool so the agent can inspect images inside the filesystem jail
+(`FilesRead`, Low risk, untrusted output).
+
+- Vision: ONNX/MLX-VLM adapters; grounding/detections when models expose
+  them; image ingest into documents (OCR text into the document store)
 - Connectors: registry abstraction beyond email; SMTP send; OAuth2 for
   Gmail/Outlook (app-password is today's auth)
 

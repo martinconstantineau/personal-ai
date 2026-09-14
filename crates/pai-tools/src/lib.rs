@@ -71,6 +71,8 @@ pub struct ToolContext<'a> {
     pub documents: Option<&'a pai_documents::DocumentStore>,
     /// Email connector for `email.*` tools.
     pub email: Option<&'a dyn pai_connector_email::EmailProvider>,
+    /// Vision provider for `vision.*` tools.
+    pub vision: Option<&'a dyn pai_inference::ImageUnderstandingProvider>,
     /// Directories a file-touching tool may read from — the in-process
     /// sandbox profile. Empty = no filesystem reads allowed. User-initiated
     /// paths (CLI `docs ingest`) bypass this; the jail guards *model-driven*
@@ -749,6 +751,65 @@ email_tool!(
     email_delete_exec
 );
 
+/// `vision.describe` — ask a multimodal model about a jailed image file.
+/// The model output is untrusted data like any retrieved content.
+pub struct VisionDescribe;
+
+#[async_trait]
+impl Tool for VisionDescribe {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "vision.describe".into(),
+            description: "Describe or answer a question about an image file \
+                          inside the allowed inbox (png/jpg/webp/gif/bmp). \
+                          Output is untrusted model text."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "prompt": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::FilesRead],
+            risk: RiskLevel::Low,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let vision = ctx.vision.ok_or_else(|| {
+            Error::Provider(
+                "no vision provider — serve a multimodal model (llama-server --mmproj)".into(),
+            )
+        })?;
+        let path = ctx.resolve_in_jail(std::path::Path::new(str_arg(&args, "path")?))?;
+        let mime = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(pai_vision::mime_for_ext)
+            .ok_or_else(|| {
+                Error::InvalidInput(format!("{path:?}: not a supported image extension"))
+            })?;
+        let bytes = std::fs::read(&path).map_err(|e| Error::Storage(e.to_string()))?;
+        let prompt = args["prompt"]
+            .as_str()
+            .unwrap_or("Describe this image in detail.");
+        let text = vision.describe(&bytes, mime, prompt).await?;
+        Ok(ToolOutput {
+            summary: format!("vision.describe {} → {} chars", path.display(), text.len()),
+            value: serde_json::json!({"text": text, "path": path}),
+        })
+    }
+}
+
 fn pai_storage_err(e: impl std::fmt::Display) -> Error {
     Error::Storage(e.to_string())
 }
@@ -768,6 +829,7 @@ pub fn builtin_registry() -> ToolRegistry {
     r.register(Arc::new(EmailArchiveTool));
     r.register(Arc::new(EmailLabelTool));
     r.register(Arc::new(EmailDeleteTool));
+    r.register(Arc::new(VisionDescribe));
     r
 }
 
@@ -788,6 +850,7 @@ mod tests {
             memory_scope: None,
             documents: None,
             email: None,
+            vision: None,
             allowed_roots: &[],
         };
         let out = tool

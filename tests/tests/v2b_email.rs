@@ -91,6 +91,7 @@ fn ctx<'a>(mail: Option<&'a dyn EmailProvider>) -> ToolContext<'a> {
         memory_scope: None,
         documents: None,
         email: mail,
+        vision: None,
         allowed_roots: &[],
     }
 }

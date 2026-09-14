@@ -21,6 +21,7 @@ pai-connector-email.workspace = true
 rpassword.workspace = true
 pai-sync.workspace = true
 pai-voice.workspace = true
+pai-vision.workspace = true
 pai-audit.workspace = true
 serde.workspace = true
 serde_json.workspace = true

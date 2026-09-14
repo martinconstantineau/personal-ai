@@ -165,6 +165,8 @@ pub struct AgentRuntime {
     pub documents: Option<Arc<pai_documents::DocumentStore>>,
     /// Email connector exposed to `email.*` tools.
     pub email: Option<Arc<dyn pai_connector_email::EmailProvider>>,
+    /// Vision provider exposed to `vision.*` tools.
+    pub vision: Option<Arc<dyn pai_inference::ImageUnderstandingProvider>>,
     /// Filesystem jail for file-touching tools: canonicalized roots a tool
     /// may read inside. Empty = no filesystem reads.
     pub allowed_roots: Vec<std::path::PathBuf>,
@@ -724,6 +726,7 @@ impl AgentRuntime {
             memory_scope,
             documents: self.documents.as_deref(),
             email: self.email.as_deref(),
+            vision: self.vision.as_deref(),
             allowed_roots: &self.allowed_roots,
         };
         match tool.execute(arguments, &ctx).await {
