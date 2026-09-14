@@ -149,6 +149,19 @@ class PaiBridge {
             if (inReplyTo != null) 'in_reply_to': inReplyTo,
           }))) as Map<String, dynamic>;
 
+  /// Voice ops — `{stt, tts, mic, speaker}` probe; `voiceListen` blocks up
+  /// to [maxSecs] in the worker isolate; `voiceSay` plays on the host
+  /// speaker ({ok, played} or {ok, played:false, wav_b64}).
+  Future<Map<String, dynamic>> voiceStatus() async =>
+      (await _call(_Op.voiceStatus)) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> voiceListen({int maxSecs = 30}) async =>
+      (await _call(_Op.voiceListen, arg: '$maxSecs'))
+          as Map<String, dynamic>;
+  Future<Map<String, dynamic>> voiceTranscribe(String path) async =>
+      (await _call(_Op.voiceTranscribe, arg: path)) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> voiceSay(String text) async =>
+      (await _call(_Op.voiceSay, arg: text)) as Map<String, dynamic>;
+
   Future<dynamic> _call(_Op op,
       {String? arg, StreamController<Map<String, dynamic>>? events}) {
     final id = _nextId++;
@@ -249,6 +262,15 @@ class PaiBridge {
             result = client.emailRead(req.arg!);
           case _Op.emailDraft:
             result = client.emailDraft(req.arg!);
+          case _Op.voiceStatus:
+            result = client.voiceStatus();
+          case _Op.voiceListen:
+            result =
+                client.voiceListen(maxSecs: int.tryParse(req.arg ?? '') ?? 30);
+          case _Op.voiceTranscribe:
+            result = client.voiceTranscribe(req.arg!);
+          case _Op.voiceSay:
+            result = client.voiceSay(req.arg!);
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -294,6 +316,10 @@ enum _Op {
   emailSearch,
   emailRead,
   emailDraft,
+  voiceStatus,
+  voiceListen,
+  voiceTranscribe,
+  voiceSay,
 }
 
 class _InitError {

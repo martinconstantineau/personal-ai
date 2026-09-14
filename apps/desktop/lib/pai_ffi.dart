@@ -22,6 +22,7 @@ typedef NativeEventCallback = Void Function(Pointer<Utf8>, Pointer<Void>);
 typedef _SetEventCbNative = Void Function(
     Pointer<Void>, Pointer<NativeFunction<NativeEventCallback>>, Pointer<Void>);
 typedef _ApproveNative = Int32 Function(Pointer<Void>, Pointer<Utf8>, Int32);
+typedef _VoiceListenNative = Pointer<Utf8> Function(Pointer<Void>, Uint32);
 typedef _ThreeStrNative = Pointer<Utf8> Function(
     Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>);
 typedef _CancelNative = Void Function(Pointer<Void>);
@@ -83,6 +84,15 @@ class PaiClient {
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_read');
   late final _emailDraft = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_draft');
+  late final _voiceStatus = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_voice_status');
+  late final _voiceListen = _lib.lookupFunction<_VoiceListenNative,
+      Pointer<Utf8> Function(Pointer<Void>, int)>('pai_voice_listen');
+  late final _voiceTranscribe = _lib.lookupFunction<_SendNative,
+          Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
+      'pai_voice_transcribe');
+  late final _voiceSay = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_voice_say');
   late final _setPolicy = _lib.lookupFunction<_ThreeStrNative,
           Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>(
       'pai_set_policy');
@@ -244,6 +254,23 @@ class PaiClient {
   /// Create a draft: {to:[{address}], cc:[], subject, body, in_reply_to?}.
   Map<String, dynamic> emailDraft(String draftJson) =>
       _call1(_emailDraft, draftJson);
+
+  /// Voice capability probe: {stt, tts, mic, speaker, whisper_url}.
+  Map<String, dynamic> voiceStatus() =>
+      _json(_voiceStatus(_handle)) as Map<String, dynamic>;
+
+  /// Capture + transcribe one utterance. Blocking (up to [maxSecs]) —
+  /// worker isolate only. Returns {heard, text?, wav_b64?}.
+  Map<String, dynamic> voiceListen({int maxSecs = 30}) =>
+      _json(_voiceListen(_handle, maxSecs)) as Map<String, dynamic>;
+
+  /// Transcribe a WAV file. Blocking — worker isolate only.
+  Map<String, dynamic> voiceTranscribe(String path) =>
+      _call1(_voiceTranscribe, path);
+
+  /// Speak text through the host speaker. Blocking — worker isolate only.
+  /// {ok, played} or {ok, played:false, wav_b64} when playback failed.
+  Map<String, dynamic> voiceSay(String text) => _call1(_voiceSay, text);
 
   Map<String, dynamic> _callOpt(
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>) f, String? a) {

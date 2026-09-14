@@ -1699,6 +1699,7 @@ name = "pai-ffi"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "pai-agent",
  "pai-audit",
  "pai-broker",
@@ -1714,6 +1715,7 @@ dependencies = [
  "pai-storage",
  "pai-tools",
  "pai-vision",
+ "pai-voice",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1772,6 +1774,7 @@ dependencies = [
  "pai-connector-email",
  "pai-core",
  "pai-documents",
+ "pai-ffi",
  "pai-identity",
  "pai-inference",
  "pai-memory",

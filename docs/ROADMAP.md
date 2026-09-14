@@ -111,8 +111,15 @@ Verified live: request → peer executes on Ollama → sealed reply.
 
 - Broker: richer scheduling (capability-based pick vs explicit target),
   request expiry/GC for stale `breq`s, streaming ops
-- Voice: streaming STT endpointing (feed whisper mid-utterance);
-  Flutter voice UI + FFI ops
+**V2i done (2026-09-14):** Flutter voice UI + FFI ops — `pai_voice_status`
+({stt,tts,mic,speaker,whisper_url}), `pai_voice_listen` (blocking
+mic→whisper, {heard,text?,wav_b64}), `pai_voice_transcribe` (WAV path),
+`pai_voice_say` (piper→speaker, {ok,played}|{ok,played:false,wav_b64}).
+VoiceSetup is probed once at `pai_init`. Chat screen: mic button in the
+input row (dictation lands in the field for review), speaker toggle in
+the appbar speaks each reply aloud.
+
+- Voice: streaming STT endpointing (feed whisper mid-utterance)
 **V2d done (2026-09-14):** vision MVP — `ImageUnderstandingProvider` +
 `LlamaVisionProvider` (llama.cpp `--mmproj` models via OpenAI `image_url`
 data-URIs), `pai describe <image> [--prompt]`, and the `vision.describe`

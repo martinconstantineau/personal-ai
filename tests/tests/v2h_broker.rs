@@ -165,9 +165,18 @@ async fn broker_error_and_timeout() {
     let mut server = BrokerServer::new(&transport, &vault, b.device.id, &handler);
     let client = BrokerClient::new(&transport, &vault, a.device.id);
 
-    // Handler error propagates back to the caller.
+    // Handler error propagates back to the caller. Serve until the
+    // request lands — join! can poll serve_once before call's push.
     let call = client.call(b.device.id, "nope", b"x", Duration::from_secs(10));
-    let serve = server.serve_once();
+    let serve = async {
+        for _ in 0..50 {
+            if server.serve_once().await.unwrap() > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("server never saw the request");
+    };
     let (resp, _) = tokio::join!(call, serve);
     let err = resp.unwrap_err().to_string();
     assert!(err.contains("unknown op"), "unexpected error: {err}");

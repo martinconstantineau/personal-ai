@@ -16,12 +16,15 @@
 //! `pai_send` and `pai_resume` are blocking (call them from a Dart isolate);
 //! the event callback delivers incremental progress while they run.
 
+use base64::Engine as _;
 use pai_agent::{
     AgentDefinition, AgentRuntime, ApprovalHandler, CancelToken, ConversationStore, Persistence,
     RunRequest, RunStore,
 };
 use pai_core::*;
-use pai_inference::{EchoProvider, LlamaServerProvider};
+use pai_inference::{
+    EchoProvider, LlamaServerProvider, SpeechToTextProvider, TextToSpeechProvider,
+};
 use pai_memory::{MemoryBackend, MemoryScopeQuery, RecallQuery, SqliteMemory};
 use pai_permissions::{all_permissions, Permission, PolicyEngine, PolicyTable};
 use pai_storage::Store;
@@ -61,6 +64,10 @@ pub struct PaiRuntime {
     device: DeviceId,
     documents: Arc<pai_documents::DocumentStore>,
     email: Option<Arc<dyn pai_connector_email::EmailProvider>>,
+    /// Detected voice providers (whisper-server STT / piper TTS) — None
+    /// when neither is configured. Mic/speaker probes are cheap enough
+    /// to answer live in `pai_voice_status`.
+    voice: Option<pai_voice::VoiceSetup>,
 }
 
 #[derive(Deserialize)]
@@ -164,6 +171,12 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         pai_connector_email::ImapConfig::load(&data_dir)?
             .map(|c| Arc::new(pai_connector_email::ImapProvider::new(c)) as _);
 
+    // Voice: probe whisper-server + piper once at init (2s budget). A
+    // missing provider just means the corresponding FFI op errors.
+    let voice = rt
+        .block_on(pai_voice::detect(&data_dir, Duration::from_secs(2)))
+        .ok();
+
     let mut providers = pai_inference::ProviderRegistry::default();
     providers.register(Arc::new(EchoProvider));
     providers.register(Arc::new(
@@ -247,6 +260,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         device: device.id,
         documents,
         email,
+        voice,
     })
 }
 
@@ -1050,6 +1064,138 @@ pub unsafe extern "C" fn pai_email_draft(
     match rt.rt.block_on(async { email.create_draft(&draft).await }) {
         Ok(id) => to_c(serde_json::json!({"draft_id": id})),
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Voice
+// ---------------------------------------------------------------------------
+
+fn voice_err(msg: &str) -> *mut c_char {
+    to_c(serde_json::json!({"error": msg}))
+}
+
+/// Voice capability probe: `{stt, tts, mic, speaker, whisper_url}`.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_voice_status(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    let (stt, tts, whisper_url) = match &rt.voice {
+        Some(v) => (v.stt.is_some(), v.tts.is_some(), v.cfg.whisper_url()),
+        None => (false, false, String::new()),
+    };
+    to_c(serde_json::json!({
+        "stt": stt,
+        "tts": tts,
+        "mic": pai_voice::mic::input_available(),
+        "speaker": pai_voice::mic::output_available(),
+        "whisper_url": whisper_url,
+    }))
+}
+
+/// Capture one VAD-endpointed utterance from the default mic, then
+/// transcribe it when whisper-server is configured. Blocks up to
+/// `max_secs` (clamped 1..=120). Returns `{heard, text?, wav_b64}`.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_voice_listen(handle: *mut PaiRuntime, max_secs: u32) -> *mut c_char {
+    let rt = &mut *handle;
+    let Some(v) = &rt.voice else {
+        return voice_err("voice not configured — `pai voice configure`");
+    };
+    if !pai_voice::mic::input_available() {
+        return voice_err("no microphone detected");
+    }
+    let pcm = match pai_voice::mic::capture_utterance(&v.vad, max_secs.clamp(1, 120)) {
+        Ok(p) => p,
+        Err(e) => return voice_err(&e.to_string()),
+    };
+    if pcm.is_empty() {
+        return to_c(serde_json::json!({"heard": false}));
+    }
+    let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let wav = pai_voice::pcm16_to_wav(&bytes, pai_voice::mic::TARGET_RATE);
+    let text = match &v.stt {
+        Some(stt) => match rt.rt.block_on(stt.transcribe(&wav, "audio/wav")) {
+            Ok(t) => Some(t),
+            Err(e) => return voice_err(&e.to_string()),
+        },
+        None => None,
+    };
+    to_c(serde_json::json!({
+        "heard": true,
+        "text": text,
+        "wav_b64": base64::engine::general_purpose::STANDARD.encode(&wav),
+    }))
+}
+
+/// Transcribe a WAV file by absolute path. Returns `{text}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `path` is a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn pai_voice_transcribe(
+    handle: *mut PaiRuntime,
+    path: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let Some(v) = &rt.voice else {
+        return voice_err("voice not configured — `pai voice configure`");
+    };
+    let Some(stt) = &v.stt else {
+        return voice_err("whisper-server not configured/unreachable");
+    };
+    let path = match read_str(path) {
+        Ok(s) => s.to_string(),
+        Err(e) => return voice_err(&e.to_string()),
+    };
+    let wav = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => return voice_err(&format!("{path}: {e}")),
+    };
+    match rt.rt.block_on(stt.transcribe(&wav, "audio/wav")) {
+        Ok(text) => to_c(serde_json::json!({"text": text})),
+        Err(e) => voice_err(&e.to_string()),
+    }
+}
+
+/// Speak `text` through the default speaker via piper. Returns
+/// `{ok, played}` — when playback fails the WAV is returned as
+/// `{ok, played:false, wav_b64}` so the UI can render it another way.
+/// # Safety
+/// `handle` must come from `pai_init`; `text` is a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn pai_voice_say(
+    handle: *mut PaiRuntime,
+    text: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let Some(v) = &rt.voice else {
+        return voice_err("voice not configured — `pai voice configure`");
+    };
+    let Some(tts) = &v.tts else {
+        return voice_err("piper not configured — `pai voice configure`");
+    };
+    let text = match read_str(text) {
+        Ok(s) => s.to_string(),
+        Err(e) => return voice_err(&e.to_string()),
+    };
+    let wav = match rt.rt.block_on(tts.synthesize(&text, None)) {
+        Ok(w) => w,
+        Err(e) => return voice_err(&e.to_string()),
+    };
+    let played = pai_voice::mic::wav_to_pcm16(&wav)
+        .and_then(|(rate, pcm)| pai_voice::mic::play(&pcm, rate))
+        .is_ok();
+    if played {
+        to_c(serde_json::json!({"ok": true, "played": true}))
+    } else {
+        to_c(serde_json::json!({
+            "ok": true,
+            "played": false,
+            "wav_b64": base64::engine::general_purpose::STANDARD.encode(&wav),
+        }))
     }
 }
 

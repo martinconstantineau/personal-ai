@@ -42,6 +42,9 @@ class _ChatScreenState extends State<ChatScreen> {
   PaiBridge? _pai;
   String? _error;
   bool _sending = false;
+  bool _listening = false;
+  bool _speakReplies = false;
+  Map<String, dynamic> _voice = const {};
   final _entries = <_Entry>[];
   List<dynamic> _convs = const [];
   List<dynamic> _interrupted = const [];
@@ -66,6 +69,8 @@ class _ChatScreenState extends State<ChatScreen> {
       await _refreshConvs();
       final runs = await _pai!.runs();
       if (mounted) setState(() => _interrupted = runs);
+      final voice = await _pai!.voiceStatus();
+      if (mounted) setState(() => _voice = voice);
     } catch (e) {
       setState(() => _error = 'Core init failed: $e\n'
           '(build the core: cargo build -p pai-ffi)');
@@ -146,6 +151,44 @@ class _ChatScreenState extends State<ChatScreen> {
       _sending = false;
     });
     _scrollDown();
+    if (_speakReplies && ai.text.isNotEmpty && !ai.isError) {
+      // Fire-and-forget: playback happens on the host speaker inside the
+      // worker isolate; failures surface as a banner, not a crash.
+      _pai!.voiceSay(ai.text).then((res) {
+        if (res['error'] != null && mounted) {
+          setState(() => _error = 'voice: ${res['error']}');
+        }
+      });
+    }
+  }
+
+  /// Push-to-talk: capture one utterance, drop the transcript into the
+  /// input field for review (the user still presses send).
+  Future<void> _listen() async {
+    if (_pai == null || _listening) return;
+    setState(() => _listening = true);
+    try {
+      final res = await _pai!.voiceListen();
+      if (!mounted) return;
+      if (res['error'] != null) {
+        setState(() => _error = 'voice: ${res['error']}');
+      } else if (res['heard'] == true) {
+        final text = (res['text'] as String?)?.trim() ?? '';
+        setState(() {
+          if (text.isNotEmpty) {
+            _input.text =
+                _input.text.isEmpty ? text : '${_input.text} $text';
+            _input.selection = TextSelection.collapsed(
+                offset: _input.text.length);
+          } else {
+            _error =
+                'heard you, but whisper-server is not configured — see `pai voice status`';
+          }
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _listening = false);
+    }
   }
 
   void _onEvent(Map<String, dynamic> ev, _Entry ai, void Function() markStreamed,
@@ -244,6 +287,17 @@ class _ChatScreenState extends State<ChatScreen> {
               icon: const Icon(Icons.stop_circle_outlined),
               tooltip: 'Cancel run',
               onPressed: () => _pai?.cancel(),
+            ),
+          if (_voice['tts'] == true && _voice['speaker'] == true)
+            IconButton(
+              icon: Icon(_speakReplies
+                  ? Icons.volume_up
+                  : Icons.volume_off_outlined),
+              tooltip: _speakReplies
+                  ? 'Speaking replies — tap to mute'
+                  : 'Speak replies aloud (piper)',
+              onPressed: () =>
+                  setState(() => _speakReplies = !_speakReplies),
             ),
           IconButton(
             icon: const Icon(Icons.psychology_outlined),
@@ -346,6 +400,28 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             const SizedBox(width: 8),
+            IconButton(
+              icon: _listening
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : Icon(Icons.mic,
+                      color: _voice['mic'] == true
+                          ? cs.primary
+                          : cs.onSurfaceVariant),
+              tooltip: _voice['mic'] == true
+                  ? (_voice['stt'] == true
+                      ? 'Dictate (mic → whisper)'
+                      : 'Dictate (mic only — no whisper-server)')
+                  : 'No microphone detected',
+              onPressed: (_pai == null ||
+                      _voice['mic'] != true ||
+                      _listening ||
+                      _sending)
+                  ? null
+                  : _listen,
+            ),
             IconButton.filled(
                 onPressed: _send, icon: const Icon(Icons.send)),
           ]),
