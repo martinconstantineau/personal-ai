@@ -75,6 +75,15 @@ the full threat model lives in `docs/security/threat-model.md`.
   claiming work it shouldn't — that boundary is the pairing decision
   itself. Background ticks deny interactive approvals outright, so a
   synced task cannot escalate to AskUser actions on an unattended device.
+- **Synced workflow definitions are code.** A `synchronized` workflow
+  roams to every paired device like a task — a vault member can push a
+  definition whose `tool` steps then run under *your* permission policy.
+  The bound holds both ways: a step's tool must be in the workflow's own
+  `tools` allowlist (checked at save AND at load-before-run), and every
+  call still passes policy + approval gates. Workflow *runs* stay
+  device-local — only definitions roam. An `AgentDefinition` tool
+  allowlist is now enforced at dispatch, not just at advertisement, so a
+  workflow prompt step cannot be talked into calling an unlisted tool.
 - **Broker RPC rides the same vault.** `pai broker call/serve` moves
   compute requests between paired devices as `breq/<to>/<id>` /
   `bres/<to>/<id>` `SyncObject`s — sealed exactly like sync payloads, so

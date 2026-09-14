@@ -216,7 +216,11 @@ the default when no `oauth` block exists.
 
 ## V3 — The personal OS layer
 
-- Multi-step `Workflow`s (declarative, permission-bounded)
+- ~~Multi-step `Workflow`s (declarative, permission-bounded)~~ — shipped:
+  `workflow add|run|resume|runs|remove|sync` on `pai`, `prompt`/`tool`
+  steps with `{{input}}`/`{{steps.<id>.output}}` templates, per-workflow
+  tool allowlist enforced at dispatch (empty = no tools), crash-safe
+  run cursor + resume, `wf/` sealed sync objects with tombstones.
 - Proactive surface: `pai-tasks` schedules + notification channels
 - Mobile builds shipping; on-device inference backends (ExecuTorch/MLC)
 - Federation story for opt-in shared memories (family/team scopes)

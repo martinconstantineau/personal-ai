@@ -50,13 +50,21 @@ fn schema_v3_columns_exist() {
                 "SELECT updated_at, deleted, trigger_json, payload_json,
                         claimed_by, lease_expires_at FROM tasks LIMIT 0",
             )?;
+            c.execute_batch(
+                "SELECT name, definition_json, sync_scope, updated_at, deleted
+                 FROM workflows LIMIT 0",
+            )?;
+            c.execute_batch(
+                "SELECT workflow_id, status, step_index, outputs_json
+                 FROM workflow_runs LIMIT 0",
+            )?;
             c.query_row(
                 "SELECT value FROM meta WHERE key='schema_version'",
                 [],
                 |r| r.get::<_, String>(0),
             )
         })
-        .map(|v| assert_eq!(v, "6"))
+        .map(|v| assert_eq!(v, "7"))
         .unwrap();
 }
 

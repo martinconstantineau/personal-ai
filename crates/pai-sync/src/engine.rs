@@ -8,6 +8,7 @@
 //!   travel inside the sealed payload, base64'd)
 //! - `task/<id>` — tasks with `sync_scope='synchronized'`, claim/lease
 //!   fields included so only one device runs a due task
+//! - `wf/<id>`   — workflow definitions (runs stay device-local)
 //! - `memory/<id>` — memories with `sync_scope='synchronized'` (the default)
 //!
 //! Objects are sealed under the vault key with the object key as AAD;
@@ -33,6 +34,7 @@ const CONV_PREFIX: &str = "conv/";
 const MSG_PREFIX: &str = "msg/";
 const DOC_PREFIX: &str = "doc/";
 const TASK_PREFIX: &str = "task/";
+const WF_PREFIX: &str = "wf/";
 const MEMORY_PREFIX: &str = "memory/";
 
 /// Apply order on pull: conversations before their messages (FK), then
@@ -43,7 +45,8 @@ fn kind_rank(key: &str) -> Option<u8> {
         Some("msg") => Some(1),
         Some("doc") => Some(2),
         Some("task") => Some(3),
-        Some("memory") => Some(4),
+        Some("wf") => Some(4),
+        Some("memory") => Some(5),
         _ => None,
     }
 }
@@ -138,6 +141,19 @@ struct TaskPayload {
     result_json: Option<String>,
     claimed_by: Option<String>,
     lease_expires_at: Option<String>,
+    updated_at: String,
+}
+
+/// Versioned plaintext of one synced workflow definition — the whole
+/// `definition_json` travels opaque; the receiver validates it on
+/// load-before-run (never trusts a synced step list blindly).
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkflowPayload {
+    v: u8,
+    id: String,
+    name: String,
+    definition_json: String,
+    created_at: String,
     updated_at: String,
 }
 
@@ -264,6 +280,7 @@ impl<T: SyncTransport> SyncEngine<T> {
         self.push_messages(&mut out).await?;
         self.push_documents(&mut out).await?;
         self.push_tasks(&mut out).await?;
+        self.push_workflows(&mut out).await?;
         Ok(out)
     }
 
@@ -536,6 +553,49 @@ impl<T: SyncTransport> SyncEngine<T> {
         Ok(())
     }
 
+    /// `sync_scope='synchronized'` workflow definitions — the definition
+    /// JSON travels opaque inside the sealed payload.
+    async fn push_workflows(&self, out: &mut SyncOutcome) -> Result<()> {
+        let rows = self.store.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, name, definition_json, created_at, updated_at, deleted
+                 FROM workflows WHERE sync_scope='synchronized'",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        for (id, name, def_json, created, updated, deleted) in rows {
+            let updated_at = parse_ts(&updated);
+            let key = format!("{WF_PREFIX}{id}");
+            let tombstone = deleted != 0;
+            let raw = if tombstone {
+                Vec::new()
+            } else {
+                serde_json::to_vec(&WorkflowPayload {
+                    v: 1,
+                    id,
+                    name,
+                    definition_json: def_json,
+                    created_at: created,
+                    updated_at: updated.clone(),
+                })
+                .map_err(|e| Error::Sync(e.to_string()))?
+            };
+            self.push_sealed(key, &raw, version_of(&updated), updated_at, tombstone, out)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Pull remote objects newer than our mirror and apply them, in
     /// `kind_rank` order (conversations land before their messages — the
     /// FK chain requires it).
@@ -619,6 +679,14 @@ impl<T: SyncTransport> SyncEngine<T> {
             let p: TaskPayload = serde_json::from_slice(raw)
                 .map_err(|e| Error::Sync(format!("bad task payload: {e}")))?;
             return self.apply_task(&p);
+        }
+        if let Some(id) = key.strip_prefix(WF_PREFIX) {
+            if obj.tombstone {
+                return self.apply_wf_tombstone(id, obj.updated_at);
+            }
+            let p: WorkflowPayload = serde_json::from_slice(raw)
+                .map_err(|e| Error::Sync(format!("bad workflow payload: {e}")))?;
+            return self.apply_workflow(&p);
         }
         if key.starts_with(MSG_PREFIX) {
             if obj.tombstone {
@@ -911,6 +979,40 @@ impl<T: SyncTransport> SyncEngine<T> {
                     p.claimed_by,
                     p.lease_expires_at,
                 ],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Workflow tombstone.
+    fn apply_wf_tombstone(&self, id: &str, remote_updated: Timestamp) -> Result<()> {
+        self.store.with_conn(|c| {
+            c.execute(
+                "UPDATE workflows SET deleted=1, updated_at=?2
+                 WHERE id=?1 AND updated_at < ?2",
+                params![id, ts(&remote_updated)],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Apply a workflow definition LWW-style. `definition_json` is stored
+    /// verbatim — `WorkflowDefinition::validate` runs on load/run, so a
+    /// synced def with an out-of-allowlist tool step can't execute.
+    fn apply_workflow(&self, p: &WorkflowPayload) -> Result<()> {
+        if p.v != 1 {
+            return Err(Error::Sync(format!("unsupported payload v{}", p.v)));
+        }
+        self.store.with_conn(|c| {
+            c.execute(
+                "INSERT INTO workflows(id, name, definition_json, sync_scope,
+                    created_at, updated_at, deleted)
+                 VALUES(?1,?2,?3,'synchronized',?4,?5,0)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name, definition_json=excluded.definition_json,
+                    updated_at=excluded.updated_at, deleted=0
+                 WHERE excluded.updated_at > workflows.updated_at",
+                params![p.id, p.name, p.definition_json, p.created_at, p.updated_at],
             )
         })?;
         Ok(())

@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -247,6 +247,32 @@ ALTER TABLE tasks ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE tasks ADD COLUMN result_json TEXT;
 ALTER TABLE tasks ADD COLUMN claimed_by TEXT;
 ALTER TABLE tasks ADD COLUMN lease_expires_at TEXT;
+"#,
+    r#"
+-- V7: workflows — declarative multi-step definitions (syncable like
+-- tasks) + per-device run records with a step cursor for crash resume.
+-- `definition_json` holds the step list + tool allowlist; runs stay
+-- device-local (like agent_runs) and never sync.
+CREATE TABLE workflows (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    definition_json TEXT NOT NULL,
+    sync_scope TEXT NOT NULL DEFAULT 'synchronized',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE workflow_runs (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL REFERENCES workflows(id),
+    input TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    step_index INTEGER NOT NULL DEFAULT 0,
+    outputs_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
 "#,
 ];
 

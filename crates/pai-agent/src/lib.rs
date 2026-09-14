@@ -108,6 +108,9 @@ impl ApprovalHandler for DenyApprovals {
 #[derive(Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
 impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
     pub fn cancel(&self) {
         self.0.store(true, Ordering::SeqCst);
     }
@@ -444,6 +447,7 @@ impl AgentRuntime {
                 } => {
                     let ToolStep::Observation(msg) = self
                         .execute_tool(ToolInvocation {
+                            def,
                             run: &run,
                             call_id: &call_id,
                             name: &name,
@@ -466,6 +470,116 @@ impl AgentRuntime {
         // Ran out of steps — fail closed.
         self.finish_run(run, answer, RunState::Failed, emit);
         Err(Error::Other("max agent steps exceeded".into()))
+    }
+
+    /// Direct tool invocation outside a model loop — workflow `tool`
+    /// steps go through the *same* gate as model-driven calls: schema
+    /// validation → policy decision → approval → execute → audit. `run`
+    /// attributes the audit trail (a workflow synthesizes one per run).
+    /// Returns `Err` on denial/failure rather than an observation msg —
+    /// there's no model to observe it.
+    pub async fn invoke_tool(
+        &self,
+        run: &AgentRun,
+        name: &str,
+        arguments: serde_json::Value,
+        approval: &dyn ApprovalHandler,
+        emit: &(dyn Fn(AgentEvent) + Send + Sync),
+    ) -> Result<pai_tools::ToolOutput> {
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| Error::InvalidInput(format!("unknown tool {name}")))?;
+        let desc = tool.descriptor();
+        self.audit(
+            run,
+            AuditKind::ToolRequested,
+            AuditOutcome::Ok,
+            Some(name),
+            serde_json::json!({"arguments": arguments}),
+        );
+        validate_args(&desc.input_schema, &arguments).inspect_err(|e| {
+            self.audit(
+                run,
+                AuditKind::ToolDenied,
+                AuditOutcome::Error,
+                Some(name),
+                serde_json::json!({"reason": e.to_string()}),
+            );
+        })?;
+        match self.permissions.decide(&desc.required_permissions) {
+            PermissionDecision::Deny => {
+                self.audit(
+                    run,
+                    AuditKind::ToolDenied,
+                    AuditOutcome::Denied,
+                    Some(name),
+                    serde_json::json!({}),
+                );
+                return Err(Error::PermissionDenied(format!("{name} denied by policy")));
+            }
+            PermissionDecision::AskUser => {
+                let req = pai_permissions::ApprovalRequest {
+                    id: ToolCallId::new(),
+                    tool: name.into(),
+                    permissions: desc.required_permissions.clone(),
+                    summary: format!("{name} {arguments}"),
+                    risk: desc.risk,
+                };
+                self.audit(
+                    run,
+                    AuditKind::ApprovalRequested,
+                    AuditOutcome::Ok,
+                    Some(name),
+                    serde_json::json!({}),
+                );
+                let granted = approval.decide(&req).await;
+                self.audit(
+                    run,
+                    AuditKind::ApprovalResolved,
+                    if granted {
+                        AuditOutcome::Ok
+                    } else {
+                        AuditOutcome::Denied
+                    },
+                    Some(name),
+                    serde_json::json!({"granted": granted}),
+                );
+                if !granted {
+                    return Err(Error::PermissionDenied(format!("{name} denied by user")));
+                }
+            }
+            PermissionDecision::Allow => {}
+        }
+        self.audit(
+            run,
+            AuditKind::ToolAllowed,
+            AuditOutcome::Ok,
+            Some(name),
+            serde_json::json!({}),
+        );
+        let ctx = ToolContext {
+            run: run.id,
+            device: self.device,
+            memory: Some(self.memory.as_ref()),
+            memory_scope: run.conversation,
+            documents: self.documents.as_deref(),
+            email: self.email.as_deref(),
+            vision: self.vision.as_deref(),
+            allowed_roots: &self.allowed_roots,
+        };
+        let out = tool.execute(arguments, &ctx).await.inspect_err(|e| {
+            self.audit_error(run, e);
+        })?;
+        self.audit(
+            run,
+            AuditKind::ToolExecuted,
+            AuditOutcome::Ok,
+            Some(name),
+            serde_json::json!({"summary": out.summary}),
+        );
+        let _ = emit; // workflow callers use events sparingly
+        Ok(out)
     }
 
     /// Terminal bookkeeping for a run: state, audit, `Done` event, and the
@@ -579,6 +693,7 @@ impl AgentRuntime {
     /// Permission check → maybe approval → execute → audit → observation msg.
     async fn execute_tool(&self, t: ToolInvocation<'_>) -> ToolStep {
         let ToolInvocation {
+            def,
             run,
             call_id,
             name,
@@ -588,6 +703,24 @@ impl AgentRuntime {
             conv,
             memory_scope,
         } = t;
+        // The allowlist is enforced here — not just in `tool_specs` — so a
+        // model naming a tool it was never offered still gets denied.
+        if !def.tools.is_empty() && !def.tools.iter().any(|t| t == name) {
+            self.audit(
+                run,
+                AuditKind::ToolDenied,
+                AuditOutcome::Denied,
+                Some(name),
+                serde_json::json!({"reason": "not in agent's tool allowlist"}),
+            );
+            return ToolStep::Observation(tool_result_msg(
+                conv,
+                *call_id,
+                name,
+                serde_json::json!({"error": "tool not in this agent's allowlist"}),
+                true,
+            ));
+        }
         let tool = match self.tools.get(name) {
             Some(t) => t,
             None => {
@@ -840,6 +973,9 @@ enum ToolStep {
 }
 
 struct ToolInvocation<'a> {
+    /// The running agent's definition — its `tools` allowlist bounds
+    /// what may execute (empty = all registered tools).
+    def: &'a AgentDefinition,
     run: &'a AgentRun,
     call_id: &'a ToolCallId,
     name: &'a str,

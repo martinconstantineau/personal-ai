@@ -1568,6 +1568,7 @@ dependencies = [
  "pai-tools",
  "pai-vision",
  "pai-voice",
+ "pai-workflows",
  "rpassword",
  "rusqlite",
  "serde",
@@ -1790,6 +1791,7 @@ dependencies = [
  "pai-tools",
  "pai-vision",
  "pai-voice",
+ "pai-workflows",
  "serde_json",
  "tokio",
  "uuid",
@@ -1970,6 +1972,25 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "pai-workflows"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "pai-agent",
+ "pai-core",
+ "pai-inference",
+ "pai-storage",
+ "pai-tools",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
  "uuid",
 ]
 

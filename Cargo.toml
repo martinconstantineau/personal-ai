@@ -14,6 +14,7 @@ members = [
     "crates/pai-audit",
     "crates/pai-broker",
     "crates/pai-tasks",
+    "crates/pai-workflows",
     "crates/pai-sync",
     "crates/pai-documents",
     "crates/pai-voice",
@@ -72,6 +73,7 @@ pai-agent = { path = "crates/pai-agent" }
 pai-audit = { path = "crates/pai-audit" }
 pai-broker = { path = "crates/pai-broker" }
 pai-tasks = { path = "crates/pai-tasks" }
+pai-workflows = { path = "crates/pai-workflows" }
 pai-sync = { path = "crates/pai-sync" }
 pai-documents = { path = "crates/pai-documents" }
 pai-voice = { path = "crates/pai-voice" }
