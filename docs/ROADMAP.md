@@ -80,8 +80,18 @@ across networks. Bearer-token auth (`--token`/`PAI_SYNC_TOKEN`), mutually
 exclusive `--dir`/`--relay` on `sync push|pull|run|status`, default bind
 127.0.0.1. The relay still only ever sees sealed objects.
 
-- E2EE sync: sync scope beyond memories (conversations, documents,
-  tasks); vault rotation/unpairing; relay behind TLS for off-LAN use
+**V2f done (2026-09-14):** sync scope beyond memories — synchronized
+conversations (+messages) and documents now travel through the same
+sealed-object engine. `conv/`/`msg/`/`doc/` object kinds with LWW
+tombstones, blob bytes inside the sealed payload, session stubs for the
+FK chain, `pai conv sync`/`pai docs sync` scope toggles + `docs ingest
+--sync`. Schema v5 adds `updated_at`/`deleted` to conversations and
+`sync_scope`/`updated_at`/`deleted` to documents. Tasks stay
+device-local on purpose — a synced task could double-execute without a
+claim/lease mechanism.
+
+- E2EE sync: vault rotation/unpairing; relay behind TLS for off-LAN use;
+  task sync once a claim mechanism exists
 - Trusted-device placement via `pai-broker` (phone asks desktop to run STT)
 - Voice: mic capture + playback (cpal), VAD-driven endpointing, streaming
   STT; Flutter voice UI + FFI ops once mic capture lands

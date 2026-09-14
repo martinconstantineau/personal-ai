@@ -118,8 +118,9 @@ impl DocumentStore {
         let id = DocumentId::new();
         self.store.with_conn(|c| {
             c.execute(
-                "INSERT INTO documents(id, title, mime, blob, created_at, trust)
-                 VALUES(?1,?2,?3,?4,?5,'untrusted')",
+                "INSERT INTO documents(id, title, mime, blob, created_at,
+                    updated_at, trust)
+                 VALUES(?1,?2,?3,?4,?5,?5,'untrusted')",
                 rusqlite::params![id.to_string(), title, mime, blob, ts(&now())],
             )
         })?;
@@ -204,7 +205,7 @@ impl DocumentStore {
                 "SELECT d.id, d.title, d.mime, d.created_at,
                         (SELECT count(*) FROM document_sections s
                           WHERE s.document_id = d.id) AS sections
-                 FROM documents d ORDER BY d.created_at DESC",
+                 FROM documents d WHERE d.deleted=0 ORDER BY d.created_at DESC",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok((
@@ -222,6 +223,8 @@ impl DocumentStore {
         })
     }
 
+    /// Tombstone the document: searchable sections are dropped, the row
+    /// stays so the sync engine can propagate the delete to peers.
     pub fn delete(&self, id: DocumentId) -> Result<()> {
         self.store.with_conn(|c| {
             c.execute(
@@ -234,8 +237,26 @@ impl DocumentStore {
                 rusqlite::params![id.to_string()],
             )?;
             c.execute(
-                "DELETE FROM documents WHERE id=?1",
-                rusqlite::params![id.to_string()],
+                "UPDATE documents SET deleted=1, updated_at=?2 WHERE id=?1",
+                rusqlite::params![id.to_string(), ts(&now())],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Mark the document for E2EE sync (or pull it back to this device).
+    pub fn set_sync_scope(&self, id: DocumentId, scope: SyncScope) -> Result<()> {
+        self.store.with_conn(|c| {
+            c.execute(
+                "UPDATE documents SET sync_scope=?2, updated_at=?3 WHERE id=?1",
+                rusqlite::params![
+                    id.to_string(),
+                    match scope {
+                        SyncScope::Synchronized => "synchronized",
+                        SyncScope::DeviceLocal => "device_local",
+                    },
+                    ts(&now())
+                ],
             )
         })?;
         Ok(())

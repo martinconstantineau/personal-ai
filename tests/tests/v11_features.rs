@@ -39,17 +39,19 @@ fn schema_v3_columns_exist() {
     store
         .with_conn(|c| {
             // devices.key_storage + document_sections.embedding added by v3;
-            // sync_peers added by v4.
+            // sync_peers by v4; conversation/document sync metadata by v5.
             c.execute_batch("SELECT key_storage FROM devices LIMIT 0")?;
             c.execute_batch("SELECT embedding FROM document_sections LIMIT 0")?;
             c.execute_batch("SELECT agree_pubkey FROM sync_peers LIMIT 0")?;
+            c.execute_batch("SELECT updated_at, deleted FROM conversations LIMIT 0")?;
+            c.execute_batch("SELECT sync_scope, updated_at, deleted FROM documents LIMIT 0")?;
             c.query_row(
                 "SELECT value FROM meta WHERE key='schema_version'",
                 [],
                 |r| r.get::<_, String>(0),
             )
         })
-        .map(|v| assert_eq!(v, "4"))
+        .map(|v| assert_eq!(v, "5"))
         .unwrap();
 }
 

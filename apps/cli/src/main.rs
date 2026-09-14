@@ -170,6 +170,11 @@ enum ConvCmd {
         id: String,
         mode: String,
     },
+    /// Set sync scope: synchronized | device-local (default).
+    Sync {
+        id: String,
+        mode: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -199,7 +204,14 @@ enum MemCmd {
 #[derive(Subcommand)]
 enum DocsCmd {
     /// Ingest a file (txt/md/html) into the document store.
-    Ingest { path: String },
+    Ingest {
+        path: String,
+        /// Mark the document `synchronized` for E2EE sync.
+        #[arg(long)]
+        sync: bool,
+    },
+    /// Set sync scope: synchronized | device-local (default).
+    Sync { id: String, mode: String },
     /// List ingested documents.
     List,
     /// Search document sections.
@@ -1273,7 +1285,7 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Docs { cmd } => match cmd {
-            DocsCmd::Ingest { path } => {
+            DocsCmd::Ingest { path, sync } => {
                 // User-initiated: no jail — they named the file.
                 let canon = std::fs::canonicalize(&path)
                     .map_err(|e| Error::InvalidInput(format!("{path}: {e}")))?;
@@ -1294,7 +1306,26 @@ async fn main() -> Result<()> {
                     .documents
                     .ingest(&bytes, mime, canon.file_name().and_then(|n| n.to_str()))
                     .await?;
-                println!("ingested: {id}");
+                if sync {
+                    ctx.documents.set_sync_scope(id, SyncScope::Synchronized)?;
+                }
+                println!(
+                    "ingested: {id}{}",
+                    if sync { " (synchronized)" } else { "" }
+                );
+            }
+            DocsCmd::Sync { id, mode } => {
+                let sc = match mode.as_str() {
+                    "synchronized" => SyncScope::Synchronized,
+                    "device-local" | "device_local" => SyncScope::DeviceLocal,
+                    _ => {
+                        return Err(Error::InvalidInput(
+                            "mode: synchronized|device-local".into(),
+                        ))
+                    }
+                };
+                ctx.documents
+                    .set_sync_scope(DocumentId(parse_uuid(&id, "document")?), sc)?;
             }
             DocsCmd::List => {
                 for (id, title, mime, at, sections) in ctx.documents.list()? {
@@ -1504,6 +1535,19 @@ async fn main() -> Result<()> {
                 };
                 ctx.conversations
                     .set_memory_scope(ConversationId(parse_uuid(&id, "conversation")?), m)?;
+            }
+            ConvCmd::Sync { id, mode } => {
+                let sc = match mode.as_str() {
+                    "synchronized" => SyncScope::Synchronized,
+                    "device-local" | "device_local" => SyncScope::DeviceLocal,
+                    _ => {
+                        return Err(Error::InvalidInput(
+                            "mode: synchronized|device-local".into(),
+                        ))
+                    }
+                };
+                ctx.conversations
+                    .set_sync_scope(ConversationId(parse_uuid(&id, "conversation")?), sc)?;
             }
         },
 

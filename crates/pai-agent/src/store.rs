@@ -106,8 +106,8 @@ impl ConversationStore {
         self.store.with_conn(|c| {
             c.execute(
                 "INSERT INTO conversations(id, session_id, title, created_at,
-                    sync_scope, memory_scope)
-                 VALUES(?1,?2,?3,?4,?5,?6)",
+                    updated_at, sync_scope, memory_scope)
+                 VALUES(?1,?2,?3,?4,?4,?5,?6)",
                 params![
                     conv.id.to_string(),
                     conv.session.to_string(),
@@ -127,7 +127,7 @@ impl ConversationStore {
                 c.query_row(
                     "SELECT id, session_id, title, created_at, sync_scope,
                             memory_scope
-                     FROM conversations WHERE id=?1",
+                     FROM conversations WHERE id=?1 AND deleted=0",
                     params![id.to_string()],
                     Self::row_to_conv,
                 )
@@ -141,7 +141,7 @@ impl ConversationStore {
             let mut stmt = c.prepare(
                 "SELECT id, session_id, title, created_at, sync_scope,
                         memory_scope
-                 FROM conversations ORDER BY created_at DESC",
+                 FROM conversations WHERE deleted=0 ORDER BY created_at DESC",
             )?;
             let rows = stmt.query_map([], Self::row_to_conv)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -166,8 +166,8 @@ impl ConversationStore {
     pub fn rename(&self, id: ConversationId, title: &str) -> Result<()> {
         self.store.with_conn(|c| {
             c.execute(
-                "UPDATE conversations SET title=?2 WHERE id=?1",
-                params![id.to_string(), title],
+                "UPDATE conversations SET title=?2, updated_at=?3 WHERE id=?1",
+                params![id.to_string(), title, ts(&now())],
             )
         })?;
         Ok(())
@@ -183,6 +183,24 @@ impl ConversationStore {
         Ok(())
     }
 
+    /// Mark the conversation for E2EE sync (or pull it back to this device).
+    pub fn set_sync_scope(&self, id: ConversationId, scope: SyncScope) -> Result<()> {
+        self.store.with_conn(|c| {
+            c.execute(
+                "UPDATE conversations SET sync_scope=?2, updated_at=?3 WHERE id=?1",
+                params![
+                    id.to_string(),
+                    match scope {
+                        SyncScope::Synchronized => "synchronized",
+                        SyncScope::DeviceLocal => "device_local",
+                    },
+                    ts(&now())
+                ],
+            )
+        })?;
+        Ok(())
+    }
+
     /// Delete the conversation and its messages. Scoped memories are kept —
     /// forgetting is a separate, permission-gated operation.
     pub fn delete(&self, id: ConversationId) -> Result<()> {
@@ -192,8 +210,8 @@ impl ConversationStore {
                 params![id.to_string()],
             )?;
             c.execute(
-                "DELETE FROM conversations WHERE id=?1",
-                params![id.to_string()],
+                "UPDATE conversations SET deleted=1, updated_at=?2 WHERE id=?1",
+                params![id.to_string(), ts(&now())],
             )
         })?;
         Ok(())
@@ -205,8 +223,9 @@ impl ConversationStore {
         let short: String = title.chars().take(60).collect();
         self.store.with_conn(|c| {
             c.execute(
-                "UPDATE conversations SET title=?2 WHERE id=?1 AND title IS NULL",
-                params![id.to_string(), short],
+                "UPDATE conversations SET title=?2, updated_at=?3
+                 WHERE id=?1 AND title IS NULL",
+                params![id.to_string(), short, ts(&now())],
             )
         })?;
         Ok(())

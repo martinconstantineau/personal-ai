@@ -222,6 +222,18 @@ CREATE TABLE IF NOT EXISTS sync_peers (
     paired_at TEXT NOT NULL
 );
 "#,
+    r#"
+-- V5: LWW metadata for conversation/document sync — `updated_at` versions
+-- every mutable row and `deleted` records tombstones the sync engine can
+-- propagate (mirroring the memories model).
+ALTER TABLE conversations ADD COLUMN updated_at TEXT;
+UPDATE conversations SET updated_at = created_at;
+ALTER TABLE conversations ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE documents ADD COLUMN sync_scope TEXT NOT NULL DEFAULT 'device_local';
+ALTER TABLE documents ADD COLUMN updated_at TEXT;
+UPDATE documents SET updated_at = created_at;
+ALTER TABLE documents ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 /// A 32-byte SQLCipher raw key, sourced from the OS keystore (or a 0600

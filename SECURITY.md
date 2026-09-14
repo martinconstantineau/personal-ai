@@ -51,8 +51,11 @@ the full threat model lives in `docs/security/threat-model.md`.
   shared folders handle ciphertext only. The optional HTTP relay
   (`pai sync serve`) persists the same opaque `.syncobj` blobs via
   `FolderTransport`; a bearer token gates it, but it is still
-  ciphertext-only. Possession of the vault key is read+write access;
-  `pair remove` does not rotate it.
+  ciphertext-only. Synced data is opt-in per object: memories default to
+  `synchronized`, conversations and documents default to `device_local`
+  and travel only when the user marks them (`pai conv sync`,
+  `pai docs sync`, `docs ingest --sync`). Possession of the vault key is
+  read+write access; `pair remove` does not rotate it.
 
 ## Known limitations (groundwork stage)
 
