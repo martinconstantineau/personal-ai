@@ -37,6 +37,8 @@ pub enum Permission {
     ComputeLocal,
     ComputeTrustedDevice,
     ComputeCloud,
+    /// Publish to the notification inbox (+ configured external channels).
+    NotificationSend,
 }
 
 /// The engine's verdict for one action.
@@ -87,6 +89,9 @@ impl PolicyTable {
             (ComputeLocal, AlwaysAllow),
             (ComputeTrustedDevice, AskUser),
             (ComputeCloud, AskUser),
+            // Inbox is local + reversible; external channels only fire
+            // when the user configured them in notify.json.
+            (NotificationSend, AlwaysAllow),
         ] {
             t.set(p, pol);
         }

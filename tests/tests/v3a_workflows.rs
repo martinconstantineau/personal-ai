@@ -48,6 +48,7 @@ fn runtime(store: Arc<Store>, table: PolicyTable) -> AgentRuntime {
         documents: None,
         email: None,
         vision: None,
+        notify: None,
         allowed_roots: vec![],
     }
 }

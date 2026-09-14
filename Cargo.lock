@@ -1561,6 +1561,7 @@ dependencies = [
  "pai-inference",
  "pai-memory",
  "pai-models",
+ "pai-notify",
  "pai-permissions",
  "pai-storage",
  "pai-sync",
@@ -1592,6 +1593,7 @@ dependencies = [
  "pai-documents",
  "pai-inference",
  "pai-memory",
+ "pai-notify",
  "pai-permissions",
  "pai-storage",
  "pai-tools",
@@ -1717,6 +1719,7 @@ dependencies = [
  "pai-inference",
  "pai-memory",
  "pai-models",
+ "pai-notify",
  "pai-permissions",
  "pai-storage",
  "pai-tools",
@@ -1784,6 +1787,7 @@ dependencies = [
  "pai-identity",
  "pai-inference",
  "pai-memory",
+ "pai-notify",
  "pai-permissions",
  "pai-storage",
  "pai-sync",
@@ -1847,6 +1851,23 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "pai-notify"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "pai-connector-email",
+ "pai-core",
+ "pai-storage",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "uuid",
 ]
 
@@ -1931,6 +1952,7 @@ dependencies = [
  "pai-documents",
  "pai-inference",
  "pai-memory",
+ "pai-notify",
  "pai-permissions",
  "pai-vision",
  "serde",

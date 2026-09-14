@@ -35,6 +35,7 @@ const MSG_PREFIX: &str = "msg/";
 const DOC_PREFIX: &str = "doc/";
 const TASK_PREFIX: &str = "task/";
 const WF_PREFIX: &str = "wf/";
+const NTF_PREFIX: &str = "ntf/";
 const MEMORY_PREFIX: &str = "memory/";
 
 /// Apply order on pull: conversations before their messages (FK), then
@@ -47,6 +48,7 @@ fn kind_rank(key: &str) -> Option<u8> {
         Some("task") => Some(3),
         Some("wf") => Some(4),
         Some("memory") => Some(5),
+        Some("ntf") => Some(6),
         _ => None,
     }
 }
@@ -154,6 +156,21 @@ struct WorkflowPayload {
     name: String,
     definition_json: String,
     created_at: String,
+    updated_at: String,
+}
+
+/// Versioned plaintext of one notification — read state travels so the
+/// inbox follows the user across devices.
+#[derive(Debug, Serialize, Deserialize)]
+struct NotificationPayload {
+    v: u8,
+    id: String,
+    title: String,
+    body: String,
+    source: String,
+    channel: String,
+    created_at: String,
+    read_at: Option<String>,
     updated_at: String,
 }
 
@@ -281,6 +298,7 @@ impl<T: SyncTransport> SyncEngine<T> {
         self.push_documents(&mut out).await?;
         self.push_tasks(&mut out).await?;
         self.push_workflows(&mut out).await?;
+        self.push_notifications(&mut out).await?;
         Ok(out)
     }
 
@@ -596,6 +614,55 @@ impl<T: SyncTransport> SyncEngine<T> {
         Ok(())
     }
 
+    /// `sync_scope='synchronized'` notifications — inbox rows + read state.
+    async fn push_notifications(&self, out: &mut SyncOutcome) -> Result<()> {
+        let rows = self.store.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, title, body, source, channel, created_at, read_at,
+                        updated_at, deleted
+                 FROM notifications WHERE sync_scope='synchronized'",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, i64>(8)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        for (id, title, body, source, channel, created, read_at, updated, deleted) in rows {
+            let updated_at = parse_ts(&updated);
+            let key = format!("{NTF_PREFIX}{id}");
+            let tombstone = deleted != 0;
+            let raw = if tombstone {
+                Vec::new()
+            } else {
+                serde_json::to_vec(&NotificationPayload {
+                    v: 1,
+                    id,
+                    title,
+                    body,
+                    source,
+                    channel,
+                    created_at: created,
+                    read_at,
+                    updated_at: updated.clone(),
+                })
+                .map_err(|e| Error::Sync(e.to_string()))?
+            };
+            self.push_sealed(key, &raw, version_of(&updated), updated_at, tombstone, out)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Pull remote objects newer than our mirror and apply them, in
     /// `kind_rank` order (conversations land before their messages — the
     /// FK chain requires it).
@@ -687,6 +754,14 @@ impl<T: SyncTransport> SyncEngine<T> {
             let p: WorkflowPayload = serde_json::from_slice(raw)
                 .map_err(|e| Error::Sync(format!("bad workflow payload: {e}")))?;
             return self.apply_workflow(&p);
+        }
+        if let Some(id) = key.strip_prefix(NTF_PREFIX) {
+            if obj.tombstone {
+                return self.apply_ntf_tombstone(id, obj.updated_at);
+            }
+            let p: NotificationPayload = serde_json::from_slice(raw)
+                .map_err(|e| Error::Sync(format!("bad notification payload: {e}")))?;
+            return self.apply_notification(&p);
         }
         if key.starts_with(MSG_PREFIX) {
             if obj.tombstone {
@@ -1013,6 +1088,49 @@ impl<T: SyncTransport> SyncEngine<T> {
                     updated_at=excluded.updated_at, deleted=0
                  WHERE excluded.updated_at > workflows.updated_at",
                 params![p.id, p.name, p.definition_json, p.created_at, p.updated_at],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Notification tombstone.
+    fn apply_ntf_tombstone(&self, id: &str, remote_updated: Timestamp) -> Result<()> {
+        self.store.with_conn(|c| {
+            c.execute(
+                "UPDATE notifications SET deleted=1, updated_at=?2
+                 WHERE id=?1 AND updated_at < ?2",
+                params![id, ts(&remote_updated)],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Apply a notification LWW-style — `read_at` travels so reading on
+    /// one device marks it read everywhere.
+    fn apply_notification(&self, p: &NotificationPayload) -> Result<()> {
+        if p.v != 1 {
+            return Err(Error::Sync(format!("unsupported payload v{}", p.v)));
+        }
+        self.store.with_conn(|c| {
+            c.execute(
+                "INSERT INTO notifications(id, title, body, source, channel,
+                    created_at, read_at, sync_scope, updated_at, deleted)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,'synchronized',?8,0)
+                 ON CONFLICT(id) DO UPDATE SET
+                    title=excluded.title, body=excluded.body,
+                    read_at=excluded.read_at, updated_at=excluded.updated_at,
+                    deleted=0
+                 WHERE excluded.updated_at > notifications.updated_at",
+                params![
+                    p.id,
+                    p.title,
+                    p.body,
+                    p.source,
+                    p.channel,
+                    p.created_at,
+                    p.read_at,
+                    p.updated_at
+                ],
             )
         })?;
         Ok(())

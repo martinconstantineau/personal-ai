@@ -1,0 +1,19 @@
+[package]
+name = "pai-notify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Notification inbox + delivery channels — the proactive surface. Rows persist locally and sync like tasks; email-to-self and webhook fan-out are opt-in via notify.json."
+
+[dependencies]
+pai-core.workspace = true
+pai-storage.workspace = true
+pai-connector-email.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+reqwest.workspace = true

@@ -221,7 +221,12 @@ the default when no `oauth` block exists.
   steps with `{{input}}`/`{{steps.<id>.output}}` templates, per-workflow
   tool allowlist enforced at dispatch (empty = no tools), crash-safe
   run cursor + resume, `wf/` sealed sync objects with tombstones.
-- Proactive surface: `pai-tasks` schedules + notification channels
+- ~~Proactive surface: `pai-tasks` schedules + notification channels~~ —
+  shipped: `notifications` inbox (schema v8) synced as `ntf/` objects with
+  roaming read state; `notify.send` tool (permission-gated,
+  `NotificationSend`); `--notify` on `pai task add` publishes the result;
+  external delivery via notify.json `email_to`/`webhook_url` (opt-in only);
+  `pai notify list|open|send|clear|remove|configure|test` + FFI inbox ops.
 - Mobile builds shipping; on-device inference backends (ExecuTorch/MLC)
 - Federation story for opt-in shared memories (family/team scopes)
 

@@ -58,13 +58,17 @@ fn schema_v3_columns_exist() {
                 "SELECT workflow_id, status, step_index, outputs_json
                  FROM workflow_runs LIMIT 0",
             )?;
+            c.execute_batch(
+                "SELECT title, body, source, channel, read_at, sync_scope
+                 FROM notifications LIMIT 0",
+            )?;
             c.query_row(
                 "SELECT value FROM meta WHERE key='schema_version'",
                 [],
                 |r| r.get::<_, String>(0),
             )
         })
-        .map(|v| assert_eq!(v, "7"))
+        .map(|v| assert_eq!(v, "8"))
         .unwrap();
 }
 
@@ -256,6 +260,7 @@ async fn documents_search_tool_returns_citations() {
         documents: Some(&docs),
         email: None,
         vision: None,
+        notify: None,
         allowed_roots: &[],
     };
     let out = tool
@@ -280,6 +285,7 @@ async fn documents_search_tool_returns_citations() {
         documents: Some(&docs),
         email: None,
         vision: None,
+        notify: None,
         allowed_roots: std::slice::from_ref(&jail_dir),
     };
     let out = tool

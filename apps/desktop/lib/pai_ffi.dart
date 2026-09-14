@@ -23,6 +23,7 @@ typedef _SetEventCbNative = Void Function(
     Pointer<Void>, Pointer<NativeFunction<NativeEventCallback>>, Pointer<Void>);
 typedef _ApproveNative = Int32 Function(Pointer<Void>, Pointer<Utf8>, Int32);
 typedef _VoiceListenNative = Pointer<Utf8> Function(Pointer<Void>, Uint32);
+typedef _NotifyListNative = Pointer<Utf8> Function(Pointer<Void>, Uint8);
 typedef _ThreeStrNative = Pointer<Utf8> Function(
     Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>);
 typedef _CancelNative = Void Function(Pointer<Void>);
@@ -95,6 +96,11 @@ class PaiClient {
   late final _voiceTranscribe = _lib.lookupFunction<_SendNative,
           Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
       'pai_voice_transcribe');
+  late final _notifyList = _lib.lookupFunction<_NotifyListNative,
+      Pointer<Utf8> Function(Pointer<Void>, int)>('pai_notify_list');
+  late final _notifyMarkRead = _lib.lookupFunction<_SendNative,
+          Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
+      'pai_notify_mark_read');
   late final _voiceSay = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_voice_say');
   late final _setPolicy = _lib.lookupFunction<_ThreeStrNative,
@@ -263,6 +269,16 @@ class PaiClient {
   /// {sent: true} or {error: ...} when no smtp block is configured.
   Map<String, dynamic> emailSend(String draftJson) =>
       _call1(_emailSend, draftJson);
+
+  /// Notification inbox: {notifications: [...], unread: n}. Rows sync
+  /// across paired devices.
+  Map<String, dynamic> notifyList({bool unreadOnly = false}) => _json(
+      _notifyList(_handle, unreadOnly ? 1 : 0)) as Map<String, dynamic>;
+
+  /// Mark a notification read — propagates to peers on sync.
+  /// Returns {ok: bool}.
+  Map<String, dynamic> notifyMarkRead(String id) =>
+      _call1(_notifyMarkRead, id);
 
   /// Voice capability probe: {stt, tts, mic, speaker, whisper_url}.
   Map<String, dynamic> voiceStatus() =>

@@ -169,6 +169,14 @@ class PaiBridge {
   /// Voice ops — `{stt, tts, mic, speaker}` probe; `voiceListen` blocks up
   /// to [maxSecs] in the worker isolate; `voiceSay` plays on the host
   /// speaker ({ok, played} or {ok, played:false, wav_b64}).
+  /// Notification inbox — {notifications: [...], unread: n}. Poll from
+  /// a timer for badge updates; rows roam via sync.
+  Future<Map<String, dynamic>> notifyList({bool unreadOnly = false}) async =>
+      (await _call(_Op.notifyList, arg: unreadOnly ? 'unread' : ''))
+          as Map<String, dynamic>;
+  Future<Map<String, dynamic>> notifyMarkRead(String id) async =>
+      (await _call(_Op.notifyMarkRead, arg: id)) as Map<String, dynamic>;
+
   Future<Map<String, dynamic>> voiceStatus() async =>
       (await _call(_Op.voiceStatus)) as Map<String, dynamic>;
   Future<Map<String, dynamic>> voiceListen({int maxSecs = 30}) async =>
@@ -287,6 +295,10 @@ class PaiBridge {
             result = client.emailDraft(req.arg!);
           case _Op.emailSend:
             result = client.emailSend(req.arg!);
+          case _Op.notifyList:
+            result = client.notifyList(unreadOnly: req.arg == 'unread');
+          case _Op.notifyMarkRead:
+            result = client.notifyMarkRead(req.arg!);
           case _Op.voiceStatus:
             result = client.voiceStatus();
           case _Op.voiceListen:
@@ -345,6 +357,8 @@ enum _Op {
   emailRead,
   emailDraft,
   emailSend,
+  notifyList,
+  notifyMarkRead,
   voiceStatus,
   voiceListen,
   voiceListenStream,

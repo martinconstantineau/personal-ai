@@ -25,6 +25,7 @@ pai-voice.workspace = true
 pai-vision.workspace = true
 pai-tasks.workspace = true
 pai-workflows.workspace = true
+pai-notify.workspace = true
 pai-audit.workspace = true
 serde.workspace = true
 serde_json.workspace = true

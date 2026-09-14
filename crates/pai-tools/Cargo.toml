@@ -13,6 +13,7 @@ pai-documents.workspace = true
 pai-connector-email.workspace = true
 pai-inference.workspace = true
 pai-vision.workspace = true
+pai-notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -9,6 +9,7 @@ description = "Agent runtime: bounded turn loop, memory recall, permission-gated
 pai-core.workspace = true
 pai-inference.workspace = true
 pai-memory.workspace = true
+pai-notify.workspace = true
 pai-permissions.workspace = true
 pai-tools.workspace = true
 pai-documents.workspace = true

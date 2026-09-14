@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -272,6 +272,24 @@ CREATE TABLE workflow_runs (
     error TEXT,
     started_at TEXT NOT NULL,
     finished_at TEXT
+);
+"#,
+    r#"
+-- V8: notifications — the proactive inbox. Rows are the durable record;
+-- external channels (email-to-self, webhook) are configured in
+-- notify.json and only fan out when present. `read_at` syncs so the
+-- inbox follows the user across devices.
+CREATE TABLE notifications (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    channel TEXT NOT NULL DEFAULT 'inbox',
+    created_at TEXT NOT NULL,
+    read_at TEXT,
+    sync_scope TEXT NOT NULL DEFAULT 'synchronized',
+    updated_at TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0
 );
 "#,
 ];

@@ -15,6 +15,7 @@ members = [
     "crates/pai-broker",
     "crates/pai-tasks",
     "crates/pai-workflows",
+    "crates/pai-notify",
     "crates/pai-sync",
     "crates/pai-documents",
     "crates/pai-voice",
@@ -74,6 +75,7 @@ pai-audit = { path = "crates/pai-audit" }
 pai-broker = { path = "crates/pai-broker" }
 pai-tasks = { path = "crates/pai-tasks" }
 pai-workflows = { path = "crates/pai-workflows" }
+pai-notify = { path = "crates/pai-notify" }
 pai-sync = { path = "crates/pai-sync" }
 pai-documents = { path = "crates/pai-documents" }
 pai-voice = { path = "crates/pai-voice" }

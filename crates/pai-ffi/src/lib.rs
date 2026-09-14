@@ -208,6 +208,12 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         documents: Some(documents.clone()),
         email: email.clone(),
         vision,
+        notify: Some(Arc::new(pai_notify::StoreNotifySink {
+            store: store.clone(),
+            config: pai_notify::load_config(std::path::Path::new(&cfg.data_dir))
+                .unwrap_or_default(),
+            email: email.clone(),
+        })),
         allowed_roots: vec![inbox],
     };
 
@@ -1096,6 +1102,57 @@ pub unsafe extern "C" fn pai_email_send(
 // ---------------------------------------------------------------------------
 // Voice
 // ---------------------------------------------------------------------------
+
+/// Notification inbox: `{notifications: [...], unread: n}`.
+/// `unread_only` filters to rows with no read_at. Rows sync across
+/// paired devices, so the inbox follows the user.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_notify_list(
+    handle: *mut PaiRuntime,
+    unread_only: bool,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    match pai_notify::store::list(&rt.store, unread_only, 200) {
+        Ok(items) => {
+            let unread = pai_notify::store::unread_count(&rt.store).unwrap_or(0);
+            to_c(serde_json::json!({
+                "notifications": items.iter().map(|n| serde_json::json!({
+                    "id": n.id,
+                    "title": n.title,
+                    "body": n.body,
+                    "source": n.source,
+                    "channel": n.channel,
+                    "created_at": n.created_at.to_rfc3339(),
+                    "read_at": n.read_at.map(|t| t.to_rfc3339()),
+                })).collect::<Vec<_>>(),
+                "unread": unread,
+            }))
+        }
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Mark a notification read — the `read_at` propagates to peers on sync.
+/// Returns `{ok: bool}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `id` is a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn pai_notify_mark_read(
+    handle: *mut PaiRuntime,
+    id: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let id = match read_str(id) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    match pai_notify::store::mark_read(&rt.store, &id) {
+        Ok(ok) => to_c(serde_json::json!({"ok": ok})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
 
 fn voice_err(msg: &str) -> *mut c_char {
     to_c(serde_json::json!({"error": msg}))

@@ -122,6 +122,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: WorkflowCmd,
     },
+    /// Notification inbox — the proactive surface tasks/tools publish
+    /// into; rows sync across paired devices.
+    Notify {
+        #[command(subcommand)]
+        cmd: NotifyCmd,
+    },
     /// Describe/answer a question about an image via a local multimodal
     /// model (llama.cpp server with --mmproj).
     Describe {
@@ -180,6 +186,11 @@ enum TaskCmd {
         /// Prompt text handed to the agent when the task fires.
         #[arg(long)]
         prompt: Option<String>,
+        /// Publish the result to the notification inbox when it runs
+        /// ("notify": true lands in the inbox; "external" also fans out
+        /// to channels configured in notify.json).
+        #[arg(long)]
+        notify: bool,
         /// Keep the task on this device (default: synchronized).
         #[arg(long)]
         local: bool,
@@ -233,6 +244,41 @@ enum WorkflowCmd {
     },
     /// Resume a crashed/interrupted run from its saved step cursor.
     Resume { run_id: String },
+}
+
+#[derive(Subcommand)]
+enum NotifyCmd {
+    /// List notifications, newest first.
+    List {
+        /// Only unread rows.
+        #[arg(long)]
+        unread: bool,
+    },
+    /// Show a notification and mark it read.
+    Open { id: String },
+    /// Publish a notification to the inbox.
+    Send {
+        title: String,
+        body: Option<String>,
+        /// Also deliver via notify.json's external channels
+        /// (email_to / webhook_url).
+        #[arg(long)]
+        external: bool,
+    },
+    /// Mark every notification read.
+    Clear,
+    /// Soft-delete a notification (tombstone propagates).
+    Remove { id: String },
+    /// Configure external channels — writes notify.json.
+    Configure {
+        #[arg(long)]
+        email_to: Option<String>,
+        #[arg(long)]
+        webhook: Option<String>,
+    },
+    /// Deliver a test notification through the configured external
+    /// channels — verifies notify.json actually reaches you.
+    Test,
 }
 
 #[derive(Subcommand)]
@@ -713,6 +759,11 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
         documents: Some(documents.clone()),
         email: email.clone(),
         vision,
+        notify: Some(Arc::new(pai_notify::StoreNotifySink {
+            store: store.clone(),
+            config: pai_notify::load_config(&cfg.data_dir)?,
+            email: email.clone(),
+        })),
         allowed_roots: vec![inbox],
     };
 
@@ -2045,6 +2096,107 @@ impl pai_tasks::TaskHandler for PromptTaskHandler<'_> {
     }
 }
 
+/// `pai notify ...` — the proactive inbox + configured delivery channels.
+async fn run_notify_cmds(cmd: &NotifyCmd, ctx: &Ctx, cfg: &pai_config::Config) -> Result<()> {
+    use pai_notify::{store as ns, NotifySink, StoreNotifySink};
+    let sink = StoreNotifySink {
+        store: ctx.store.clone(),
+        config: pai_notify::load_config(&cfg.data_dir)?,
+        email: ctx.email.clone(),
+    };
+    match cmd {
+        NotifyCmd::List { unread } => {
+            for n in ns::list(&ctx.store, *unread, 50)? {
+                println!(
+                    "{:.8}  {} {:<40} {}",
+                    n.id,
+                    if n.read_at.is_some() { " " } else { "●" },
+                    n.title,
+                    n.created_at,
+                );
+            }
+            let unread = ns::unread_count(&ctx.store)?;
+            if unread > 0 {
+                println!("{unread} unread");
+            }
+        }
+        NotifyCmd::Open { id } => {
+            let n = ns::get(&ctx.store, id)?
+                .ok_or_else(|| Error::NotFound(format!("notification {id}")))?;
+            println!(
+                "{}
+
+{}
+
+— {} ({})",
+                n.title, n.body, n.source, n.created_at
+            );
+            ns::mark_read(&ctx.store, &n.id)?;
+        }
+        NotifyCmd::Send {
+            title,
+            body,
+            external,
+        } => {
+            let body_s = body.clone().unwrap_or_default();
+            let id = sink.publish(title, &body_s, "cli", SyncScope::Synchronized)?;
+            if *external {
+                let fired = sink.deliver_external(title, &body_s, "cli").await?;
+                println!(
+                    "sent {:.8} → inbox{}",
+                    id,
+                    if fired.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" +{}", fired.join("+"))
+                    }
+                );
+            } else {
+                println!("sent {:.8} → inbox", id);
+            }
+        }
+        NotifyCmd::Clear => {
+            println!("{} marked read", ns::mark_all_read(&ctx.store)?);
+        }
+        NotifyCmd::Remove { id } => {
+            if ns::remove(&ctx.store, id)? {
+                println!("removed {id}");
+            } else {
+                println!("no notification {id}");
+            }
+        }
+        NotifyCmd::Configure { email_to, webhook } => {
+            let path = cfg.data_dir.join("notify.json");
+            let mut c = pai_notify::load_config(&cfg.data_dir)?;
+            if let Some(e) = email_to {
+                c.email_to = if e.is_empty() { None } else { Some(e.clone()) };
+            }
+            if let Some(w) = webhook {
+                c.webhook_url = if w.is_empty() { None } else { Some(w.clone()) };
+            }
+            let json =
+                serde_json::to_string_pretty(&c).map_err(|e| Error::InvalidInput(e.to_string()))?;
+            std::fs::write(&path, json).map_err(|e| Error::Storage(e.to_string()))?;
+            println!(
+                "notify.json: email_to={} webhook={}",
+                c.email_to.as_deref().unwrap_or("(none)"),
+                c.webhook_url.as_deref().unwrap_or("(none)")
+            );
+        }
+        NotifyCmd::Test => {
+            let fired = sink
+                .deliver_external("pai test", "notification channel check", "cli:test")
+                .await?;
+            if fired.is_empty() {
+                println!("no external channels configured — see `pai notify configure`");
+            } else {
+                println!("delivered via: {}", fired.join(", "));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `pai workflow ...` — declarative multi-step runs over the agent runtime.
 async fn run_workflow_cmds(
     cmd: &WorkflowCmd,
@@ -2242,6 +2394,7 @@ async fn run_task_cmds(
             at,
             every,
             prompt,
+            notify,
             local,
         } => {
             let run_at = match at {
@@ -2254,8 +2407,12 @@ async fn run_task_cmds(
                 })
                 .unwrap_or(Trigger::Manual);
             let payload = match prompt {
-                Some(p) => serde_json::json!({"kind": "prompt", "text": p}),
-                None => serde_json::json!({}),
+                Some(p) => serde_json::json!({
+                    "kind": "prompt",
+                    "text": p,
+                    "notify": notify,
+                }),
+                None => serde_json::json!({"notify": notify}),
             };
             let scope = if *local {
                 SyncScope::DeviceLocal
@@ -2357,6 +2514,34 @@ async fn run_task_cmds(
                     },
                     (!ok).then(|| serde_json::json!({"error": "handler failed"})),
                 )?;
+                if t.payload
+                    .get("notify")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    let sink = pai_notify::StoreNotifySink {
+                        store: ctx.store.clone(),
+                        config: pai_notify::load_config(&cfg.data_dir)?,
+                        email: ctx.email.clone(),
+                    };
+                    let result = ts::get_task(&ctx.store, t.id)
+                        .ok()
+                        .flatten()
+                        .and_then(|r| r.result)
+                        .map(|v| {
+                            v.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| v.to_string())
+                        })
+                        .unwrap_or_default();
+                    pai_notify::NotifySink::publish(
+                        &sink,
+                        &format!("task '{}' {}", t.title, if ok { "done" } else { "FAILED" }),
+                        &result,
+                        &format!("task:{:.8}", t.id),
+                        t.sync_scope,
+                    )?;
+                }
                 println!("{:.8}  {}", t.id, if ok { "done" } else { "FAILED" });
                 ran += 1;
             }
@@ -2788,6 +2973,7 @@ async fn main() -> Result<()> {
                     documents: Some(ctx.documents.as_ref()),
                     email: ctx.email.as_deref(),
                     vision: None,
+                    notify: None,
                     allowed_roots: &[],
                 };
                 // CLI user is the operator — direct invocation, still audited
@@ -2807,6 +2993,7 @@ async fn main() -> Result<()> {
         Cmd::Workflow { cmd } => {
             run_workflow_cmds(&cmd, &ctx, &cli.provider, cli.model.clone()).await?
         }
+        Cmd::Notify { cmd } => run_notify_cmds(&cmd, &ctx, &cfg).await?,
         Cmd::Pair { .. }
         | Cmd::Sync { .. }
         | Cmd::Broker { .. }

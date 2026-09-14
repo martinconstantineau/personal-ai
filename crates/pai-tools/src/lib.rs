@@ -73,6 +73,9 @@ pub struct ToolContext<'a> {
     pub email: Option<&'a dyn pai_connector_email::EmailProvider>,
     /// Vision provider for `vision.*` tools.
     pub vision: Option<&'a dyn pai_inference::ImageUnderstandingProvider>,
+    /// Notification inbox for `notify.send` — absent means no sink is
+    /// wired (tool reports unavailable).
+    pub notify: Option<&'a dyn pai_notify::NotifySink>,
     /// Directories a file-touching tool may read from — the in-process
     /// sandbox profile. Empty = no filesystem reads allowed. User-initiated
     /// paths (CLI `docs ingest`) bypass this; the jail guards *model-driven*
@@ -810,6 +813,73 @@ impl Tool for VisionDescribe {
     }
 }
 
+/// `notify.send` — write to the user's notification inbox, optionally
+/// fanning out to the external channels configured in `notify.json`.
+/// Inbox is local + reversible; external delivery can only reach targets
+/// the user configured (the config file is the consent boundary).
+pub struct NotifySendTool;
+
+#[async_trait]
+impl Tool for NotifySendTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "notify.send".into(),
+            description: "Send a notification to the user's inbox. Set                           external=true to also deliver via the channels                           configured in notify.json (email/webhook)."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                    "external": {"type": "boolean"}
+                },
+                "required": ["title"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::NotificationSend],
+            risk: RiskLevel::Medium,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let sink = ctx
+            .notify
+            .ok_or_else(|| Error::InvalidInput("no notification sink wired".into()))?;
+        let title = str_arg(&args, "title")?;
+        let body = args["body"].as_str().unwrap_or_default();
+        let id = sink.publish(
+            title,
+            body,
+            &format!("tool:notify.send run={:.8}", ctx.run.0),
+            SyncScope::Synchronized,
+        )?;
+        let external = args["external"].as_bool().unwrap_or(false);
+        let channels = if external {
+            sink.deliver_external(title, body, "tool:notify.send")
+                .await?
+        } else {
+            vec![]
+        };
+        Ok(ToolOutput {
+            summary: format!(
+                "notify.send '{title}' → inbox{}",
+                if channels.is_empty() {
+                    String::new()
+                } else {
+                    format!(" +{}", channels.join("+"))
+                }
+            ),
+            value: serde_json::json!({"id": id, "external": channels}),
+        })
+    }
+}
+
 fn pai_storage_err(e: impl std::fmt::Display) -> Error {
     Error::Storage(e.to_string())
 }
@@ -830,6 +900,7 @@ pub fn builtin_registry() -> ToolRegistry {
     r.register(Arc::new(EmailLabelTool));
     r.register(Arc::new(EmailDeleteTool));
     r.register(Arc::new(VisionDescribe));
+    r.register(Arc::new(NotifySendTool));
     r
 }
 
@@ -851,6 +922,7 @@ mod tests {
             documents: None,
             email: None,
             vision: None,
+            notify: None,
             allowed_roots: &[],
         };
         let out = tool

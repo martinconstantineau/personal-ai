@@ -84,6 +84,14 @@ the full threat model lives in `docs/security/threat-model.md`.
   device-local — only definitions roam. An `AgentDefinition` tool
   allowlist is now enforced at dispatch, not just at advertisement, so a
   workflow prompt step cannot be talked into calling an unlisted tool.
+- **Notification channels are config-gated exfil paths.** The inbox is
+  local + synced; `notify send --external` (or `external:true` on the
+  `notify.send` tool) fans out only to targets written into `notify.json`
+  — an agent cannot invent a webhook, but a *configured* webhook URL is
+  a standing exfil channel the model can push text to. Treat
+  `notify.json` entries like connector credentials: only add endpoints
+  you control. Notification rows (including `read_at`) sync to every
+  vault member like memories — a paired device sees your inbox.
 - **Broker RPC rides the same vault.** `pai broker call/serve` moves
   compute requests between paired devices as `breq/<to>/<id>` /
   `bres/<to>/<id>` `SyncObject`s — sealed exactly like sync payloads, so

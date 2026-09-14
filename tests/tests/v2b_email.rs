@@ -92,6 +92,7 @@ fn ctx<'a>(mail: Option<&'a dyn EmailProvider>) -> ToolContext<'a> {
         documents: None,
         email: mail,
         vision: None,
+        notify: None,
         allowed_roots: &[],
     }
 }
