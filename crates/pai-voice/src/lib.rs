@@ -14,6 +14,7 @@
 
 use async_trait::async_trait;
 
+pub mod mic;
 pub mod providers;
 use pai_core::*;
 use pai_inference::{SpeechToTextProvider, TextToSpeechProvider, VoiceActivityProvider};

@@ -15,3 +15,5 @@ chrono.workspace = true
 pai-inference.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
+cpal = "0.16.0"
+tracing.workspace = true

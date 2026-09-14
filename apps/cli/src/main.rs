@@ -361,9 +361,20 @@ enum VoiceCmd {
     },
     /// One conversational turn: WAV in → transcript → agent → reply WAV.
     Turn {
-        file: String,
+        /// WAV file to transcribe; omit with --mic to capture instead.
+        file: Option<String>,
+        /// Capture the utterance from the default microphone and play the
+        /// spoken reply through the speakers.
+        #[arg(long)]
+        mic: bool,
         #[arg(long, default_value = "reply.wav")]
         out: String,
+    },
+    /// Capture one utterance from the mic (VAD-endpointed) and transcribe.
+    Listen {
+        /// Hard cap on capture length, seconds.
+        #[arg(long, default_value = "30")]
+        max_secs: u32,
     },
 }
 
@@ -1028,6 +1039,19 @@ async fn run_voice_cmds(cmd: &VoiceCmd, ctx: &Ctx, cfg: &pai_config::Config) -> 
                 }
             );
             println!("vad: energy-vad (always available)");
+            println!(
+                "mic: {} | speaker: {}",
+                if pai_voice::mic::input_available() {
+                    "default input found"
+                } else {
+                    "NONE"
+                },
+                if pai_voice::mic::output_available() {
+                    "default output found"
+                } else {
+                    "NONE"
+                }
+            );
         }
         VoiceCmd::Configure {
             whisper_url,
@@ -1071,15 +1095,28 @@ async fn run_voice_cmds(cmd: &VoiceCmd, ctx: &Ctx, cfg: &pai_config::Config) -> 
             std::fs::write(out, &wav).map_err(|e| Error::Storage(e.to_string()))?;
             println!("wrote {out} ({} bytes)", wav.len());
         }
-        VoiceCmd::Turn { file, out } => {
+        VoiceCmd::Turn { file, mic, out } => {
             let s = pai_voice::detect(&cfg.data_dir, std::time::Duration::from_secs(2)).await?;
             let pipeline: VoicePipeline = s.pipeline().ok_or_else(|| {
                 Error::Provider(
                     "voice turn needs both whisper-server AND piper — `pai voice status`".into(),
                 )
             })?;
-            let audio =
-                std::fs::read(file).map_err(|e| Error::InvalidInput(format!("{file}: {e}")))?;
+            let audio = if *mic {
+                println!("listening… (speak, then pause)");
+                let pcm = pai_voice::mic::capture_utterance(&pai_voice::EnergyVad::default(), 30)?;
+                if pcm.is_empty() {
+                    println!("(nothing heard)");
+                    return Ok(());
+                }
+                let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+                pai_voice::pcm16_to_wav(&bytes, pai_voice::mic::TARGET_RATE)
+            } else {
+                let f = file
+                    .as_deref()
+                    .ok_or_else(|| Error::InvalidInput("pass a WAV file or --mic".into()))?;
+                std::fs::read(f).map_err(|e| Error::InvalidInput(format!("{f}: {e}")))?
+            };
             let def = agent_def(&ctx.provider_name, ctx.model.clone());
             struct AgentVoice<'a> {
                 ctx: &'a Ctx,
@@ -1095,9 +1132,35 @@ async fn run_voice_cmds(cmd: &VoiceCmd, ctx: &Ctx, cfg: &pai_config::Config) -> 
             }
             let handler = AgentVoice { ctx, def: &def };
             let (transcript, speech) = pipeline.turn(&audio, "audio/wav", &handler).await?;
-            std::fs::write(out, &speech).map_err(|e| Error::Storage(e.to_string()))?;
             println!("you said: {transcript}");
-            println!("reply → {out} ({} bytes)", speech.len());
+            if *mic {
+                let (rate, pcm) = pai_voice::mic::wav_to_pcm16(&speech)?;
+                pai_voice::mic::play(&pcm, rate)?;
+                println!("reply spoken");
+            } else {
+                std::fs::write(out, &speech).map_err(|e| Error::Storage(e.to_string()))?;
+                println!("reply → {out} ({} bytes)", speech.len());
+            }
+        }
+        VoiceCmd::Listen { max_secs } => {
+            let s = pai_voice::detect(&cfg.data_dir, std::time::Duration::from_secs(2)).await?;
+            let stt = s.stt.ok_or_else(|| {
+                Error::Provider(
+                    "whisper-server unreachable — start it or `pai voice configure --whisper-url`"
+                        .into(),
+                )
+            })?;
+            println!("listening… (speak, then pause)");
+            let pcm =
+                pai_voice::mic::capture_utterance(&pai_voice::EnergyVad::default(), *max_secs)?;
+            if pcm.is_empty() {
+                println!("(nothing heard)");
+                return Ok(());
+            }
+            let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let wav = pai_voice::pcm16_to_wav(&bytes, pai_voice::mic::TARGET_RATE);
+            let text = stt.transcribe(&wav, "audio/wav").await?;
+            println!("{text}");
         }
     }
     Ok(())

@@ -92,9 +92,17 @@ claim/lease mechanism.
 
 - E2EE sync: vault rotation/unpairing; relay behind TLS for off-LAN use;
   task sync once a claim mechanism exists
+**V2g done (2026-09-14):** live mic capture + playback — cpal 0.16
+(windows 0.54 chain → prebuilt windows-sys 0.52, no binutils needed on
+windows-gnu), VAD-endpointed `capture_utterance` (pre-roll, ~750 ms
+trailing silence, max cap) → mono 16 kHz i16 for whisper, `play` for
+spoken replies, `wav_to_pcm16` decode. `pai voice listen` (mic→STT→text)
+and `pai voice turn --mic` (full spoken turn, reply through speakers);
+`voice status` probes devices. Hardware smoke test behind `--ignored`.
+
 - Trusted-device placement via `pai-broker` (phone asks desktop to run STT)
-- Voice: mic capture + playback (cpal), VAD-driven endpointing, streaming
-  STT; Flutter voice UI + FFI ops once mic capture lands
+- Voice: streaming STT endpointing (feed whisper mid-utterance);
+  Flutter voice UI + FFI ops
 **V2d done (2026-09-14):** vision MVP — `ImageUnderstandingProvider` +
 `LlamaVisionProvider` (llama.cpp `--mmproj` models via OpenAI `image_url`
 data-URIs), `pai describe <image> [--prompt]`, and the `vision.describe`

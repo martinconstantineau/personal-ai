@@ -41,9 +41,12 @@ the full threat model lives in `docs/security/threat-model.md`.
 - **Vision is local-only.** `vision.describe`/`pai describe` send images
   to a localhost llama.cpp server (data-URI in the request body); the
   tool reads only jailed paths and its output is untrusted model text.
-- **Voice is local-only.** STT runs against a `whisper-server` on
-  localhost; TTS spawns the local `piper` binary (with a timeout and no
-  shell — arguments can't inject commands). No audio leaves the machine.
+- **Voice is local-only.** Mic capture and speaker playback use cpal
+  (OS audio APIs) — audio is endpointed by a local energy VAD and sent
+  to a `whisper-server` on localhost; TTS spawns the local `piper` binary
+  (with a timeout and no shell — arguments can't inject commands). No
+  audio leaves the machine; nothing records until `voice listen`/
+  `turn --mic` opens the stream explicitly.
 - **Sync is end-to-end.** Devices pair via an ed25519-signed
   offer/accept exchange; the vault key travels wrapped by an
   ECDH-derived peer key. `SyncObject` payloads are
