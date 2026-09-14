@@ -61,6 +61,8 @@ rpassword = "7"
 rand_core = { version = "0.6", features = ["getrandom"] }
   keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "sync-secret-service"] }
   chacha20poly1305 = "0.10"
+wasmi = "2"
+wasmi_wasi = "2"
 
 pai-core = { path = "crates/pai-core" }
 pai-config = { path = "crates/pai-config" }

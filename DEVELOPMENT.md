@@ -27,7 +27,33 @@
 ./scripts/build_core.sh            # build libpai_ffi for the desktop app
 ./scripts/run_desktop.sh           # build core + flutter run -d linux
 ./scripts/install_model.sh <id>    # download a model manifest + weights
+./scripts/build_android_ffi.sh     # libpai_ffi.so → android jniLibs (3 ABIs)
 ```
+
+## Mobile (Android)
+
+Prereqs: Flutter 3.47+, Android SDK (platform 36, build-tools 36),
+NDK r28+, `cargo-ndk`, the three `*-linux-android` rustup targets, and
+prebuilt static OpenSSL per ABI (`OPENSSL_OUT` dir — see the script header;
+vendored `openssl-src` can't cross-compile on Windows hosts).
+
+```bash
+OPENSSL_OUT=~/src/ossl-out ./scripts/build_android_ffi.sh   # arm64-v8a, armeabi-v7a, x86_64
+cd apps/desktop && flutter build apk --release              # or appbundle
+```
+
+- `minSdk = 26`: `cpal` links AAudio, which needs API 26+.
+- The APK packages `libpai_ffi.so` from `android/app/src/main/jniLibs/`
+  (gitignored — it is a build artifact). `dart:ffi` resolves it by name.
+- The app data dir is the app's private files dir
+  (`/data/data/<applicationId>/files`); `path_provider` is intentionally
+  absent (the current build host lacks symlink privilege — see
+  `pubspec.yaml`).
+- Manifest permissions: `INTERNET` (connectors/relay), `RECORD_AUDIO`
+  (voice capture — still requires the runtime grant), cleartext traffic
+  allowed for LAN sync relays.
+- iOS is not buildable from Windows/Linux hosts — needs a macOS + Xcode
+  machine.
 
 ## Common commands
 

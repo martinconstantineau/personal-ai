@@ -139,6 +139,9 @@ class PaiClient {
       '../../target/release/pai_ffi.dll',
       '../../target/debug/libpai_ffi.dylib',
       '../../target/release/libpai_ffi.dylib',
+      // Bundled with the packaged app (next to the exe / jniLibs).
+      'pai_ffi.dll',
+      'libpai_ffi.so',
     ]) {
       try {
         return DynamicLibrary.open(candidate);

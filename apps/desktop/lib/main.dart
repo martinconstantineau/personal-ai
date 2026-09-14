@@ -57,7 +57,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _init() async {
     final dataDir = Platform.environment['PAI_DATA_DIR'] ??
-        '${Directory.current.path}/.pai-data';
+        (Platform.isAndroid
+            // The app's private files dir — always writable, no plugin
+            // needed (path_provider is absent: build host lacks symlink
+            // privilege).
+            ? '/data/data/com.example.pai_app/files'
+            : '${Directory.current.path}/.pai-data');
     // 'auto' probes llama-server / Ollama / LM Studio, falls back to echo.
     final provider = Platform.environment['PAI_PROVIDER'] ?? 'auto';
     try {
