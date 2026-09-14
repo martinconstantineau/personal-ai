@@ -100,6 +100,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: EmailCmd,
     },
+    /// Voice pipeline — whisper-server STT, piper TTS, energy VAD.
+    Voice {
+        #[command(subcommand)]
+        cmd: VoiceCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -280,6 +285,36 @@ enum EmailCmd {
     Label { id: String, label: String },
     /// Delete a message by id.
     Delete { id: String },
+}
+
+#[derive(Subcommand)]
+enum VoiceCmd {
+    /// Show detected voice providers (whisper-server reachability, piper
+    /// binary/model, VAD) and the effective config.
+    Status,
+    /// Write voice.json: whisper-server URL, piper binary + voice model.
+    Configure {
+        #[arg(long)]
+        whisper_url: Option<String>,
+        #[arg(long)]
+        piper_bin: Option<String>,
+        #[arg(long)]
+        piper_model: Option<String>,
+    },
+    /// Transcribe an audio file (WAV) via whisper-server.
+    Transcribe { file: String },
+    /// Synthesize text to a WAV file via piper.
+    Say {
+        text: String,
+        #[arg(long, default_value = "reply.wav")]
+        out: String,
+    },
+    /// One conversational turn: WAV in → transcript → agent → reply WAV.
+    Turn {
+        file: String,
+        #[arg(long, default_value = "reply.wav")]
+        out: String,
+    },
 }
 
 struct Ctx {
@@ -842,6 +877,107 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// Voice ops. `transcribe`/`say` use one provider each; `turn` runs the
+/// full Mic→VAD→STT→Agent→TTS→Speaker pipeline (file-based I/O — live mic
+/// capture is the next step, needs OS audio permissions).
+async fn run_voice_cmds(cmd: &VoiceCmd, ctx: &Ctx, cfg: &pai_config::Config) -> Result<()> {
+    use pai_inference::{SpeechToTextProvider, TextToSpeechProvider};
+    use pai_voice::{UtteranceHandler, VoicePipeline};
+    match cmd {
+        VoiceCmd::Status => {
+            let s = pai_voice::detect(&cfg.data_dir, std::time::Duration::from_secs(2)).await?;
+            println!(
+                "whisper-server: {}",
+                if s.stt.is_some() {
+                    format!("reachable at {}", s.cfg.whisper_url())
+                } else {
+                    format!("NOT reachable ({})", s.cfg.whisper_url())
+                }
+            );
+            println!(
+                "piper: {}",
+                if s.tts.is_some() {
+                    "found"
+                } else {
+                    "NOT found (set `pai voice configure --piper-bin/--piper-model` or PAI_PIPER_MODEL)"
+                }
+            );
+            println!("vad: energy-vad (always available)");
+        }
+        VoiceCmd::Configure {
+            whisper_url,
+            piper_bin,
+            piper_model,
+        } => {
+            let mut c = pai_voice::VoiceConfig::load(&cfg.data_dir)?;
+            if let Some(u) = whisper_url {
+                c.whisper_url = Some(u.clone());
+            }
+            if let Some(b) = piper_bin {
+                c.piper_bin = Some(b.into());
+            }
+            if let Some(m) = piper_model {
+                c.piper_model = Some(m.into());
+            }
+            c.save(&cfg.data_dir)?;
+            println!("voice.json written — `pai voice status` to verify");
+        }
+        VoiceCmd::Transcribe { file } => {
+            let s = pai_voice::detect(&cfg.data_dir, std::time::Duration::from_secs(2)).await?;
+            let stt = s.stt.ok_or_else(|| {
+                Error::Provider(
+                    "whisper-server unreachable — start it or `pai voice configure --whisper-url`"
+                        .into(),
+                )
+            })?;
+            let audio =
+                std::fs::read(file).map_err(|e| Error::InvalidInput(format!("{file}: {e}")))?;
+            let text = stt.transcribe(&audio, "audio/wav").await?;
+            println!("{text}");
+        }
+        VoiceCmd::Say { text, out } => {
+            let s = pai_voice::detect(&cfg.data_dir, std::time::Duration::from_secs(2)).await?;
+            let tts = s.tts.ok_or_else(|| {
+                Error::Provider(
+                    "piper not found — `pai voice configure --piper-bin/--piper-model`".into(),
+                )
+            })?;
+            let wav = tts.synthesize(text, None).await?;
+            std::fs::write(out, &wav).map_err(|e| Error::Storage(e.to_string()))?;
+            println!("wrote {out} ({} bytes)", wav.len());
+        }
+        VoiceCmd::Turn { file, out } => {
+            let s = pai_voice::detect(&cfg.data_dir, std::time::Duration::from_secs(2)).await?;
+            let pipeline: VoicePipeline = s.pipeline().ok_or_else(|| {
+                Error::Provider(
+                    "voice turn needs both whisper-server AND piper — `pai voice status`".into(),
+                )
+            })?;
+            let audio =
+                std::fs::read(file).map_err(|e| Error::InvalidInput(format!("{file}: {e}")))?;
+            let def = agent_def(&ctx.provider_name, ctx.model.clone());
+            struct AgentVoice<'a> {
+                ctx: &'a Ctx,
+                def: &'a AgentDefinition,
+            }
+            #[async_trait::async_trait]
+            impl UtteranceHandler for AgentVoice<'_> {
+                async fn respond(&self, transcript: &str) -> Result<String> {
+                    let out =
+                        send(self.ctx, self.def, transcript, None, None, &CliApproval).await?;
+                    Ok(out.answer.unwrap_or_else(|| "(no reply)".into()))
+                }
+            }
+            let handler = AgentVoice { ctx, def: &def };
+            let (transcript, speech) = pipeline.turn(&audio, "audio/wav", &handler).await?;
+            std::fs::write(out, &speech).map_err(|e| Error::Storage(e.to_string()))?;
+            println!("you said: {transcript}");
+            println!("reply → {out} ({} bytes)", speech.len());
+        }
+    }
+    Ok(())
+}
+
 async fn email_provider(cfg: &pai_config::Config) -> Result<pai_connector_email::ImapProvider> {
     let c = pai_connector_email::ImapConfig::load(&cfg.data_dir)?.ok_or_else(|| {
         Error::InvalidInput("no email account — run `pai email configure`".into())
@@ -1386,6 +1522,7 @@ async fn main() -> Result<()> {
                 println!("{}", out.summary);
             }
         },
+        Cmd::Voice { cmd } => run_voice_cmds(&cmd, &ctx, &cfg).await?,
         Cmd::Pair { .. } | Cmd::Sync { .. } | Cmd::Email { .. } => {
             unreachable!("handled before build")
         }

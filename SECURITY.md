@@ -38,6 +38,9 @@ the full threat model lives in `docs/security/threat-model.md`.
   no send verb at all (drafts-first by design). Passwords resolve from
   `PAI_EMAIL_PASSWORD` or the OS keystore (`email:<user>`) — never from
   `email.json`, and `pai_audit::redact` masks them in logs.
+- **Voice is local-only.** STT runs against a `whisper-server` on
+  localhost; TTS spawns the local `piper` binary (with a timeout and no
+  shell — arguments can't inject commands). No audio leaves the machine.
 - **Sync is end-to-end.** Devices pair via an ed25519-signed
   offer/accept exchange; the vault key travels wrapped by an
   ECDH-derived peer key. `SyncObject` payloads are

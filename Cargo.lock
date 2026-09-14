@@ -1256,6 +1256,7 @@ dependencies = [
  "pai-storage",
  "pai-sync",
  "pai-tools",
+ "pai-voice",
  "rpassword",
  "rusqlite",
  "serde",
@@ -1461,6 +1462,7 @@ dependencies = [
  "pai-storage",
  "pai-sync",
  "pai-tools",
+ "pai-voice",
  "serde_json",
  "tokio",
  "uuid",
@@ -1624,9 +1626,11 @@ dependencies = [
  "chrono",
  "pai-core",
  "pai-inference",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "uuid",
 ]
 

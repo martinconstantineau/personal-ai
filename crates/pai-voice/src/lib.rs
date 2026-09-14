@@ -8,12 +8,19 @@
 //! Piper, Silero, sherpa-onnx, or OS speech APIs all slot in identically.
 //! This crate wires the stages into one cancellable pipeline.
 //!
-//! Status: the orchestration is real; concrete local STT/TTS providers are
-//! adapters on the roadmap (all free: whisper.cpp, piper).
+//! Status: the orchestration is real; concrete providers live in
+//! [`providers`] — whisper.cpp's `whisper-server` for STT, the `piper`
+//! binary for TTS, and a dependency-free energy VAD.
 
 use async_trait::async_trait;
+
+pub mod providers;
 use pai_core::*;
 use pai_inference::{SpeechToTextProvider, TextToSpeechProvider, VoiceActivityProvider};
+pub use providers::{
+    detect, pcm16_to_wav, EnergyVad, PiperTts, VoiceConfig, VoiceSetup, WhisperServerStt,
+    DEFAULT_WHISPER_URL,
+};
 use std::sync::Arc;
 
 /// What happens to spoken text once transcribed.

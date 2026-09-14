@@ -65,10 +65,19 @@ rustls+webpki-roots), `email.*` tools gated on `EMAIL_*` permissions
 passwords (`email.json` holds no secrets), FFI ops + Flutter mailbox
 screen. Drafts-first: IMAP can't send; SMTP/lettre is the send path.
 
+**V2c done (2026-09-14):** voice pipeline MVP — `WhisperServerStt`
+(whisper.cpp `whisper-server` HTTP, multipart `/inference`), `PiperTts`
+(piper binary, `--output-raw` PCM → WAV wrap), `EnergyVad` (RMS +
+hangover, dependency-free), `voice.json` config with `PAI_WHISPER_URL`/
+`PAI_PIPER_MODEL` env overrides, `pai voice
+status|configure|transcribe|say|turn`. File-based I/O for now — live mic
+capture needs OS audio permissions (cpal) and is the next step.
+
 - E2EE sync: relay transport (ciphertext-only server); sync scope beyond
   memories (conversations, documents, tasks); vault rotation/unpairing
 - Trusted-device placement via `pai-broker` (phone asks desktop to run STT)
-- Voice pipeline MVP: whisper.cpp STT + piper TTS + VAD
+- Voice: mic capture + playback (cpal), VAD-driven endpointing, streaming
+  STT; Flutter voice UI + FFI ops once mic capture lands
 - Vision: llama.cpp multimodal describe/OCR
 - Connectors: registry abstraction beyond email; SMTP send; OAuth2 for
   Gmail/Outlook (app-password is today's auth)
