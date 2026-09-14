@@ -501,6 +501,10 @@ enum VoiceCmd {
         /// Hard cap on capture length, seconds.
         #[arg(long, default_value = "30")]
         max_secs: u32,
+        /// Stream partial transcripts — each pause-finalized segment
+        /// transcribes while you keep talking.
+        #[arg(long)]
+        stream: bool,
     },
 }
 
@@ -1587,7 +1591,7 @@ async fn run_voice_cmds(cmd: &VoiceCmd, ctx: &Ctx, cfg: &pai_config::Config) -> 
                 println!("reply → {out} ({} bytes)", speech.len());
             }
         }
-        VoiceCmd::Listen { max_secs } => {
+        VoiceCmd::Listen { max_secs, stream } => {
             let s = pai_voice::detect(&cfg.data_dir, std::time::Duration::from_secs(2)).await?;
             let stt = s.stt.ok_or_else(|| {
                 Error::Provider(
@@ -1595,17 +1599,36 @@ async fn run_voice_cmds(cmd: &VoiceCmd, ctx: &Ctx, cfg: &pai_config::Config) -> 
                         .into(),
                 )
             })?;
-            println!("listening… (speak, then pause)");
-            let pcm =
-                pai_voice::mic::capture_utterance(&pai_voice::EnergyVad::default(), *max_secs)?;
-            if pcm.is_empty() {
-                println!("(nothing heard)");
-                return Ok(());
+            if *stream {
+                println!("listening… (partials print as segments close)");
+                let mut n = 0usize;
+                let text = pai_voice::stream_transcribe(
+                    &stt,
+                    &pai_voice::EnergyVad::default(),
+                    *max_secs,
+                    &mut |part| {
+                        n += 1;
+                        println!("  [{n}] {part}");
+                    },
+                )?;
+                if text.is_empty() {
+                    println!("(nothing heard)");
+                } else {
+                    println!("final: {text}");
+                }
+            } else {
+                println!("listening… (speak, then pause)");
+                let pcm =
+                    pai_voice::mic::capture_utterance(&pai_voice::EnergyVad::default(), *max_secs)?;
+                if pcm.is_empty() {
+                    println!("(nothing heard)");
+                    return Ok(());
+                }
+                let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+                let wav = pai_voice::pcm16_to_wav(&bytes, pai_voice::mic::TARGET_RATE);
+                let text = stt.transcribe(&wav, "audio/wav").await?;
+                println!("{text}");
             }
-            let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-            let wav = pai_voice::pcm16_to_wav(&bytes, pai_voice::mic::TARGET_RATE);
-            let text = stt.transcribe(&wav, "audio/wav").await?;
-            println!("{text}");
         }
     }
     Ok(())

@@ -90,6 +90,8 @@ class PaiClient {
       Pointer<Utf8> Function(Pointer<Void>)>('pai_voice_status');
   late final _voiceListen = _lib.lookupFunction<_VoiceListenNative,
       Pointer<Utf8> Function(Pointer<Void>, int)>('pai_voice_listen');
+  late final _voiceListenStream = _lib.lookupFunction<_VoiceListenNative,
+      Pointer<Utf8> Function(Pointer<Void>, int)>('pai_voice_listen_stream');
   late final _voiceTranscribe = _lib.lookupFunction<_SendNative,
           Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
       'pai_voice_transcribe');
@@ -270,6 +272,11 @@ class PaiClient {
   /// worker isolate only. Returns {heard, text?, wav_b64?}.
   Map<String, dynamic> voiceListen({int maxSecs = 30}) =>
       _json(_voiceListen(_handle, maxSecs)) as Map<String, dynamic>;
+
+  /// Streaming listen — per-segment partials collected into the result:
+  /// {heard, text, partials[]}. Blocking — worker isolate only.
+  Map<String, dynamic> voiceListenStream({int maxSecs = 30}) =>
+      _json(_voiceListenStream(_handle, maxSecs)) as Map<String, dynamic>;
 
   /// Transcribe a WAV file. Blocking — worker isolate only.
   Map<String, dynamic> voiceTranscribe(String path) =>

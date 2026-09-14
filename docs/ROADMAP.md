@@ -155,7 +155,20 @@ VoiceSetup is probed once at `pai_init`. Chat screen: mic button in the
 input row (dictation lands in the field for review), speaker toggle in
 the appbar speaks each reply aloud.
 
-- Voice: streaming STT endpointing (feed whisper mid-utterance)
+**V2n done (2026-09-16):** streaming STT — `SegmentGate` splits the
+VAD stream at ~400 ms pauses (utterance still ends at ~750 ms trailing
+silence); `capture_segmented` hands each pause-finalized segment to
+whisper while the cpal channel keeps buffering, so partial transcripts
+land mid-utterance instead of after the final pause. `stream_transcribe`
+wraps capture + per-segment STT (dedicated current-thread runtime —
+mic capture is synchronous; silence-only segments are skipped via
+`is_quiet`; a mid-capture STT failure doesn't lose later segments).
+`pai voice listen --stream` prints partials as they close; the FFI op
+`pai_voice_listen_stream` + Dart `voiceListenStream` return
+{heard, text, partials[]} (FFI can't push live events, so partials
+arrive collected with segmentation preserved). Deadline/disconnect
+mid-utterance flushes the buffered tail instead of dropping it.
+
 **V2d done (2026-09-14):** vision MVP — `ImageUnderstandingProvider` +
 `LlamaVisionProvider` (llama.cpp `--mmproj` models via OpenAI `image_url`
 data-URIs), `pai describe <image> [--prompt]`, and the `vision.describe`

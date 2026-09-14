@@ -1157,6 +1157,42 @@ pub unsafe extern "C" fn pai_voice_listen(handle: *mut PaiRuntime, max_secs: u32
     }))
 }
 
+/// Streaming listen: transcribe each pause-finalized segment as it
+/// closes. FFI can't push live events, so partials return collected —
+/// `{heard, text, partials[], wav_b64}` where `partials` is the ordered
+/// per-segment transcript (the UI can render the segmentation and the
+/// text is the joined final).
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_voice_listen_stream(
+    handle: *mut PaiRuntime,
+    max_secs: u32,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let Some(v) = &rt.voice else {
+        return voice_err("voice not configured — `pai voice configure`");
+    };
+    if !pai_voice::mic::input_available() {
+        return voice_err("no microphone detected");
+    }
+    let Some(stt) = &v.stt else {
+        return voice_err("whisper-server unreachable — `pai voice configure`");
+    };
+    let mut partials: Vec<String> = Vec::new();
+    let text = match pai_voice::stream_transcribe(stt, &v.vad, max_secs.clamp(1, 120), &mut |p| {
+        partials.push(p.to_string())
+    }) {
+        Ok(t) => t,
+        Err(e) => return voice_err(&e.to_string()),
+    };
+    to_c(serde_json::json!({
+        "heard": !text.is_empty(),
+        "text": text,
+        "partials": partials,
+    }))
+}
+
 /// Transcribe a WAV file by absolute path. Returns `{text}`.
 /// # Safety
 /// `handle` must come from `pai_init`; `path` is a NUL-terminated string.

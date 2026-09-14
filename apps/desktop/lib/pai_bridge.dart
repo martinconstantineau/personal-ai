@@ -174,6 +174,12 @@ class PaiBridge {
   Future<Map<String, dynamic>> voiceListen({int maxSecs = 30}) async =>
       (await _call(_Op.voiceListen, arg: '$maxSecs'))
           as Map<String, dynamic>;
+
+  /// Streaming listen: {heard, text, partials[]} — partials are the
+  /// ordered per-segment transcript (UI can render the segmentation).
+  Future<Map<String, dynamic>> voiceListenStream({int maxSecs = 30}) async =>
+      (await _call(_Op.voiceListenStream, arg: '$maxSecs'))
+          as Map<String, dynamic>;
   Future<Map<String, dynamic>> voiceTranscribe(String path) async =>
       (await _call(_Op.voiceTranscribe, arg: path)) as Map<String, dynamic>;
   Future<Map<String, dynamic>> voiceSay(String text) async =>
@@ -286,6 +292,9 @@ class PaiBridge {
           case _Op.voiceListen:
             result =
                 client.voiceListen(maxSecs: int.tryParse(req.arg ?? '') ?? 30);
+          case _Op.voiceListenStream:
+            result = client.voiceListenStream(
+                maxSecs: int.tryParse(req.arg ?? '') ?? 30);
           case _Op.voiceTranscribe:
             result = client.voiceTranscribe(req.arg!);
           case _Op.voiceSay:
@@ -338,6 +347,7 @@ enum _Op {
   emailSend,
   voiceStatus,
   voiceListen,
+  voiceListenStream,
   voiceTranscribe,
   voiceSay,
 }

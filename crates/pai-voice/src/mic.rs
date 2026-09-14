@@ -81,6 +81,103 @@ impl UtteranceGate {
     }
 }
 
+/// Frames of pause that close a streaming segment (~400 ms) — shorter
+/// than the utterance-ending SILENCE_LIMIT so partials emit mid-speech.
+const SEG_SILENCE: u32 = 13;
+
+/// What a `SegmentGate` feed produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateEvent {
+    /// Keep capturing.
+    Continue,
+    /// A pause-finalized segment is ready in `take_segment`.
+    Segment,
+    /// The utterance is over (trailing silence); remainder in `take_segment`.
+    Done,
+}
+
+/// Streaming variant of `UtteranceGate`: a pause ≥ ~400 ms closes the
+/// current segment (emitted for partial transcription) while the
+/// utterance continues; ~750 ms of trailing silence still ends it.
+/// Factored out of the cpal loop for testability.
+pub struct SegmentGate {
+    pre_roll: VecDeque<Vec<i16>>,
+    seg: Vec<i16>,
+    heard: bool,
+    silent: u32,
+    emitted: bool,
+}
+
+impl Default for SegmentGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SegmentGate {
+    pub fn new() -> Self {
+        Self {
+            pre_roll: VecDeque::new(),
+            seg: Vec::new(),
+            heard: false,
+            silent: 0,
+            emitted: false,
+        }
+    }
+
+    pub fn feed(&mut self, frame: &[i16], speech: bool) -> GateEvent {
+        if speech {
+            if !self.heard {
+                self.heard = true;
+                for f in self.pre_roll.drain(..) {
+                    self.seg.extend_from_slice(&f);
+                }
+            }
+            self.seg.extend_from_slice(frame);
+            self.silent = 0;
+            self.emitted = false;
+            GateEvent::Continue
+        } else if self.heard {
+            self.silent += 1;
+            self.seg.extend_from_slice(frame);
+            if self.silent > SILENCE_LIMIT {
+                GateEvent::Done
+            } else if self.silent == SEG_SILENCE && !self.emitted {
+                self.emitted = true;
+                GateEvent::Segment
+            } else {
+                GateEvent::Continue
+            }
+        } else {
+            self.pre_roll.push_back(frame.to_vec());
+            if self.pre_roll.len() > PRE_ROLL {
+                self.pre_roll.pop_front();
+            }
+            GateEvent::Continue
+        }
+    }
+
+    /// Drain the current segment (pause frames included — a short
+    /// silence tail is harmless to whisper).
+    pub fn take_segment(&mut self) -> Vec<i16> {
+        std::mem::take(&mut self.seg)
+    }
+
+    pub fn heard_speech(&self) -> bool {
+        self.heard
+    }
+}
+
+/// Cheap quiet check on mono i16 — skips whisper calls on pure-silence
+/// trailing segments. ~RMS 200 is well below normal speech.
+pub fn is_quiet(pcm: &[i16]) -> bool {
+    if pcm.is_empty() {
+        return true;
+    }
+    let energy: f64 = pcm.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>() / pcm.len() as f64;
+    energy.sqrt() < 200.0
+}
+
 /// True when a default input device exists (doesn't open it — OS
 /// permission prompts only fire on stream start).
 pub fn input_available() -> bool {
@@ -93,7 +190,8 @@ pub fn output_available() -> bool {
 }
 
 /// Minimal block_on — the VAD's async method is pure CPU; no IO drivers
-/// needed (same trick as `pai-sync`'s relay).
+/// needed (same trick as `pai-sync`'s relay). NOT for reqwest futures —
+/// those need a real runtime (see `stream_transcribe`).
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     let mut f = std::pin::pin!(f);
@@ -248,6 +346,121 @@ pub fn capture_utterance(vad: &EnergyVad, max_secs: u32) -> Result<Vec<i16>> {
         return Ok(Vec::new());
     }
     Ok(resample(gate.pcm(), src_rate, TARGET_RATE))
+}
+
+/// Segmented capture: same device loop as `capture_utterance`, but every
+/// ~400 ms pause hands the finalized segment (resampled to 16 kHz) to
+/// `on_segment` for partial transcription while capture continues.
+/// Returns the full utterance (all segments concatenated), empty when
+/// nothing was heard. `on_segment` runs inline — the cpal channel keeps
+/// buffering so no audio is lost while it works.
+pub fn capture_segmented(
+    vad: &EnergyVad,
+    max_secs: u32,
+    on_segment: &mut dyn FnMut(Vec<i16>),
+) -> Result<Vec<i16>> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| Error::InvalidInput("no audio input device".into()))?;
+    let supported = device
+        .default_input_config()
+        .map_err(|e| Error::InvalidInput(format!("input device: {e}")))?;
+    let src_rate = supported.sample_rate().0;
+    let channels = supported.channels() as usize;
+    let cfg = supported.config();
+
+    let (tx, rx) = mpsc::channel::<Vec<f32>>();
+    let err_fn = |e| tracing::warn!(error = %e, "mic stream error");
+    let tx2 = tx.clone();
+    let tx3 = tx.clone();
+    let stream = match supported.sample_format() {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            &cfg,
+            move |d: &[f32], _| {
+                let _ = tx.send(d.to_vec());
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            &cfg,
+            move |d: &[i16], _| {
+                let _ = tx2.send(d.iter().map(|s| *s as f32 / 32768.0).collect());
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::U16 => device.build_input_stream(
+            &cfg,
+            move |d: &[u16], _| {
+                let _ = tx3.send(d.iter().map(|s| (*s as f32 - 32768.0) / 32768.0).collect());
+            },
+            err_fn,
+            None,
+        ),
+        other => {
+            return Err(Error::InvalidInput(format!(
+                "unsupported mic sample format {other:?}"
+            )))
+        }
+    }
+    .map_err(|e| Error::InvalidInput(format!("open mic: {e}")))?;
+    stream
+        .play()
+        .map_err(|e| Error::InvalidInput(format!("start mic: {e}")))?;
+
+    let frame_len = src_rate as usize * FRAME_MS / 1000;
+    let mut mono: Vec<f32> = Vec::new();
+    let mut gate = SegmentGate::new();
+    let mut all: Vec<i16> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(max_secs.into());
+    let mut done = false;
+    while !done && Instant::now() < deadline {
+        let chunk = match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(c) => c,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        for f in chunk.chunks(channels.max(1)) {
+            mono.push(f.iter().sum::<f32>() / channels.max(1) as f32);
+        }
+        while mono.len() >= frame_len {
+            let frame: Vec<i16> = mono
+                .drain(..frame_len)
+                .map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+                .collect();
+            let speech = block_on(vad.is_speech(&frame)).unwrap_or(false);
+            match gate.feed(&frame, speech) {
+                GateEvent::Segment => {
+                    let seg = resample(&gate.take_segment(), src_rate, TARGET_RATE);
+                    all.extend_from_slice(&seg);
+                    on_segment(seg);
+                }
+                GateEvent::Done => {
+                    let seg = resample(&gate.take_segment(), src_rate, TARGET_RATE);
+                    all.extend_from_slice(&seg);
+                    on_segment(seg);
+                    done = true;
+                }
+                GateEvent::Continue => {}
+            }
+        }
+    }
+    drop(stream);
+    // Deadline/disconnect mid-utterance: flush whatever speech is still
+    // buffered so the tail isn't lost (a pure-silence remainder reaches
+    // the callback too — callers filter with `is_quiet`).
+    let tail = gate.take_segment();
+    if gate.heard_speech() && !tail.is_empty() {
+        let seg = resample(&tail, src_rate, TARGET_RATE);
+        all.extend_from_slice(&seg);
+        on_segment(seg);
+    }
+    if !gate.heard_speech() {
+        return Ok(Vec::new());
+    }
+    Ok(all)
 }
 
 /// Play mono i16 PCM through the default output device; blocks until the
