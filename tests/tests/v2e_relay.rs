@@ -130,6 +130,7 @@ async fn sync_engine_over_relay() {
             d.store.clone(),
             vault,
             d.device.id,
+            &d.dir,
         )
     };
     let eng_a = mk(&a);

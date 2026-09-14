@@ -13,6 +13,7 @@
 //! folder needed. Documented-not-built: CRDT merge for richer types,
 //! NAT traversal, vault rotation / unpairing.
 
+pub mod circle;
 pub mod crypto;
 pub mod engine;
 pub mod pair;

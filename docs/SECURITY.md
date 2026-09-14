@@ -67,3 +67,18 @@ Emergency/manual commits by maintainers follow the same rule — no
   AppArmor-style isolation needs a subprocess boundary and is V2 work.
 - A lost OS-keystore key = a lost database. Keep the `store.key` fallback
   file backed up if you rely on the file path.
+- **Sync circles are forward-only**: `circle leave`/key loss stops a
+  device applying future circle objects, but anything it already
+  decrypted stays decrypted — sharing is irrevocable once read (same as
+  telling a person a secret). Circle membership changes never re-key
+  existing objects; if a member device is compromised, rotate by
+  creating a new circle and re-sharing into it.
+- Grants are pairwise-sealed (`ckg/` objects under the recipient's
+  X25519 peer key) so only the target device can join — but a malicious
+  *member* could relay plaintext out-of-band. Circles bound which
+  devices hold keys, not what people do with the content.
+- A `circle` argument on `memory.remember`/`memory.share` lets the model
+  tag data for federation — it flows through `MemoryWrite` permission +
+  audit like any write, but a prompt-injection path could tag content
+  into a circle you didn't intend. Set `MemoryWrite` to `AskUser` if
+  that matters on your policy.

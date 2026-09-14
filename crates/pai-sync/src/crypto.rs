@@ -21,7 +21,7 @@ use pai_identity::keystore;
 use pai_storage::store_err;
 use rand_core::RngCore;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 
 const SEAL_VER: u8 = 1;
@@ -170,6 +170,109 @@ fn store_vault(data_dir: &Path, key: &[u8; 32]) -> Result<()> {
     }
     tracing::warn!("OS keystore unavailable; sync vault key written to {file:?}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Circle keys — opt-in shared-memory federation (family/team scopes)
+// ---------------------------------------------------------------------------
+//
+// A "circle" is a named symmetric key shared by a *subset* of vault
+// members. Memories tagged `share_circle = name` are sealed under the
+// circle key instead of the vault key, so vault peers outside the
+// circle receive objects they cannot open and skip them. The key is
+// distributed member-by-member via `ckg/<circle>/<device>` grant
+// objects sealed to that device's pairwise `peer_key` — the same wrap
+// primitive that bootstraps the vault during pairing.
+
+fn circle_ks_name(name: &str) -> String {
+    format!("circle:{name}")
+}
+
+fn circle_key_file(data_dir: &Path, name: &str) -> PathBuf {
+    // Name is user-controlled; strip separators so it stays a filename.
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    data_dir.join(format!("circle-{safe}.key"))
+}
+
+fn store_circle(data_dir: &Path, name: &str, key: &[u8; 32]) -> Result<()> {
+    if keystore::store(&circle_ks_name(name), key) {
+        return Ok(());
+    }
+    let file = circle_key_file(data_dir, name);
+    std::fs::create_dir_all(data_dir).map_err(store_err)?;
+    std::fs::write(&file, key).map_err(store_err)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+    tracing::warn!("OS keystore unavailable; circle key written to {file:?}");
+    Ok(())
+}
+
+/// The named circle key, if this device holds it. Membership *is* key
+/// possession — a device that can't open `circle:<name>` isn't a member.
+pub fn circle_key(data_dir: &Path, name: &str) -> Result<Option<[u8; 32]>> {
+    if let Some(b) = keystore::load(&circle_ks_name(name)) {
+        return b
+            .as_slice()
+            .try_into()
+            .map(Some)
+            .map_err(|_| Error::Sync(format!("corrupt circle:{name} key")));
+    }
+    if let Ok(b) = std::fs::read(circle_key_file(data_dir, name)) {
+        let raw: [u8; 32] = b
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Sync(format!("corrupt circle-{name}.key")))?;
+        let _ = store_circle(data_dir, name, &raw); // migrate file -> keystore
+        return Ok(Some(raw));
+    }
+    Ok(None)
+}
+
+/// Load the named circle key, generating a fresh one when absent
+/// (the `circle create` path).
+pub fn circle_key_or_generate(data_dir: &Path, name: &str) -> Result<[u8; 32]> {
+    if let Some(k) = circle_key(data_dir, name)? {
+        return Ok(k);
+    }
+    let mut k = [0u8; 32];
+    OsRng.fill_bytes(&mut k);
+    store_circle(data_dir, name, &k)?;
+    Ok(k)
+}
+
+/// Adopt a circle key delivered by a grant object. Same-name key must
+/// match — a second grant with different material is a conflict the
+/// user resolves by leaving and re-joining.
+pub fn adopt_circle_key(data_dir: &Path, name: &str, key: &[u8; 32]) -> Result<()> {
+    if let Some(existing) = circle_key(data_dir, name)? {
+        if existing == *key {
+            return Ok(());
+        }
+        return Err(Error::Sync(format!(
+            "circle '{name}' key conflict — leave the circle before re-joining"
+        )));
+    }
+    store_circle(data_dir, name, key)
+}
+
+/// Leave a circle: drop the key (keystore + file). Rows already synced
+/// stay on-device but are re-scoped `device_local` by the caller so
+/// they stop roaming entirely.
+pub fn drop_circle_key(data_dir: &Path, name: &str) {
+    keystore::delete(&circle_ks_name(name));
+    let _ = std::fs::remove_file(circle_key_file(data_dir, name));
 }
 
 /// ECDH-derived key used to wrap the vault key during pairing.

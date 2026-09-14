@@ -68,7 +68,7 @@ fn schema_v3_columns_exist() {
                 |r| r.get::<_, String>(0),
             )
         })
-        .map(|v| assert_eq!(v, "8"))
+        .map(|v| assert_eq!(v, "9"))
         .unwrap();
 }
 
@@ -164,6 +164,7 @@ async fn embedder_auto_embeds_and_recalls() {
         entities: vec![],
         embedding: None,
         conversation: None,
+        share_circle: None,
     })
     .await
     .unwrap();

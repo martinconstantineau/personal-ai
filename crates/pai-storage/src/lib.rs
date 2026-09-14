@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -289,6 +289,21 @@ CREATE TABLE notifications (
     read_at TEXT,
     sync_scope TEXT NOT NULL DEFAULT 'synchronized',
     updated_at TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0
+);
+"#,
+    r#"
+-- V9: shared-memory circles — opt-in family/team scopes. A circle is a
+-- named symmetric key held by a subset of vault members (distributed
+-- via ckg/ grant objects sealed to each member's pairwise key).
+-- `memories.share_circle` tags a row to a circle; NULL means the
+-- default vault-wide scope. The circles table is local bookkeeping —
+-- membership is defined by holding the key.
+ALTER TABLE memories ADD COLUMN share_circle TEXT;
+CREATE TABLE circles (
+    name TEXT PRIMARY KEY,
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
     deleted INTEGER NOT NULL DEFAULT 0
 );
 "#,

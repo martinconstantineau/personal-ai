@@ -90,6 +90,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PairCmd,
     },
+    /// Shared-memory circles — opt-in family/team scopes inside a vault.
+    Circle {
+        #[command(subcommand)]
+        cmd: CircleCmd,
+    },
     /// Cross-device sync over a shared folder.
     Sync {
         #[command(subcommand)]
@@ -335,6 +340,14 @@ enum PoliciesCmd {
 enum MemCmd {
     /// Forget a memory by uuid, or by a text query.
     Forget { target: String },
+    /// Federate a memory to a named circle (family/team) instead of the
+    /// whole vault; omit --circle to move it back to vault-wide.
+    Share {
+        /// Memory uuid.
+        target: String,
+        #[arg(long)]
+        circle: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -376,6 +389,31 @@ enum PairCmd {
     /// Remove a peer. Note: does NOT rotate the vault key — a removed
     /// peer may still hold it.
     Remove { id: String },
+}
+
+#[derive(Subcommand)]
+enum CircleCmd {
+    /// Create (or rejoin) a named circle — generates its key locally.
+    Create { name: String },
+    /// Grant circle membership to a paired device: pushes a ckg/ grant
+    /// object sealed to that device's pairwise key.
+    Grant {
+        name: String,
+        /// Target device id (see `pai pair list`).
+        to: String,
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// List circles this device holds keys for.
+    List,
+    /// Leave a circle: drops the key and re-scopes its memories to
+    /// device-local. Forward-only — already-received copies on other
+    /// devices are unaffected.
+    Leave { name: String },
 }
 
 #[derive(Subcommand)]
@@ -1357,6 +1395,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 }
             }
         },
+        Cmd::Circle { cmd } => run_circle_cmds(&store, device.id, &cfg, cmd).await?,
         Cmd::Sync { cmd } => match cmd {
             SyncCmd::Push { dir, relay, token }
             | SyncCmd::Pull { dir, relay, token }
@@ -1385,7 +1424,8 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
                     Error::Sync("no vault key — pair a device first (pai pair)".into())
                 })?;
-                let eng = engine::SyncEngine::new(t, store.clone(), vault, device.id);
+                let eng =
+                    engine::SyncEngine::new(t, store.clone(), vault, device.id, &cfg.data_dir);
                 let out = match cmd {
                     SyncCmd::Push { .. } => eng.push().await?,
                     SyncCmd::Pull { .. } => eng.pull().await?,
@@ -2361,6 +2401,72 @@ async fn run_workflow_cmds(
 }
 
 /// `pai task …` — synced background tasks with claim/lease execution.
+/// `pai circle` — shared-memory federation scopes (V3d).
+/// `pai circle` — shared-memory federation scopes (V3d). Runs on the
+/// light path (no inference needed): create/grant/list/leave.
+async fn run_circle_cmds(
+    store: &Arc<Store>,
+    device: DeviceId,
+    cfg: &pai_config::Config,
+    cmd: &CircleCmd,
+) -> Result<()> {
+    use pai_sync::{circle, crypto};
+    match cmd {
+        CircleCmd::Create { name } => {
+            circle::create_circle(store, &cfg.data_dir, name, device)?;
+            println!("circle '{name}' ready — share it: pai circle grant {name} --to <device>");
+        }
+        CircleCmd::Grant {
+            name,
+            to,
+            dir,
+            relay,
+            token,
+        } => {
+            let pid = resolve_peer(store, to)?;
+            let peer = pai_sync::pair::list_peers(store)?
+                .into_iter()
+                .find(|p| p.device_id == pid)
+                .ok_or_else(|| Error::InvalidInput(format!("no paired device {to}")))?;
+            let t = sync_transport(dir, relay, token)?;
+            let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
+                Error::Sync("no vault key — pair a device first (pai pair)".into())
+            })?;
+            let eng =
+                pai_sync::engine::SyncEngine::new(t, store.clone(), vault, device, &cfg.data_dir);
+            eng.push_circle_grant(name, &peer).await?;
+            println!(
+                "granted circle '{name}' to {} ({:.8}) — lands on their next pull",
+                peer.name,
+                peer.device_id.to_string()
+            );
+        }
+        CircleCmd::List => {
+            let circles = circle::list_circles(store)?;
+            if circles.is_empty() {
+                println!("(no circles — `pai circle create <name>`)");
+            }
+            for c in circles {
+                let has_key = crypto::circle_key(&cfg.data_dir, &c.name)?.is_some();
+                println!(
+                    "  {} (created by {:.8}, key {})",
+                    c.name,
+                    c.created_by,
+                    if has_key { "held" } else { "MISSING" }
+                );
+            }
+        }
+        CircleCmd::Leave { name } => {
+            let n = circle::leave_circle(store, &cfg.data_dir, name)?;
+            println!(
+                "left '{name}' — key dropped, {n} memor{} re-scoped device-local",
+                if n == 1 { "y" } else { "ies" }
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn run_task_cmds(
     cmd: &TaskCmd,
     ctx: &Ctx,
@@ -2489,6 +2595,7 @@ async fn run_task_cmds(
                         ctx.store.clone(),
                         vault,
                         ctx.agent.device,
+                        &cfg.data_dir,
                     ))
                 }
                 Some(Err(e)) => return Err(e),
@@ -2593,6 +2700,7 @@ async fn main() -> Result<()> {
             | Cmd::Sync { .. }
             | Cmd::Broker { .. }
             | Cmd::Email { .. }
+            | Cmd::Circle { .. }
             | Cmd::Describe { .. }
     ) {
         return run_sync_cmds(&cli).await;
@@ -2997,7 +3105,33 @@ async fn main() -> Result<()> {
                 ctx.audit.record(&e)?;
                 println!("{}", out.summary);
             }
+            Some(MemCmd::Share { target, circle }) => {
+                let mid = parse_uuid(&target, "memory")?;
+                let ctx_tool = pai_tools::ToolContext {
+                    run: AgentRunId::new(),
+                    device: ctx.agent.device,
+                    memory: Some(ctx.memory.as_ref()),
+                    memory_scope: None,
+                    documents: Some(ctx.documents.as_ref()),
+                    email: ctx.email.as_deref(),
+                    vision: None,
+                    notify: None,
+                    allowed_roots: &[],
+                };
+                let out = pai_tools::MemoryShare
+                    .execute(
+                        serde_json::json!({"memory_id": mid, "circle": circle}),
+                        &ctx_tool,
+                    )
+                    .await?;
+                let mut e = pai_audit::event(AuditKind::MemoryWritten, AuditOutcome::Ok);
+                e.device = Some(ctx.agent.device);
+                e.detail = out.value.clone();
+                ctx.audit.record(&e)?;
+                println!("{}", out.summary);
+            }
         },
+        Cmd::Circle { cmd } => run_circle_cmds(&ctx.store, ctx.agent.device, &cfg, &cmd).await?,
         Cmd::Voice { cmd } => run_voice_cmds(&cmd, &ctx, &cfg).await?,
         Cmd::Task { cmd } => {
             run_task_cmds(&cmd, &ctx, &cli.provider, cli.model.clone(), &cfg).await?

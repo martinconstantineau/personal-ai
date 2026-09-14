@@ -37,6 +37,11 @@ pub struct MemoryItem {
     /// every conversation); `Some(c)` = visible only inside conversation `c`.
     #[serde(default)]
     pub conversation: Option<ConversationId>,
+    /// Federated sharing scope: `Some(name)` = roam only to devices that
+    /// hold the named circle's key (family/team); `None` = vault-wide.
+    /// Meaningful only while `sync_scope` is `synchronized`.
+    #[serde(default)]
+    pub share_circle: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -86,6 +91,11 @@ pub trait Embedder: Send + Sync {
 
 #[async_trait]
 pub trait MemoryBackend: Send + Sync {
+    /// Retarget a memory's federation scope (`share_circle`). Default:
+    /// unsupported — SqliteMemory implements it; mocks may not.
+    async fn set_share_circle(&self, _id: MemoryId, _circle: Option<&str>) -> Result<bool> {
+        Err(Error::Other("share_circle unsupported".into()))
+    }
     async fn put(&self, item: &MemoryItem) -> Result<()>;
     async fn get(&self, id: MemoryId) -> Result<MemoryItem>;
     /// Soft delete — recoverable until purged; respects "delete my data".
@@ -184,11 +194,13 @@ impl SqliteMemory {
             conversation: r.get::<_, Option<String>>(11)?.map(|s| {
                 ConversationId(uuid::Uuid::parse_str(&s).unwrap_or_else(|_| uuid::Uuid::nil()))
             }),
+            share_circle: r.get::<_, Option<String>>(12)?,
         })
     }
 
     const COLS: &'static str = "id, type, content, source, created_at, updated_at, confidence,
-         importance, privacy_level, entities_json, embedding, conversation_id";
+         importance, privacy_level, entities_json, embedding, conversation_id,
+         share_circle";
 }
 
 /// SQL fragment implementing [`RecallQuery::memory_scope`]. The id renders
@@ -240,8 +252,8 @@ impl MemoryBackend for SqliteMemory {
                 "INSERT INTO memories(id, type, content, source, created_at,
                     updated_at, confidence, importance, privacy_level,
                     entities_json, embedding, deleted, sync_scope,
-                    conversation_id)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,?13)",
+                    conversation_id, share_circle)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,?13,?14)",
                 params![
                     item.id.to_string(),
                     Self::scope_name(item.scope),
@@ -260,10 +272,21 @@ impl MemoryBackend for SqliteMemory {
                     emb,
                     "synchronized",
                     item.conversation.map(|c| c.to_string()),
+                    item.share_circle,
                 ],
             )
         })?;
         Ok(())
+    }
+
+    async fn set_share_circle(&self, id: MemoryId, circle: Option<&str>) -> Result<bool> {
+        self.store.with_conn(|c| {
+            c.execute(
+                "UPDATE memories SET share_circle=?2, updated_at=?3 WHERE id=?1",
+                params![id.to_string(), circle, ts(&now())],
+            )
+            .map(|n| n > 0)
+        })
     }
 
     async fn get(&self, id: MemoryId) -> Result<MemoryItem> {
@@ -447,6 +470,7 @@ impl WorkingMemory {
             entities: vec![],
             embedding: None,
             conversation: None,
+            share_circle: None,
         });
     }
 
@@ -560,6 +584,7 @@ pub fn user_fact(content: impl Into<String>, importance: f32) -> MemoryItem {
         entities: vec![],
         embedding: None,
         conversation: None,
+        share_circle: None,
     }
 }
 

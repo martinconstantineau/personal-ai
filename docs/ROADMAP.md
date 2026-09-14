@@ -242,7 +242,17 @@ the default when no `oauth` block exists.
   selects it explicitly; `--provider auto` prefers it over HTTP probing
   when `inference.json` resolves. No native runtime linkage — the same
   boundary philosophy as whisper-server/piper and the V2p vision adapter.
-- Federation story for opt-in shared memories (family/team scopes)
+- ~~Federation story for opt-in shared memories (family/team scopes)~~ —
+  shipped: **circles**. A circle is a named symmetric key held by a
+  subset of vault members; `memories.share_circle` rows seal under it so
+  non-member vault peers get ciphertext they can't open (federation is
+  cryptographic, not advisory). `pai circle create|grant|list|leave`;
+  grants ride `ckg/<circle>/<device>` objects sealed to the member's
+  pairwise X25519 key (same wrap as vault bootstrap). `memory.remember`
+  gains a `circle` arg; `memory.share` retargets existing rows (Medium
+  risk — moving data to peers). Leave is forward-only: the key drops,
+  received rows fence to `device_local`, already-shared copies stay
+  shared.
 
 ## Known technical debt (tracked, not hidden)
 

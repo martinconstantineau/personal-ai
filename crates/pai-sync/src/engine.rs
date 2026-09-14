@@ -37,18 +37,20 @@ const TASK_PREFIX: &str = "task/";
 const WF_PREFIX: &str = "wf/";
 const NTF_PREFIX: &str = "ntf/";
 const MEMORY_PREFIX: &str = "memory/";
+const CKG_PREFIX: &str = "ckg/";
 
 /// Apply order on pull: conversations before their messages (FK), then
 /// documents, then tasks and memories (which may reference conversations).
 fn kind_rank(key: &str) -> Option<u8> {
     match key.split('/').next() {
-        Some("conv") => Some(0),
-        Some("msg") => Some(1),
-        Some("doc") => Some(2),
-        Some("task") => Some(3),
-        Some("wf") => Some(4),
-        Some("memory") => Some(5),
-        Some("ntf") => Some(6),
+        Some("ckg") => Some(0), // circle grants first — keys unlock rows
+        Some("conv") => Some(1),
+        Some("msg") => Some(2),
+        Some("doc") => Some(3),
+        Some("task") => Some(4),
+        Some("wf") => Some(5),
+        Some("memory") => Some(6),
+        Some("ntf") => Some(7),
         _ => None,
     }
 }
@@ -185,15 +187,24 @@ pub struct SyncEngine<T: SyncTransport> {
     store: Arc<Store>,
     vault: [u8; 32],
     device: DeviceId,
+    /// Where circle keys + the agreement secret live (keystore/file).
+    data_dir: std::path::PathBuf,
 }
 
 impl<T: SyncTransport> SyncEngine<T> {
-    pub fn new(transport: T, store: Arc<Store>, vault: [u8; 32], device: DeviceId) -> Self {
+    pub fn new(
+        transport: T,
+        store: Arc<Store>,
+        vault: [u8; 32],
+        device: DeviceId,
+        data_dir: &std::path::Path,
+    ) -> Self {
         Self {
             transport,
             store,
             vault,
             device,
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
@@ -203,7 +214,7 @@ impl<T: SyncTransport> SyncEngine<T> {
             let mut stmt = c.prepare(
                 "SELECT id, type, content, source, created_at, updated_at,
                         confidence, importance, privacy_level, entities_json,
-                        embedding, deleted, conversation_id
+                        embedding, deleted, conversation_id, share_circle
                  FROM memories WHERE sync_scope='synchronized'",
             )?;
             let rows = stmt.query_map([], |r| {
@@ -221,6 +232,7 @@ impl<T: SyncTransport> SyncEngine<T> {
                     r.get::<_, Option<Vec<u8>>>(10)?,
                     r.get::<_, i64>(11)?,
                     r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<String>>(13)?,
                 ))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -245,8 +257,24 @@ impl<T: SyncTransport> SyncEngine<T> {
             emb,
             deleted,
             conv,
+            share_circle,
         ) in rows
         {
+            // A circle-tagged row seals under that circle's key, not the
+            // vault — vault peers outside the circle can't open it.
+            // Missing local key (left circle, stale row) -> skip, no push.
+            let seal_key = match &share_circle {
+                None => self.vault,
+                Some(c) => match crypto::circle_key(&self.data_dir, c)? {
+                    Some(k) => k,
+                    None => {
+                        tracing::warn!(memory = %id, circle = %c,
+                            "no circle key — memory stays unsynced");
+                        out.skipped += 1;
+                        continue;
+                    }
+                },
+            };
             let updated_at = parse_ts(&updated);
             let version = updated_at.timestamp_millis().max(1) as u64;
             let key = format!("{MEMORY_PREFIX}{id}");
@@ -256,7 +284,7 @@ impl<T: SyncTransport> SyncEngine<T> {
             }
             let tombstone = deleted != 0;
             let ciphertext = if tombstone {
-                crypto::seal(&self.vault, key.as_bytes(), b"")?
+                crypto::seal(&seal_key, key.as_bytes(), b"")?
             } else {
                 let embedding: Option<Vec<f32>> = emb.map(|b| {
                     b.chunks(4)
@@ -279,7 +307,7 @@ impl<T: SyncTransport> SyncEngine<T> {
                     conversation_id: conv,
                 };
                 let raw = serde_json::to_vec(&payload).map_err(|e| Error::Sync(e.to_string()))?;
-                crypto::seal(&self.vault, key.as_bytes(), &raw)?
+                crypto::seal(&seal_key, key.as_bytes(), &raw)?
             };
             let obj = SyncObject {
                 key: key.clone(),
@@ -697,23 +725,135 @@ impl<T: SyncTransport> SyncEngine<T> {
         }
         pending.sort_by_key(|(r, o)| (*r, o.updated_at));
         for (_, obj) in pending {
-            let raw = match crypto::open(&self.vault, obj.key.as_bytes(), &obj.ciphertext) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(key = %obj.key, error = %e, "skipping unopenable sync object");
+            // ckg/<circle>/<device> grants are sealed to the *target
+            // device's* pairwise key — not the vault. Only attempt the
+            // ones addressed to us; others stay unreadable by design.
+            if obj.key.starts_with(CKG_PREFIX) {
+                let addressed = obj.key.ends_with(&format!("/{}", self.device));
+                if addressed {
+                    match self.open_grant(&obj)? {
+                        Some(g) => self.apply_grant(&g)?,
+                        None => {
+                            out.skipped += 1;
+                            continue;
+                        }
+                    }
+                    self.set_mirror(&obj)?;
+                    out.pulled += 1;
+                } else {
+                    out.skipped += 1;
+                }
+                continue;
+            }
+            let (raw, circle) = match self.open_scoped(&obj)? {
+                Some(v) => v,
+                None => {
+                    tracing::warn!(key = %obj.key, "skipping unopenable sync object");
                     out.skipped += 1;
                     continue;
                 }
             };
-            self.apply_obj(&obj, &raw)?;
+            self.apply_obj(&obj, &raw, circle.as_deref())?;
             self.set_mirror(&obj)?;
             out.pulled += 1;
         }
         Ok(out)
     }
 
+    /// Open an object under the key that owns it: the vault key for
+    /// shared rows, else each locally-held circle key. Returns the
+    /// plaintext plus which circle opened it — the circle a row belongs
+    /// to is *derived from the key*, never trusted from the payload.
+    fn open_scoped(&self, obj: &SyncObject) -> Result<Option<(Vec<u8>, Option<String>)>> {
+        if let Ok(raw) = crypto::open(&self.vault, obj.key.as_bytes(), &obj.ciphertext) {
+            return Ok(Some((raw, None)));
+        }
+        for c in crate::circle::list_circles(&self.store)? {
+            if let Some(k) = crypto::circle_key(&self.data_dir, &c.name)? {
+                if let Ok(raw) = crypto::open(&k, obj.key.as_bytes(), &obj.ciphertext) {
+                    return Ok(Some((raw, Some(c.name))));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Open a `ckg/<circle>/<device>` grant — sealed to a pairwise
+    /// peer_key, so we try each trusted peer's key until one opens it.
+    fn open_grant(&self, obj: &SyncObject) -> Result<Option<crate::circle::CircleGrant>> {
+        let agree = crypto::agreement_key(self.device, &self.data_dir)?;
+        for p in crate::pair::list_peers(&self.store)? {
+            let wk = crypto::peer_key(
+                &agree.secret,
+                &x25519_dalek::PublicKey::from(p.agree_pubkey),
+            );
+            if let Ok(raw) = crypto::open(&wk, obj.key.as_bytes(), &obj.ciphertext) {
+                let g: crate::circle::CircleGrant = serde_json::from_slice(&raw)
+                    .map_err(|e| Error::Sync(format!("bad circle grant: {e}")))?;
+                return Ok(Some(g));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A received grant: adopt the circle key (idempotent) and record
+    /// the membership row so pull knows to try this key on `memory/`.
+    fn apply_grant(&self, g: &crate::circle::CircleGrant) -> Result<()> {
+        if g.v != 1 {
+            return Err(Error::Sync(format!("unsupported grant v{}", g.v)));
+        }
+        let raw =
+            hex::decode(&g.key).map_err(|e| Error::Sync(format!("bad circle grant key: {e}")))?;
+        let key: [u8; 32] = raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Sync("circle grant key wrong length".into()))?;
+        crypto::adopt_circle_key(&self.data_dir, &g.circle, &key)?;
+        crate::circle::record_membership(&self.store, &g.circle, &g.from)?;
+        tracing::info!(circle = %g.circle, from = %g.from, "joined circle via grant");
+        Ok(())
+    }
+
+    /// Grant `circle` membership to `peer`: emit `ckg/<circle>/<peer>`
+    /// sealed to the pairwise key, pushed through the transport. Only a
+    /// member can grant — we must hold the circle key to wrap it.
+    pub async fn push_circle_grant(
+        &self,
+        circle: &str,
+        peer: &crate::pair::SyncPeer,
+    ) -> Result<()> {
+        let key = crypto::circle_key(&self.data_dir, circle)?
+            .ok_or_else(|| Error::Sync(format!("not a member of circle '{circle}'")))?;
+        let agree = crypto::agreement_key(self.device, &self.data_dir)?;
+        let wk = crypto::peer_key(
+            &agree.secret,
+            &x25519_dalek::PublicKey::from(peer.agree_pubkey),
+        );
+        let key_s = format!("{CKG_PREFIX}{circle}/{}", peer.device_id);
+        let payload = serde_json::to_vec(&crate::circle::CircleGrant {
+            v: 1,
+            circle: circle.to_string(),
+            key: hex::encode(key),
+            from: self.device.to_string(),
+            created_at: now().to_rfc3339(),
+        })
+        .map_err(|e| Error::Sync(e.to_string()))?;
+        let obj = SyncObject {
+            key: key_s.clone(),
+            ciphertext: crypto::seal(&wk, key_s.as_bytes(), &payload)?,
+            version: version_of(&now().to_rfc3339()),
+            writer: self.device,
+            updated_at: now(),
+            tombstone: false,
+        };
+        self.transport.push(&obj).await?;
+        self.set_mirror(&obj)?;
+        Ok(())
+    }
+
     /// Dispatch one opened object to its row-kind apply path.
-    fn apply_obj(&self, obj: &SyncObject, raw: &[u8]) -> Result<()> {
+    /// `circle` records which circle key opened it (None = vault).
+    fn apply_obj(&self, obj: &SyncObject, raw: &[u8], circle: Option<&str>) -> Result<()> {
         let key = obj.key.as_str();
         if let Some(id) = key.strip_prefix(MEMORY_PREFIX) {
             if obj.tombstone {
@@ -721,7 +861,7 @@ impl<T: SyncTransport> SyncEngine<T> {
             }
             let p: MemoryPayload = serde_json::from_slice(raw)
                 .map_err(|e| Error::Sync(format!("bad memory payload: {e}")))?;
-            return self.apply_memory(&p);
+            return self.apply_memory(&p, circle);
         }
         if let Some(id) = key.strip_prefix(CONV_PREFIX) {
             if obj.tombstone {
@@ -840,7 +980,7 @@ impl<T: SyncTransport> SyncEngine<T> {
         Ok(())
     }
 
-    fn apply_memory(&self, p: &MemoryPayload) -> Result<()> {
+    fn apply_memory(&self, p: &MemoryPayload, circle: Option<&str>) -> Result<()> {
         if p.v != 1 {
             return Err(Error::Sync(format!("unsupported payload v{}", p.v)));
         }
@@ -866,8 +1006,8 @@ impl<T: SyncTransport> SyncEngine<T> {
                 "INSERT INTO memories(id, type, content, source, created_at,
                     updated_at, confidence, importance, privacy_level,
                     entities_json, embedding, deleted, sync_scope,
-                    conversation_id)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,'synchronized',?12)
+                    conversation_id, share_circle)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,'synchronized',?12,?13)
                  ON CONFLICT(id) DO UPDATE SET
                     type=excluded.type, content=excluded.content,
                     source=excluded.source, updated_at=excluded.updated_at,
@@ -876,7 +1016,8 @@ impl<T: SyncTransport> SyncEngine<T> {
                     privacy_level=excluded.privacy_level,
                     entities_json=excluded.entities_json,
                     embedding=excluded.embedding, deleted=0,
-                    conversation_id=excluded.conversation_id",
+                    conversation_id=excluded.conversation_id,
+                    share_circle=excluded.share_circle",
                 params![
                     p.id,
                     p.scope,
@@ -890,6 +1031,7 @@ impl<T: SyncTransport> SyncEngine<T> {
                     serde_json::to_string(&p.entities).unwrap_or_else(|_| "[]".into()),
                     emb,
                     p.conversation_id,
+                    circle,
                 ],
             )
         })?;
@@ -1220,5 +1362,6 @@ pub fn folder_engine(
         store,
         vault,
         device,
+        data_dir,
     ))
 }

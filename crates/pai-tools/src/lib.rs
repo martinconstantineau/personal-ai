@@ -223,7 +223,9 @@ impl Tool for MemoryRemember {
                     "content": {"type": "string"},
                     "memory_type": {"type": "string", "enum":
                         ["semantic", "episodic", "procedural", "relationship"]},
-                    "importance": {"type": "number"}
+                    "importance": {"type": "number"},
+                    "circle": {"type": "string",
+                        "description": "federate to a named circle (family/team) instead of vault-wide"}
                 },
                 "required": ["content"]
             }),
@@ -259,12 +261,78 @@ impl Tool for MemoryRemember {
             scope,
             importance: args["importance"].as_f64().unwrap_or(0.8) as f32,
             conversation: ctx.memory_scope,
+            share_circle: args["circle"].as_str().map(|c| c.to_string()),
             ..pai_memory::user_fact(content, 0.8)
         };
         mem.put(&item).await?;
         Ok(ToolOutput {
             value: serde_json::json!({"memory_id": item.id.to_string()}),
             summary: format!("remembered: {content}"),
+        })
+    }
+}
+
+/// `memory.share` — retarget an existing memory's federation scope to a
+/// named circle (family/team) or back to vault-wide. Moving data *to*
+/// peers is the privacy-sensitive direction, so this stays separate from
+/// `memory.remember` and reports the scope change in its summary.
+pub struct MemoryShare;
+
+#[async_trait]
+impl Tool for MemoryShare {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "memory.share".into(),
+            description: "Share an existing memory to a named circle (or                           back to the whole vault with circle omitted)."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string"},
+                    "circle": {"type": "string",
+                        "description": "circle to federate into; omit for vault-wide"}
+                },
+                "required": ["memory_id"]
+            }),
+            output_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"shared": {"type": "boolean"}},
+                "required": ["shared"]
+            }),
+            required_permissions: vec![Permission::MemoryWrite],
+            risk: RiskLevel::Medium,
+            execution: ExecutionMode::Local,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let mem = ctx
+            .memory
+            .ok_or_else(|| Error::Other("memory backend unavailable".into()))?;
+        let id = args["memory_id"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("memory_id".into()))?;
+        let mid = MemoryId(
+            uuid::Uuid::parse_str(id)
+                .map_err(|_| Error::InvalidInput("memory_id not a uuid".into()))?,
+        );
+        let circle = args["circle"].as_str();
+        let ok = mem.set_share_circle(mid, circle).await?;
+        Ok(ToolOutput {
+            value: serde_json::json!({"shared": ok}),
+            summary: if ok {
+                match circle {
+                    Some(c) => format!("memory now federates to circle '{c}'"),
+                    None => "memory now roams vault-wide".to_string(),
+                }
+            } else {
+                format!("no such memory: {id}")
+            },
         })
     }
 }
@@ -889,6 +957,7 @@ pub fn builtin_registry() -> ToolRegistry {
     let mut r = ToolRegistry::default();
     r.register(Arc::new(CalculatorAdd));
     r.register(Arc::new(MemoryRemember));
+    r.register(Arc::new(MemoryShare));
     r.register(Arc::new(MemoryForget));
     r.register(Arc::new(DocumentsSearch));
     r.register(Arc::new(DocumentsIngest));
