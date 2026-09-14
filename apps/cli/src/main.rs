@@ -147,6 +147,9 @@ enum Cmd {
     Deploy {
         /// Package directory containing manifest.toml.
         path: String,
+        /// Replace an existing install of the same app id.
+        #[arg(long)]
+        upgrade: bool,
     },
     /// App package operations: sign, verify, list installed.
     Apps {
@@ -169,6 +172,18 @@ enum AppsCmd {
     Verify {
         /// Package directory containing manifest.toml.
         path: String,
+    },
+    /// Run an installed app's wasm entrypoint in the sandbox.
+    Run {
+        /// Installed app id (see `pai apps list`).
+        id: String,
+        /// Arguments passed to the app.
+        args: Vec<String>,
+    },
+    /// Remove an installed app.
+    Remove {
+        /// Installed app id.
+        id: String,
     },
 }
 
@@ -1368,7 +1383,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
     use pai_sync::{crypto, engine, pair, SyncTransport};
     let (cfg, store, ids, key_dir, user, device) = base(cli).await?;
     match &cli.cmd {
-        Cmd::Deploy { path } => {
+        Cmd::Deploy { path, upgrade } => {
             let pkg = load_package(path)?;
             let devices = ids.list_devices(user.id)?;
             let signer = pkg
@@ -1379,8 +1394,16 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 .find(|d| d.id == signer)
                 .expect("verify_any returned a listed device");
             let dest = pai_apps::AppRegistry::new(&cfg.data_dir)
-                .install(&pkg, &ids, signer_dev)
+                .install(&pkg, &ids, signer_dev, *upgrade)
                 .map_err(|e| Error::Storage(e.to_string()))?;
+            let mut ev = pai_audit::event(AuditKind::AppDeployed, AuditOutcome::Ok);
+            ev.device = Some(device.id);
+            ev.detail = serde_json::json!({
+                "app_id": pkg.manifest.app_id(),
+                "version": pkg.manifest.app.version,
+                "signer": signer.to_string(),
+            });
+            pai_audit::AuditLog::new(store.clone()).record(&ev)?;
             println!(
                 "deployed {} {} ({:?}) -> {}",
                 pkg.manifest.app_id(),
@@ -1430,6 +1453,47 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                         signer.to_string()
                     ),
                     Err(e) => return Err(Error::InvalidInput(e.to_string())),
+                }
+            }
+            AppsCmd::Run { id, args } => {
+                let reg = pai_apps::AppRegistry::new(&cfg.data_dir);
+                let pkg = reg
+                    .get(id)
+                    .map_err(|e| Error::InvalidInput(e.to_string()))?
+                    .ok_or_else(|| Error::NotFound(format!("app {id}")))?;
+                let app_dir = pai_apps::installed_dir(&cfg.data_dir, id);
+                let out = pkg
+                    .run(&app_dir, args, pai_apps::RunLimits::default())
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                print!("{}", String::from_utf8_lossy(&out.stdout));
+                if !out.stderr.is_empty() {
+                    eprint!("{}", String::from_utf8_lossy(&out.stderr));
+                }
+                let mut ev = pai_audit::event(AuditKind::AppRun, AuditOutcome::Ok);
+                ev.device = Some(device.id);
+                ev.detail = serde_json::json!({
+                    "app_id": id,
+                    "exit_code": out.exit_code,
+                    "fuel": out.fuel_consumed,
+                });
+                pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                if let Some(code) = out.exit_code {
+                    println!("(exit {code}, fuel {})", out.fuel_consumed);
+                }
+            }
+            AppsCmd::Remove { id } => {
+                let reg = pai_apps::AppRegistry::new(&cfg.data_dir);
+                if reg
+                    .remove(id)
+                    .map_err(|e| Error::InvalidInput(e.to_string()))?
+                {
+                    let mut ev = pai_audit::event(AuditKind::AppRemoved, AuditOutcome::Ok);
+                    ev.device = Some(device.id);
+                    ev.detail = serde_json::json!({"app_id": id});
+                    pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                    println!("removed {id}");
+                } else {
+                    println!("no such app: {id}");
                 }
             }
         },

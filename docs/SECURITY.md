@@ -82,3 +82,12 @@ Emergency/manual commits by maintainers follow the same rule — no
   audit like any write, but a prompt-injection path could tag content
   into a circle you didn't intend. Set `MemoryWrite` to `AskUser` if
   that matters on your policy.
+- The Android manifest allows **cleartext traffic** so LAN sync relays
+  (`ws://`/`http://` without TLS) work — relay endpoints remain
+  ciphertext-only at the sync layer, but a compromised connector config
+  could send plaintext HTTP. Tighten to `networkSecurityConfig` with a
+  domain allowlist before shipping broadly.
+- Android `RECORD_AUDIO` is declared for voice capture; the runtime
+  grant is still required, and there is no in-app permission-request
+  flow yet — voice capture simply fails until granted in system
+  settings.

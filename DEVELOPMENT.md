@@ -52,8 +52,17 @@ cd apps/desktop && flutter build apk --release              # or appbundle
 - Manifest permissions: `INTERNET` (connectors/relay), `RECORD_AUDIO`
   (voice capture — still requires the runtime grant), cleartext traffic
   allowed for LAN sync relays.
+- Release APKs sign with the debug key until a keystore is configured —
+  fine for sideloading, not for Play distribution.
 - iOS is not buildable from Windows/Linux hosts — needs a macOS + Xcode
   machine.
+
+## Windows desktop build
+
+VS 2022+ BuildTools with the C++ workload (doctor detects it), then
+`cd apps/desktop && flutter build windows`. Copy `target/release/
+pai_ffi.dll` next to `pai_app.exe` in the output bundle — the FFI loader
+resolves it by name.
 
 ## Common commands
 

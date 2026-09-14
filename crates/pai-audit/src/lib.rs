@@ -137,6 +137,9 @@ fn kind_name(k: AuditKind) -> &'static str {
         AuditKind::PermissionChanged => "permission_changed",
         AuditKind::ApprovalRequested => "approval_requested",
         AuditKind::ApprovalResolved => "approval_resolved",
+        AuditKind::AppDeployed => "app_deployed",
+        AuditKind::AppRun => "app_run",
+        AuditKind::AppRemoved => "app_removed",
     }
 }
 

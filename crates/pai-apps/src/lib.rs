@@ -16,6 +16,10 @@
 //! checks `signature.bin` against the signing device's public key.
 //! Unverified packages are rejected.
 
+mod run;
+
+pub use run::{installed_dir, RunLimits, RunOutput};
+
 use pai_core::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -485,16 +489,42 @@ impl AppRegistry {
     }
 
     /// Verify + install a package; returns the installed directory.
+    /// `upgrade` allows replacing an existing install of the same id.
     pub fn install(
         &self,
         pkg: &AppPackage,
         ids: &pai_identity::IdentityStore,
         device: &Device,
+        upgrade: bool,
     ) -> AppResult<PathBuf> {
         pkg.verify(ids, device)?;
         let dest = self.root.join(pkg.manifest.app_id());
+        if dest.exists() && upgrade {
+            std::fs::remove_dir_all(&dest)?;
+        }
         pkg.install_to(&dest)?;
         Ok(dest)
+    }
+
+    /// Load an installed package by app id.
+    pub fn get(&self, app_id: &str) -> AppResult<Option<AppPackage>> {
+        let dir = self.root.join(app_id);
+        if !dir.is_dir() {
+            return Ok(None);
+        }
+        check_app_id(app_id)?; // belt-and-braces against traversal via id
+        AppPackage::load(&dir).map(Some)
+    }
+
+    /// Remove an installed app. Returns false when no such id exists.
+    pub fn remove(&self, app_id: &str) -> AppResult<bool> {
+        check_app_id(app_id)?;
+        let dir = self.root.join(app_id);
+        if !dir.is_dir() {
+            return Ok(false);
+        }
+        std::fs::remove_dir_all(&dir)?;
+        Ok(true)
     }
 
     /// List installed apps as `(app_id, manifest)`.
@@ -711,7 +741,7 @@ auto_migrate = true
         pkg.sign(&ids, &dev, &kd).unwrap();
         let pkg = AppPackage::load(&pkg_dir(&t)).unwrap();
         let reg = AppRegistry::new(&t);
-        let dest = reg.install(&pkg, &ids, &dev).unwrap();
+        let dest = reg.install(&pkg, &ids, &dev, false).unwrap();
         assert!(dest.join("app.wasm").is_file());
         let apps = reg.list().unwrap();
         assert_eq!(apps.len(), 1);

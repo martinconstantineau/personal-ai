@@ -13,6 +13,8 @@ toml.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+wasmi.workspace = true
+wasmi_wasi.workspace = true
 
 [dev-dependencies]
 pai-storage.workspace = true

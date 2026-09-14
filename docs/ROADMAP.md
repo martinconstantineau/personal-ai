@@ -227,8 +227,14 @@ the default when no `oauth` block exists.
   `NotificationSend`); `--notify` on `pai task add` publishes the result;
   external delivery via notify.json `email_to`/`webhook_url` (opt-in only);
   `pai notify list|open|send|clear|remove|configure|test` + FFI inbox ops.
-- Mobile builds shipping — blocked on a Flutter/Android toolchain in
-  this environment.
+- ~~Mobile builds shipping~~ — shipped: `libpai_ffi.so` cross-compiled
+  for arm64-v8a / armeabi-v7a / x86_64 via `cargo-ndk` at API 26
+  (cpal/AAudio), packaged into `flutter build apk`/`appbundle`
+  (`minSdk = 26`, INTERNET + RECORD_AUDIO, cleartext for LAN relays).
+  Windows runner builds via VS BuildTools. `scripts/build_android_ffi.sh`
+  reproduces the native libs; OpenSSL is consumed as prebuilt per-ABI
+  static archives (vendored openssl-src can't cross-compile on Windows
+  hosts). iOS remains unbuildable off macOS.
 - ~~On-device inference backends (ExecuTorch/MLC)~~ — shipped as the
   process-boundary adapter (`ProcessInferenceProvider`): any local
   runner — ExecuTorch runner, MLC-LLM CLI, `llama-cli`, a custom script —

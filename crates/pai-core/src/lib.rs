@@ -531,6 +531,9 @@ pub enum AuditKind {
     PermissionChanged,
     ApprovalRequested,
     ApprovalResolved,
+    AppDeployed,
+    AppRun,
+    AppRemoved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
