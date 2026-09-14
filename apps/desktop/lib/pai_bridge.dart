@@ -149,6 +149,23 @@ class PaiBridge {
             if (inReplyTo != null) 'in_reply_to': inReplyTo,
           }))) as Map<String, dynamic>;
 
+  /// Send immediately via SMTP — same args as [emailDraft]. {sent:true}
+  /// or {error} when no smtp block is configured.
+  Future<Map<String, dynamic>> emailSend(
+          {required List<String> to,
+          List<String> cc = const [],
+          required String subject,
+          required String body,
+          String? inReplyTo}) async =>
+      (await _call(_Op.emailSend,
+          arg: jsonEncode({
+            'to': to.map((a) => {'address': a}).toList(),
+            'cc': cc.map((a) => {'address': a}).toList(),
+            'subject': subject,
+            'body': body,
+            if (inReplyTo != null) 'in_reply_to': inReplyTo,
+          }))) as Map<String, dynamic>;
+
   /// Voice ops — `{stt, tts, mic, speaker}` probe; `voiceListen` blocks up
   /// to [maxSecs] in the worker isolate; `voiceSay` plays on the host
   /// speaker ({ok, played} or {ok, played:false, wav_b64}).
@@ -262,6 +279,8 @@ class PaiBridge {
             result = client.emailRead(req.arg!);
           case _Op.emailDraft:
             result = client.emailDraft(req.arg!);
+          case _Op.emailSend:
+            result = client.emailSend(req.arg!);
           case _Op.voiceStatus:
             result = client.voiceStatus();
           case _Op.voiceListen:
@@ -316,6 +335,7 @@ enum _Op {
   emailSearch,
   emailRead,
   emailDraft,
+  emailSend,
   voiceStatus,
   voiceListen,
   voiceTranscribe,

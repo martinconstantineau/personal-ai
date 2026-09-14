@@ -42,6 +42,10 @@ pub struct ImapConfig {
     /// MOVE target for `archive`. Gmail: "[Gmail]/All Mail".
     #[serde(default = "default_archive")]
     pub archive_mailbox: String,
+    /// Optional submission account — when present, `send` delivers via
+    /// SMTP instead of erroring. Same `email:<user>` keystore entry.
+    #[serde(default)]
+    pub smtp: Option<crate::smtp::SmtpConfig>,
 }
 
 fn default_port() -> u16 {
@@ -359,8 +363,9 @@ fn strip_tags(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// RFC822 source for a draft — enough for APPEND into a drafts mailbox.
-fn build_draft_message(d: &Draft, from_addr: &str) -> String {
+/// RFC822 source for a draft — drafts-mailbox APPEND and SMTP DATA both
+/// build on this.
+pub(crate) fn build_draft_message(d: &Draft, from_addr: &str) -> String {
     let encode_addr = |a: &EmailAddress| match &a.name {
         Some(n) => format!("{} <{}>", n, a.address),
         None => a.address.clone(),
@@ -390,6 +395,14 @@ fn build_draft_message(d: &Draft, from_addr: &str) -> String {
     if let Some(rt) = &d.in_reply_to {
         s.push_str(&format!("In-Reply-To: {rt}\r\nReferences: {rt}\r\n"));
     }
+    s.push_str(&format!(
+        "Date: {}\r\n",
+        now().format("%a, %d %b %Y %H:%M:%S %z")
+    ));
+    s.push_str(&format!(
+        "Message-ID: <{}@pai.local>\r\n",
+        uuid::Uuid::new_v4()
+    ));
     s.push_str("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n");
     s.push_str(&d.body.replace("\r\n", "\n").replace('\n', "\r\n"));
     s
@@ -469,12 +482,16 @@ impl EmailProvider for ImapProvider {
         .await
     }
 
-    async fn send(&self, _draft: &Draft) -> Result<()> {
-        Err(Error::Provider(
-            "IMAP cannot send — the draft API is the send path by design \
-             (SMTP via lettre is roadmap)"
-                .into(),
-        ))
+    async fn send(&self, draft: &Draft) -> Result<()> {
+        let smtp = self.cfg.smtp.clone().ok_or_else(|| {
+            Error::Provider(
+                "no smtp block in email.json — drafts only. \
+                 `pai email configure` can add one"
+                    .into(),
+            )
+        })?;
+        let user = smtp.user.clone().unwrap_or_else(|| self.cfg.user.clone());
+        crate::smtp::SmtpProvider::new(smtp, user).send(draft).await
     }
 
     async fn archive(&self, id: &str) -> Result<()> {

@@ -34,10 +34,12 @@ the full threat model lives in `docs/security/threat-model.md`.
   all keystore-backed the same way (ADR 0015).
 - **Email content is untrusted.** Message bodies read via the email
   connector are `TrustLevel::Untrusted` data — never instructions. Send
-  and delete are approval-gated `High` risk tools; the IMAP provider has
-  no send verb at all (drafts-first by design). Passwords resolve from
-  `PAI_EMAIL_PASSWORD` or the OS keystore (`email:<user>`) — never from
-  `email.json`, and `pai_audit::redact` masks them in logs.
+  and delete are approval-gated `High` risk tools; the connector is
+  drafts-first — `send` only exists when an `smtp` block is configured
+  in `email.json`, and even then `email.send` still requires approval.
+  Passwords resolve from `PAI_EMAIL_PASSWORD` or the OS keystore
+  (`email:<user>`) — never from `email.json`, and `pai_audit::redact`
+  masks them in logs.
 - **Vision is local-only.** `vision.describe`/`pai describe` send images
   to a localhost llama.cpp server (data-URI in the request body); the
   tool reads only jailed paths and its output is untrusted model text.

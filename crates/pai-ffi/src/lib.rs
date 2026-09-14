@@ -1067,6 +1067,32 @@ pub unsafe extern "C" fn pai_email_draft(
     }
 }
 
+/// Send a draft immediately via SMTP (the `smtp` block in email.json).
+/// `draft_json`: same shape as `pai_email_draft`. Returns `{sent: true}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `draft_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_email_send(
+    handle: *mut PaiRuntime,
+    draft_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let Some(email) = &rt.email else {
+        return email_err();
+    };
+    let draft: pai_connector_email::Draft = match read_str(draft_json)
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str(s).map_err(|e| e.to_string()))
+    {
+        Ok(d) => d,
+        Err(e) => return to_c(serde_json::json!({"error": e})),
+    };
+    match rt.rt.block_on(async { email.send(&draft).await }) {
+        Ok(()) => to_c(serde_json::json!({"sent": true})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Voice
 // ---------------------------------------------------------------------------

@@ -128,7 +128,15 @@ tool so the agent can inspect images inside the filesystem jail
 
 - Vision: ONNX/MLX-VLM adapters; grounding/detections when models expose
   them; image ingest into documents (OCR text into the document store)
-- Connectors: registry abstraction beyond email; SMTP send; OAuth2 for
+**V2j done (2026-09-14):** SMTP send — `email.json` gains an optional
+`smtp` block ({host, port, tls: tls|starttls|none, user?}); a
+hand-rolled submission client (EHLO→STARTTLS→AUTH PLAIN→DATA, dot-
+stuffing) over the same rustls+webpki stack as IMAP — no new deps.
+`ImapProvider::send` delegates when configured (drafts-only otherwise),
+so `email.send`, `pai email send`, and `pai_email_send` all light up at
+once. Password shared via the `email:<user>` keystore entry.
+
+- Connectors: registry abstraction beyond email; OAuth2 for
   Gmail/Outlook (app-password is today's auth)
 
 ## V3 — The personal OS layer

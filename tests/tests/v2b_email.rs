@@ -213,6 +213,7 @@ fn imap_config_roundtrip() {
         mailbox: "INBOX".into(),
         archive_mailbox: "Archive".into(),
         drafts_mailbox: "Drafts".into(),
+        smtp: None,
     };
     cfg.save(&dir).unwrap();
     let back = ImapConfig::load(&dir).unwrap().unwrap();

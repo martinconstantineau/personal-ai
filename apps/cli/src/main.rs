@@ -378,6 +378,20 @@ enum EmailCmd {
         #[arg(long)]
         in_reply_to: Option<String>,
     },
+    /// Send immediately via SMTP (needs the `smtp` block in email.json —
+    /// `pai email configure` writes one). Drafts remain the default.
+    Send {
+        #[arg(long)]
+        to: Vec<String>,
+        #[arg(long)]
+        cc: Vec<String>,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long)]
+        in_reply_to: Option<String>,
+    },
     /// Archive a message by id.
     Archive { id: String },
     /// Apply a label/mailbox to a message by id.
@@ -1460,6 +1474,31 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
             let mailbox = read("Mailbox", "INBOX")?;
             let drafts = read("Drafts mailbox", "[Gmail]/Drafts")?;
             let archive = read("Archive mailbox", "[Gmail]/All Mail")?;
+            // Optional SMTP submission — empty host keeps drafts-only.
+            let smtp_host = read("SMTP host (empty = drafts only)", "smtp.gmail.com")?;
+            let smtp = if smtp_host.is_empty() {
+                None
+            } else {
+                let smtp_port: u16 = read("SMTP port", "465")?
+                    .parse()
+                    .map_err(|_| Error::InvalidInput("bad smtp port".into()))?;
+                let smtp_tls = match read("SMTP TLS (tls/starttls/none)", "tls")?.as_str() {
+                    "tls" => pai_connector_email::SmtpTls::Tls,
+                    "starttls" => pai_connector_email::SmtpTls::StartTls,
+                    "none" => pai_connector_email::SmtpTls::None,
+                    other => {
+                        return Err(Error::InvalidInput(format!(
+                            "bad tls mode {other:?} — tls|starttls|none"
+                        )))
+                    }
+                };
+                Some(pai_connector_email::SmtpConfig {
+                    host: smtp_host,
+                    port: smtp_port,
+                    tls: smtp_tls,
+                    user: None, // same login as IMAP
+                })
+            };
             let password =
                 rpassword::prompt_password("Password (app password for Gmail/Outlook): ")
                     .map_err(|e| Error::Other(e.to_string()))?;
@@ -1470,6 +1509,7 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
                 mailbox,
                 drafts_mailbox: drafts,
                 archive_mailbox: archive,
+                smtp,
             };
             c.save(&cfg.data_dir)?;
             if password.is_empty() {
@@ -1488,6 +1528,10 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
                     "drafts: {}  archive: {}",
                     c.drafts_mailbox, c.archive_mailbox
                 );
+                match &c.smtp {
+                    Some(s) => println!("smtp: {}:{} ({:?}) — send enabled", s.host, s.port, s.tls),
+                    None => println!("smtp: not configured — drafts only"),
+                }
                 let pw = pai_connector_email::imap::resolve_password(&c.user).is_ok();
                 println!("password: {}", if pw { "available" } else { "MISSING" });
             }
@@ -1568,6 +1612,29 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
                 })
                 .await?;
             println!("{id}");
+        }
+        EmailCmd::Send {
+            to,
+            cc,
+            subject,
+            body,
+            in_reply_to,
+        } => {
+            let addr = |a: &String| pai_connector_email::EmailAddress {
+                name: None,
+                address: a.clone(),
+            };
+            email_provider(cfg)
+                .await?
+                .send(&pai_connector_email::Draft {
+                    to: to.iter().map(addr).collect(),
+                    cc: cc.iter().map(addr).collect(),
+                    subject: subject.clone(),
+                    body: body.clone(),
+                    in_reply_to: in_reply_to.clone(),
+                })
+                .await?;
+            println!("sent");
         }
         EmailCmd::Archive { id } => {
             email_provider(cfg).await?.archive(id).await?;

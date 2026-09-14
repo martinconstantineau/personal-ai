@@ -84,6 +84,8 @@ class PaiClient {
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_read');
   late final _emailDraft = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_draft');
+  late final _emailSend = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_send');
   late final _voiceStatus = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_voice_status');
   late final _voiceListen = _lib.lookupFunction<_VoiceListenNative,
@@ -254,6 +256,11 @@ class PaiClient {
   /// Create a draft: {to:[{address}], cc:[], subject, body, in_reply_to?}.
   Map<String, dynamic> emailDraft(String draftJson) =>
       _call1(_emailDraft, draftJson);
+
+  /// Send a draft immediately via SMTP: same JSON shape as [emailDraft].
+  /// {sent: true} or {error: ...} when no smtp block is configured.
+  Map<String, dynamic> emailSend(String draftJson) =>
+      _call1(_emailSend, draftJson);
 
   /// Voice capability probe: {stt, tts, mic, speaker, whisper_url}.
   Map<String, dynamic> voiceStatus() =>
