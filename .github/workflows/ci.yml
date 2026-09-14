@@ -13,6 +13,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # keyring's Linux Secret Service backend is a dbus client.
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --all -- --check
