@@ -101,6 +101,8 @@ class PaiClient {
   late final _notifyMarkRead = _lib.lookupFunction<_SendNative,
           Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
       'pai_notify_mark_read');
+  late final _appsList = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_apps_list');
   late final _voiceSay = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_voice_say');
   late final _setPolicy = _lib.lookupFunction<_ThreeStrNative,
@@ -282,6 +284,11 @@ class PaiClient {
   /// Returns {ok: bool}.
   Map<String, dynamic> notifyMarkRead(String id) =>
       _call1(_notifyMarkRead, id);
+
+  /// Installed app packages: {apps: [{id, name, version, runtime}]}.
+  /// Powers the Personal App Cloud dashboard.
+  Map<String, dynamic> appsList() =>
+      _json(_appsList(_handle)) as Map<String, dynamic>;
 
   /// Voice capability probe: {stt, tts, mic, speaker, whisper_url}.
   Map<String, dynamic> voiceStatus() =>

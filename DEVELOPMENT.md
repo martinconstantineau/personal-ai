@@ -93,8 +93,8 @@ pai policies list|set <PERMISSION> <POLICY>      # persisted policy edits
 pai memories                                     # memory browser
 pai memories forget <uuid|query>
 pai audit [--limit N]
-pai apps sign|verify|list                        # app package signing + registry
-pai deploy <dir>                                 # verify + install a signed app package
+pai apps sign|verify|list|run|remove             # app package signing, registry, sandboxed run
+pai deploy <dir> [--upgrade]                     # verify + install a signed app package
 ```
 
 Model sources: `pai models install` accepts a catalog **slug** or an

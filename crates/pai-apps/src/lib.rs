@@ -38,6 +38,8 @@ pub enum AppError {
     NotSigned,
     #[error("signature verification failed: {0}")]
     BadSignature(String),
+    #[error("storage provisioning: {0}")]
+    Storage(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("core: {0}")]
@@ -476,6 +478,50 @@ fn digest_files(root: &Path, files: &[PathBuf]) -> AppResult<[u8; 32]> {
     Ok(h.finalize().into())
 }
 
+/// Copy `src` into `dst` recursively; existing files in `dst` are
+/// overwritten. Used to restore live `data/` over package-shipped seeds.
+fn copy_merge(src: &Path, dst: &Path) -> AppResult<()> {
+    std::fs::create_dir_all(dst)?;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let to = dst.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_merge(&e.path(), &to)?;
+        } else {
+            std::fs::copy(e.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Provision per-app storage after install. `data/` is created for every
+/// non-stateless app (the sandbox preopens it); `sqlite` additionally
+/// creates `data/data.db` and, when `migration.auto_migrate` is set,
+/// applies `storage.path` (e.g. `schema.sql`) as a batch.
+fn provision_storage(app_dir: &Path, manifest: &AppManifest) -> AppResult<()> {
+    let data = app_dir.join("data");
+    match manifest.storage.r#type {
+        StorageKind::None => return Ok(()),
+        StorageKind::Sqlite => {
+            std::fs::create_dir_all(&data)?;
+            let db = data.join("data.db");
+            let conn = rusqlite::Connection::open(&db)
+                .map_err(|e| AppError::Storage(format!("open {db:?}: {e}")))?;
+            if manifest.migration.auto_migrate {
+                if let Some(schema) = &manifest.storage.path {
+                    let sql = std::fs::read_to_string(app_dir.join(schema))?;
+                    conn.execute_batch(&sql)
+                        .map_err(|e| AppError::Storage(format!("apply {schema}: {e}")))?;
+                }
+            }
+        }
+        StorageKind::Kv | StorageKind::Files => {
+            std::fs::create_dir_all(&data)?;
+        }
+    }
+    Ok(())
+}
+
 /// Filesystem registry: `data_dir/apps/<app-id>/` per installed app.
 pub struct AppRegistry {
     root: PathBuf,
@@ -489,7 +535,9 @@ impl AppRegistry {
     }
 
     /// Verify + install a package; returns the installed directory.
-    /// `upgrade` allows replacing an existing install of the same id.
+    /// `upgrade` allows replacing an existing install of the same id —
+    /// the live `data/` directory (app database, user files) is preserved
+    /// across the upgrade and merged over any package-shipped seeds.
     pub fn install(
         &self,
         pkg: &AppPackage,
@@ -499,10 +547,41 @@ impl AppRegistry {
     ) -> AppResult<PathBuf> {
         pkg.verify(ids, device)?;
         let dest = self.root.join(pkg.manifest.app_id());
-        if dest.exists() && upgrade {
+        if dest.exists() {
+            if !upgrade {
+                return Err(AppError::Layout(format!("{dest:?} already exists")));
+            }
+            // Preserve live app data across the upgrade.
+            let live = dest.join("data");
+            let backup = self
+                .root
+                .join(format!(".{}.data.bak", pkg.manifest.app_id()));
+            if live.is_dir() {
+                if backup.exists() {
+                    std::fs::remove_dir_all(&backup)?;
+                }
+                std::fs::rename(&live, &backup)?;
+            }
             std::fs::remove_dir_all(&dest)?;
+            let r = pkg.install_to(&dest).and_then(|_| {
+                if backup.is_dir() {
+                    copy_merge(&backup, &dest.join("data"))?;
+                    std::fs::remove_dir_all(&backup)?;
+                }
+                Ok(())
+            });
+            if let Err(e) = r {
+                // Roll the live data back if the reinstall failed midway.
+                if backup.is_dir() {
+                    let _ = std::fs::create_dir_all(&dest);
+                    let _ = std::fs::rename(&backup, &live);
+                }
+                return Err(e);
+            }
+        } else {
+            pkg.install_to(&dest)?;
         }
-        pkg.install_to(&dest)?;
+        provision_storage(&dest, &pkg.manifest)?;
         Ok(dest)
     }
 
@@ -746,6 +825,85 @@ auto_migrate = true
         let apps = reg.list().unwrap();
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].0, "my-garage-app");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn install_provisions_sqlite_and_applies_schema() {
+        let t = tmp();
+        let (ids, dev, kd) = identity(&t);
+        let pkg = AppPackage::load(&pkg_dir(&t)).unwrap();
+        pkg.sign(&ids, &dev, &kd).unwrap();
+        let pkg = AppPackage::load(&pkg_dir(&t)).unwrap();
+        let dest = AppRegistry::new(&t)
+            .install(&pkg, &ids, &dev, false)
+            .unwrap();
+        // schema.sql was `create table t(x);` — auto_migrate applied it.
+        let conn = rusqlite::Connection::open(dest.join("data/data.db")).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "select count(*) from sqlite_master where name='t'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn upgrade_preserves_live_data() {
+        let t = tmp();
+        let (ids, dev, kd) = identity(&t);
+        let reg = AppRegistry::new(&t);
+        let pkg = AppPackage::load(&pkg_dir(&t)).unwrap();
+        pkg.sign(&ids, &dev, &kd).unwrap();
+        let pkg = AppPackage::load(&pkg_dir(&t)).unwrap();
+        let dest = reg.install(&pkg, &ids, &dev, false).unwrap();
+        // Simulate the app having written state.
+        let conn = rusqlite::Connection::open(dest.join("data/data.db")).unwrap();
+        conn.execute_batch("insert into t values (42);").unwrap();
+        drop(conn); // release the file handle — Windows locks open files
+        std::fs::write(dest.join("data/user.txt"), b"mine").unwrap();
+
+        // v2 package: same id, bumped version, extended schema.
+        let d = pkg_dir(&t);
+        std::fs::write(
+            d.join("schema.sql"),
+            b"create table if not exists t(x); create table t2(y);",
+        )
+        .unwrap();
+        let pkg = AppPackage::load(&d).unwrap();
+        pkg.sign(&ids, &dev, &kd).unwrap();
+        let pkg = AppPackage::load(&d).unwrap();
+        let dest = reg.install(&pkg, &ids, &dev, true).unwrap();
+
+        assert_eq!(std::fs::read(dest.join("data/user.txt")).unwrap(), b"mine");
+        let conn = rusqlite::Connection::open(dest.join("data/data.db")).unwrap();
+        let row: i64 = conn.query_row("select x from t", [], |r| r.get(0)).unwrap();
+        assert_eq!(row, 42);
+        let n: i64 = conn
+            .query_row(
+                "select count(*) from sqlite_master where name='t2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn reinstall_without_upgrade_refused() {
+        let t = tmp();
+        let (ids, dev, kd) = identity(&t);
+        let reg = AppRegistry::new(&t);
+        let pkg = AppPackage::load(&pkg_dir(&t)).unwrap();
+        pkg.sign(&ids, &dev, &kd).unwrap();
+        let pkg = AppPackage::load(&pkg_dir(&t)).unwrap();
+        reg.install(&pkg, &ids, &dev, false).unwrap();
+        let pkg = AppPackage::load(&pkg_dir(&t)).unwrap();
+        assert!(reg.install(&pkg, &ids, &dev, false).is_err());
         let _ = std::fs::remove_dir_all(&t);
     }
 }

@@ -235,6 +235,79 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// WAT that opens `hello.txt` under the first preopen (fd 3), writes
+    /// 16 bytes, and exits 0. path_open args:
+    /// (fd, dirflags, path_ptr, path_len, oflags, rights, rights_inh,
+    ///  fdflags, result_ptr). rights 9286 = FD_READ|FD_SEEK|FD_WRITE|
+    /// PATH_CREATE_FILE|PATH_OPEN.
+    const WRITE_THROUGH_PREOPEN: &str = r#"(module
+        (import "wasi_snapshot_preview1" "path_open"
+          (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+        (import "wasi_snapshot_preview1" "fd_write"
+          (func $fd_write (param i32 i32 i32 i32) (result i32)))
+        (import "wasi_snapshot_preview1" "fd_close"
+          (func $fd_close (param i32) (result i32)))
+        (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 200) "hello.txt")
+        (data (i32.const 220) "sandbox-write-ok")
+        (func (export "_start")
+          (local $errno i32)
+          (local.set $errno
+            (call $path_open (i32.const 3) (i32.const 0) (i32.const 200)
+              (i32.const 9) (i32.const 1) (i64.const 9286) (i64.const 9286)
+              (i32.const 0) (i32.const 100)))
+          (if (i32.ne (local.get $errno) (i32.const 0))
+            (then (call $exit (local.get $errno))))
+          (i32.store (i32.const 300) (i32.const 220))
+          (i32.store (i32.const 304) (i32.const 16))
+          (local.set $errno
+            (call $fd_write (i32.load (i32.const 100)) (i32.const 300)
+              (i32.const 1) (i32.const 320)))
+          (if (i32.ne (local.get $errno) (i32.const 0))
+            (then (call $exit (local.get $errno))))
+          (drop (call $fd_close (i32.load (i32.const 100))))
+          (call $exit (i32.const 0))))"#;
+
+    fn pkg_with_perms(wat: &str, manifest_extra: &str) -> (PathBuf, AppPackage) {
+        let root = std::env::temp_dir().join(format!("pai-apps-run-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("manifest.toml"),
+            format!("[app]\nname=\"t\"\nversion=\"1\"\nruntime=\"wasm\"\n{manifest_extra}"),
+        )
+        .unwrap();
+        std::fs::write(root.join("app.wasm"), wat).unwrap();
+        let pkg = AppPackage::load(&root).unwrap();
+        (root, pkg)
+    }
+
+    #[test]
+    fn writes_through_files_preopen() {
+        let (dir, pkg) =
+            pkg_with_perms(WRITE_THROUGH_PREOPEN, "[permissions]\nfiles = [\"files/\"]");
+        std::fs::create_dir_all(dir.join("files")).unwrap();
+        let out = pkg.run(&dir, &[], RunLimits::default()).unwrap();
+        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(
+            std::fs::read(dir.join("files/hello.txt")).unwrap(),
+            b"sandbox-write-ok"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_permissions_no_preopens() {
+        // Same app, but the manifest grants nothing — fd 3 is not a
+        // preopen, so path_open fails with EBADF (errno 8). storage must
+        // be "none": the sqlite default would preopen data/ at fd 3.
+        let (dir, pkg) = pkg_with_perms(WRITE_THROUGH_PREOPEN, "[storage]\ntype = \"none\"");
+        let out = pkg.run(&dir, &[], RunLimits::default()).unwrap();
+        assert_eq!(out.exit_code, Some(8));
+        assert!(!dir.join("hello.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn manifest_still_parses() {
         // Guard: run.rs touches manifest fields the tests above rely on.

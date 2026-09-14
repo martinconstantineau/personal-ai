@@ -118,7 +118,9 @@ auto_migrate = true
 - [x] `pai-apps` can parse `manifest.toml` and verify `signature.bin`
 - [x] `pai-apps` can unpack a package into `~/.pai/apps/<app-id>/`
 - [x] `pai` CLI can `pai deploy ./MyGarageApp` and `pai apps list`
-- [ ] A WASM module can read/write `data.db` through the sandbox
+- [x] A WASM module can read/write `data.db` through the sandbox — the
+  `data/` preopen covers it; install provisions `data/data.db` and applies
+  `schema.sql` when `migration.auto_migrate` is set
 - [x] A signed package is rejected if the signature is invalid
 - [ ] An app package can be moved to a second device and run without changes
 

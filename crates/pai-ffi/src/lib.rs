@@ -61,6 +61,7 @@ pub struct PaiRuntime {
     /// Cancel handle for the in-flight run.
     cancel: Arc<Mutex<CancelToken>>,
     store: Arc<Store>,
+    data_dir: String,
     device: DeviceId,
     documents: Arc<pai_documents::DocumentStore>,
     email: Option<Arc<dyn pai_connector_email::EmailProvider>>,
@@ -263,6 +264,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         event_cb: Arc::new(Mutex::new(None)),
         cancel: Arc::new(Mutex::new(CancelToken::default())),
         store,
+        data_dir: cfg.data_dir.clone(),
         device: device.id,
         documents,
         email,
@@ -1150,6 +1152,25 @@ pub unsafe extern "C" fn pai_notify_mark_read(
     };
     match pai_notify::store::mark_read(&rt.store, &id) {
         Ok(ok) => to_c(serde_json::json!({"ok": ok})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Installed app packages: `{apps: [{id, name, version, runtime}]}`.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_apps_list(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    match pai_apps::AppRegistry::new(std::path::Path::new(&rt.data_dir)).list() {
+        Ok(apps) => to_c(serde_json::json!({
+            "apps": apps.iter().map(|(id, m)| serde_json::json!({
+                "id": id,
+                "name": m.app.name,
+                "version": m.app.version,
+                "runtime": m.app.runtime,
+            })).collect::<Vec<_>>(),
+        })),
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
     }
 }

@@ -260,6 +260,21 @@ the default when no `oauth` block exists.
   received rows fence to `device_local`, already-shared copies stay
   shared.
 
+## V4 — Personal App Cloud (see docs/PRD-personal-app-cloud.md)
+
+- ~~Signed app packages (`pai-apps`)~~ — shipped: `manifest.toml` schema,
+  Ed25519 signature over manifest + content digest, `AppRegistry`
+  install/list/remove, `pai deploy` + `pai apps sign|verify|list`.
+- ~~Sandboxed WASM runner~~ — shipped: wasmi 2.0 + WASI preview1,
+  deny-by-default (no env/network; sockets never preopened), `files`
+  preopens per manifest, fuel + memory limits, `pai apps run` audited.
+- ~~Per-app storage provisioning~~ — shipped: `data/` + `data.db` created
+  on install; `schema.sql` applied when `migration.auto_migrate`;
+  upgrades preserve live `data/` (merged back over package seeds).
+- `pai_apps_list` FFI + Dart `appsList` for the dashboard.
+- Remaining: app state sync (`app/` objects so deploys roam devices),
+  `pai-mesh` LAN discovery, capability sharing (`pai-share`), backups.
+
 ## Known technical debt (tracked, not hidden)
 
 | Item | Why it's deferred | Exit |
