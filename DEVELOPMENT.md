@@ -6,6 +6,14 @@
 - **Flutter 3.47+** for `apps/desktop` (Linux desktop needs `clang`, `cmake`,
   `ninja`, `pkg-config`, GTK3 dev packages — `scripts/setup.sh` installs them)
 - No other system deps: SQLite is bundled via `rusqlite`'s `bundled` feature.
+- **Windows-gnu note:** `rust-toolchain.toml` pins
+  `x86_64-pc-windows-gnu`. Crates that generate import libs at build time
+  (e.g. `windows-sys` 0.60+) invoke `dlltool`, which needs GNU binutils
+  (`as`) on PATH — Git-for-Windows doesn't ship them. Dependencies that
+  require this (native-tls/schannel, aws-lc-rs) are intentionally avoided;
+  TLS goes through rustls+ring+webpki-roots, which ship prebuilt objects.
+  If a future dep reintroduces the failure (`error calling dlltool`),
+  prefer a pure-Rust alternative over installing binutils.
 
 ```bash
 ./scripts/setup.sh     # Debian/Ubuntu system deps + rust components

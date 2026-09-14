@@ -77,6 +77,12 @@ class PaiClient {
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_docs_search');
   late final _docsDelete = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_docs_delete');
+  late final _emailSearch = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_search');
+  late final _emailRead = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_read');
+  late final _emailDraft = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_draft');
   late final _setPolicy = _lib.lookupFunction<_ThreeStrNative,
           Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>(
       'pai_set_policy');
@@ -227,6 +233,26 @@ class PaiClient {
   }
 
   Map<String, dynamic> docsDelete(String id) => _call1(_docsDelete, id);
+
+  /// Search the mailbox: {query, from, label, unread_only, limit}.
+  Map<String, dynamic> emailSearch(String? queryJson) =>
+      _callOpt(_emailSearch, queryJson);
+
+  /// Read one message by id.
+  Map<String, dynamic> emailRead(String id) => _call1(_emailRead, id);
+
+  /// Create a draft: {to:[{address}], cc:[], subject, body, in_reply_to?}.
+  Map<String, dynamic> emailDraft(String draftJson) =>
+      _call1(_emailDraft, draftJson);
+
+  Map<String, dynamic> _callOpt(
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>) f, String? a) {
+    if (a == null) {
+      final out = f(_handle, nullptr);
+      return _json(out) as Map<String, dynamic>;
+    }
+    return _call1(f, a);
+  }
 
   Map<String, dynamic> _call1(
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>) f, String a) {

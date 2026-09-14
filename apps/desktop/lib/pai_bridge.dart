@@ -120,6 +120,35 @@ class PaiBridge {
   Future<Map<String, dynamic>> docsDelete(String id) async =>
       (await _call(_Op.docsDelete, arg: id)) as Map<String, dynamic>;
 
+  /// Email connector ops — `{"results": [...]}` / `{"message": {...}}` /
+  /// `{"draft_id": ...}` or `{"error": ...}` when unconfigured.
+  Future<Map<String, dynamic>> emailSearch(
+          {String? query, String? from, String? label, bool unreadOnly = false, int limit = 20}) async =>
+      (await _call(_Op.emailSearch,
+          arg: jsonEncode({
+            if (query != null) 'query': query,
+            if (from != null) 'from': from,
+            if (label != null) 'label': label,
+            'unread_only': unreadOnly,
+            'limit': limit,
+          }))) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> emailRead(String id) async =>
+      (await _call(_Op.emailRead, arg: id)) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> emailDraft(
+          {required List<String> to,
+          List<String> cc = const [],
+          required String subject,
+          required String body,
+          String? inReplyTo}) async =>
+      (await _call(_Op.emailDraft,
+          arg: jsonEncode({
+            'to': to.map((a) => {'address': a}).toList(),
+            'cc': cc.map((a) => {'address': a}).toList(),
+            'subject': subject,
+            'body': body,
+            if (inReplyTo != null) 'in_reply_to': inReplyTo,
+          }))) as Map<String, dynamic>;
+
   Future<dynamic> _call(_Op op,
       {String? arg, StreamController<Map<String, dynamic>>? events}) {
     final id = _nextId++;
@@ -214,6 +243,12 @@ class PaiBridge {
             result = client.docsSearch(req.arg!);
           case _Op.docsDelete:
             result = client.docsDelete(req.arg!);
+          case _Op.emailSearch:
+            result = client.emailSearch(req.arg);
+          case _Op.emailRead:
+            result = client.emailRead(req.arg!);
+          case _Op.emailDraft:
+            result = client.emailDraft(req.arg!);
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -256,6 +291,9 @@ enum _Op {
   docsIngest,
   docsSearch,
   docsDelete,
+  emailSearch,
+  emailRead,
+  emailDraft,
 }
 
 class _InitError {

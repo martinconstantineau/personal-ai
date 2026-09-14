@@ -60,6 +60,7 @@ pub struct PaiRuntime {
     store: Arc<Store>,
     device: DeviceId,
     documents: Arc<pai_documents::DocumentStore>,
+    email: Option<Arc<dyn pai_connector_email::EmailProvider>>,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +160,10 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
     let inbox = data_dir.join("inbox");
     std::fs::create_dir_all(&inbox).ok();
 
+    let email: Option<Arc<dyn pai_connector_email::EmailProvider>> =
+        pai_connector_email::ImapConfig::load(&data_dir)?
+            .map(|c| Arc::new(pai_connector_email::ImapProvider::new(c)) as _);
+
     let mut providers = pai_inference::ProviderRegistry::default();
     providers.register(Arc::new(EchoProvider));
     providers.register(Arc::new(
@@ -180,6 +185,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
             runs: runs.clone(),
         }),
         documents: Some(documents.clone()),
+        email: email.clone(),
         allowed_roots: vec![inbox],
     };
 
@@ -231,6 +237,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         store,
         device: device.id,
         documents,
+        email,
     })
 }
 
@@ -952,6 +959,87 @@ pub unsafe extern "C" fn pai_docs_delete(
     };
     match rt.documents.delete(id) {
         Ok(()) => to_c(serde_json::json!({"deleted_id": id.to_string()})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Email connector
+// ---------------------------------------------------------------------------
+
+fn email_err() -> *mut c_char {
+    to_c(serde_json::json!({"error": "email not configured (email.json)"}))
+}
+
+/// Search the mailbox. `query_json`: {query?, from?, label?, unread_only?, limit?}
+/// # Safety
+/// `handle` must come from `pai_init`; `query_json` NUL-terminated JSON or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn pai_email_search(
+    handle: *mut PaiRuntime,
+    query_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let Some(email) = &rt.email else {
+        return email_err();
+    };
+    let q = match query_json {
+        q if q.is_null() => pai_connector_email::EmailSearch {
+            limit: 20,
+            ..Default::default()
+        },
+        q => match read_str(q) {
+            Ok(s) => serde_json::from_str(s).unwrap_or_default(),
+            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+        },
+    };
+    let out = rt.rt.block_on(async { email.search(&q).await });
+    match out {
+        Ok(hits) => to_c(serde_json::json!({"results": hits})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Read a message by id. Returns the full EmailMessage (untrusted content).
+/// # Safety
+/// `handle` must come from `pai_init`; `id` is a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn pai_email_read(handle: *mut PaiRuntime, id: *const c_char) -> *mut c_char {
+    let rt = &mut *handle;
+    let Some(email) = &rt.email else {
+        return email_err();
+    };
+    let id = match read_str(id) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    match rt.rt.block_on(async { email.read(&id).await }) {
+        Ok(m) => to_c(serde_json::json!({"message": m})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Create a draft. `draft_json`: {to:[],cc:[],subject,body,in_reply_to?}
+/// # Safety
+/// `handle` must come from `pai_init`; `draft_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_email_draft(
+    handle: *mut PaiRuntime,
+    draft_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let Some(email) = &rt.email else {
+        return email_err();
+    };
+    let draft: pai_connector_email::Draft = match read_str(draft_json)
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str(s).map_err(|e| e.to_string()))
+    {
+        Ok(d) => d,
+        Err(e) => return to_c(serde_json::json!({"error": e})),
+    };
+    match rt.rt.block_on(async { email.create_draft(&draft).await }) {
+        Ok(id) => to_c(serde_json::json!({"draft_id": id})),
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
     }
 }

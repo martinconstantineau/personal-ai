@@ -36,6 +36,7 @@ fn runtime(store: Arc<Store>) -> (AgentRuntime, Arc<SqliteMemory>, Arc<pai_audit
         device: DeviceId::new(),
         persistence: None,
         documents: None,
+        email: None,
         allowed_roots: vec![],
     };
     (agent, memory, audit)

@@ -32,6 +32,12 @@ the full threat model lives in `docs/security/threat-model.md`.
   (`devices.key_storage` records the backend). Sync adds a separate
   X25519 agreement keypair per device plus a shared 256-bit vault key —
   all keystore-backed the same way (ADR 0015).
+- **Email content is untrusted.** Message bodies read via the email
+  connector are `TrustLevel::Untrusted` data — never instructions. Send
+  and delete are approval-gated `High` risk tools; the IMAP provider has
+  no send verb at all (drafts-first by design). Passwords resolve from
+  `PAI_EMAIL_PASSWORD` or the OS keystore (`email:<user>`) — never from
+  `email.json`, and `pai_audit::redact` masks them in logs.
 - **Sync is end-to-end.** Devices pair via an ed25519-signed
   offer/accept exchange; the vault key travels wrapped by an
   ECDH-derived peer key. `SyncObject` payloads are

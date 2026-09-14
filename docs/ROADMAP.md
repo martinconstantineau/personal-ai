@@ -58,12 +58,20 @@ XChaCha20-Poly1305 sealing with object-key AAD, `SyncEngine` over
 (LWW), `sync_peers` trust table (schema v4), `pai sync push|pull|run|status`.
 See ADR 0015.
 
+**V2b done (2026-09-14):** email connector — `EmailProvider` trait +
+`ImapProvider` (search/read/draft/label/archive/delete over IMAP+TLS via
+rustls+webpki-roots), `email.*` tools gated on `EMAIL_*` permissions
+(send/delete high-risk, approval-gated), `pai email` CLI with keystore
+passwords (`email.json` holds no secrets), FFI ops + Flutter mailbox
+screen. Drafts-first: IMAP can't send; SMTP/lettre is the send path.
+
 - E2EE sync: relay transport (ciphertext-only server); sync scope beyond
   memories (conversations, documents, tasks); vault rotation/unpairing
 - Trusted-device placement via `pai-broker` (phone asks desktop to run STT)
 - Voice pipeline MVP: whisper.cpp STT + piper TTS + VAD
 - Vision: llama.cpp multimodal describe/OCR
-- Connector framework v1 + first real `EmailProvider` (IMAP/JMAP, drafts-first)
+- Connectors: registry abstraction beyond email; SMTP send; OAuth2 for
+  Gmail/Outlook (app-password is today's auth)
 
 ## V3 — The personal OS layer
 

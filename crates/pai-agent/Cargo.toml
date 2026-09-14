@@ -12,6 +12,7 @@ pai-memory.workspace = true
 pai-permissions.workspace = true
 pai-tools.workspace = true
 pai-documents.workspace = true
+pai-connector-email.workspace = true
 pai-audit.workspace = true
 pai-broker.workspace = true
 pai-storage.workspace = true

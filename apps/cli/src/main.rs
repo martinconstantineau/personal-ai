@@ -95,6 +95,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SyncCmd,
     },
+    /// Email connector (IMAP) — configure + direct ops.
+    Email {
+        #[command(subcommand)]
+        cmd: EmailCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -235,9 +240,52 @@ enum SyncCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum EmailCmd {
+    /// Configure the IMAP account: writes email.json; the password goes
+    /// to the OS keystore (`email:<user>`), never the file.
+    Configure,
+    /// Show the configured account (never prints the password).
+    Status,
+    /// Search messages.
+    Search {
+        query: Option<String>,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        unread: bool,
+        #[arg(long, default_value = "10")]
+        limit: u32,
+    },
+    /// Read one message body by id.
+    Read { id: String },
+    /// Create a draft (the safe send path).
+    Draft {
+        #[arg(long)]
+        to: Vec<String>,
+        #[arg(long)]
+        cc: Vec<String>,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long)]
+        in_reply_to: Option<String>,
+    },
+    /// Archive a message by id.
+    Archive { id: String },
+    /// Apply a label/mailbox to a message by id.
+    Label { id: String, label: String },
+    /// Delete a message by id.
+    Delete { id: String },
+}
+
 struct Ctx {
     store: Arc<Store>,
     documents: Arc<pai_documents::DocumentStore>,
+    email: Option<Arc<dyn pai_connector_email::EmailProvider>>,
     agent: AgentRuntime,
     memory: Arc<dyn MemoryBackend>,
     audit: Arc<pai_audit::AuditLog>,
@@ -351,6 +399,11 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
     let inbox = cfg.data_dir.join("inbox");
     std::fs::create_dir_all(&inbox).ok();
 
+    // Connectors: email provider when an account is configured.
+    let email: Option<Arc<dyn pai_connector_email::EmailProvider>> =
+        pai_connector_email::ImapConfig::load(&cfg.data_dir)?
+            .map(|c| Arc::new(pai_connector_email::ImapProvider::new(c)) as _);
+
     let mut providers = pai_inference::ProviderRegistry::default();
     providers.register(Arc::new(EchoProvider));
     providers.register(Arc::new(LlamaServerProvider::new(
@@ -374,6 +427,7 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             runs: runs.clone(),
         }),
         documents: Some(documents.clone()),
+        email: email.clone(),
         allowed_roots: vec![inbox],
     };
 
@@ -388,6 +442,7 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             provider_name,
             model,
             documents,
+            email,
             store,
         },
         cfg,
@@ -781,7 +836,169 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 }
             }
         },
+        Cmd::Email { cmd } => run_email_cmds(cmd, &cfg).await?,
         _ => unreachable!(),
+    }
+    Ok(())
+}
+
+async fn email_provider(cfg: &pai_config::Config) -> Result<pai_connector_email::ImapProvider> {
+    let c = pai_connector_email::ImapConfig::load(&cfg.data_dir)?.ok_or_else(|| {
+        Error::InvalidInput("no email account — run `pai email configure`".into())
+    })?;
+    Ok(pai_connector_email::ImapProvider::new(c))
+}
+
+async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> {
+    use pai_connector_email::EmailProvider;
+    match cmd {
+        EmailCmd::Configure => {
+            let read = |prompt: &str, default: &str| -> Result<String> {
+                print!("{prompt} [{default}]: ");
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+                let mut s = String::new();
+                std::io::stdin()
+                    .read_line(&mut s)
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                let s = s.trim();
+                Ok(if s.is_empty() {
+                    default.to_string()
+                } else {
+                    s.to_string()
+                })
+            };
+            let host = read("IMAP host", "imap.gmail.com")?;
+            let port: u16 = read("Port", "993")?
+                .parse()
+                .map_err(|_| Error::InvalidInput("bad port".into()))?;
+            let user = read("User (email address)", "")?;
+            if user.is_empty() {
+                return Err(Error::InvalidInput("user is required".into()));
+            }
+            let mailbox = read("Mailbox", "INBOX")?;
+            let drafts = read("Drafts mailbox", "[Gmail]/Drafts")?;
+            let archive = read("Archive mailbox", "[Gmail]/All Mail")?;
+            let password =
+                rpassword::prompt_password("Password (app password for Gmail/Outlook): ")
+                    .map_err(|e| Error::Other(e.to_string()))?;
+            let c = pai_connector_email::ImapConfig {
+                host,
+                port,
+                user: user.clone(),
+                mailbox,
+                drafts_mailbox: drafts,
+                archive_mailbox: archive,
+            };
+            c.save(&cfg.data_dir)?;
+            if password.is_empty() {
+                println!("no password stored — set PAI_EMAIL_PASSWORD at run time");
+            } else if pai_connector_email::imap::store_password(&user, &password) {
+                println!("password stored in OS keystore (email:{user})");
+            } else {
+                println!("keystore unavailable — set PAI_EMAIL_PASSWORD at run time");
+            }
+            println!("account written to {}/email.json", cfg.data_dir.display());
+        }
+        EmailCmd::Status => match pai_connector_email::ImapConfig::load(&cfg.data_dir)? {
+            Some(c) => {
+                println!("imap://{}:{}/{}", c.user, c.host, c.mailbox);
+                println!(
+                    "drafts: {}  archive: {}",
+                    c.drafts_mailbox, c.archive_mailbox
+                );
+                let pw = pai_connector_email::imap::resolve_password(&c.user).is_ok();
+                println!("password: {}", if pw { "available" } else { "MISSING" });
+            }
+            None => println!("not configured — run `pai email configure`"),
+        },
+        EmailCmd::Search {
+            query,
+            from,
+            label,
+            unread,
+            limit,
+        } => {
+            let p = email_provider(cfg).await?;
+            let hits = p
+                .search(&pai_connector_email::EmailSearch {
+                    query: query.clone(),
+                    from: from.clone(),
+                    label: label.clone(),
+                    unread_only: *unread,
+                    limit: *limit,
+                    ..Default::default()
+                })
+                .await?;
+            for m in &hits {
+                println!(
+                    "  {:>6}  {:<40} {:<45} {}",
+                    m.id,
+                    m.from.address,
+                    m.subject,
+                    m.received_at.format("%Y-%m-%d")
+                );
+            }
+            if hits.is_empty() {
+                println!("no messages");
+            }
+        }
+        EmailCmd::Read { id } => {
+            let m = email_provider(cfg).await?.read(id).await?;
+            println!("from: {}", m.summary.from.address);
+            println!(
+                "to:   {}",
+                m.summary
+                    .to
+                    .iter()
+                    .map(|a| a.address.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            println!("date: {}", m.summary.received_at.format("%Y-%m-%d %H:%M"));
+            println!("subject: {}\n", m.summary.subject);
+            println!("{}", m.body_text.unwrap_or_else(|| "(no text body)".into()));
+            for a in &m.attachments {
+                println!(
+                    "  attachment: {} ({}, {} bytes)",
+                    a.filename, a.mime, a.size_bytes
+                );
+            }
+        }
+        EmailCmd::Draft {
+            to,
+            cc,
+            subject,
+            body,
+            in_reply_to,
+        } => {
+            let addr = |a: &String| pai_connector_email::EmailAddress {
+                name: None,
+                address: a.clone(),
+            };
+            let id = email_provider(cfg)
+                .await?
+                .create_draft(&pai_connector_email::Draft {
+                    to: to.iter().map(addr).collect(),
+                    cc: cc.iter().map(addr).collect(),
+                    subject: subject.clone(),
+                    body: body.clone(),
+                    in_reply_to: in_reply_to.clone(),
+                })
+                .await?;
+            println!("{id}");
+        }
+        EmailCmd::Archive { id } => {
+            email_provider(cfg).await?.archive(id).await?;
+            println!("archived {id}");
+        }
+        EmailCmd::Label { id, label } => {
+            email_provider(cfg).await?.label(id, label).await?;
+            println!("labeled {id} → {label}");
+        }
+        EmailCmd::Delete { id } => {
+            email_provider(cfg).await?.delete(id).await?;
+            println!("deleted {id}");
+        }
     }
     Ok(())
 }
@@ -795,8 +1012,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Pair/sync need no inference — skip provider probing entirely.
-    if matches!(cli.cmd, Cmd::Pair { .. } | Cmd::Sync { .. }) {
+    // Pair/sync/email need no inference — skip provider probing entirely.
+    if matches!(
+        cli.cmd,
+        Cmd::Pair { .. } | Cmd::Sync { .. } | Cmd::Email { .. }
+    ) {
         return run_sync_cmds(&cli).await;
     }
 
@@ -1153,6 +1373,7 @@ async fn main() -> Result<()> {
                     memory: Some(ctx.memory.as_ref()),
                     memory_scope: None,
                     documents: Some(ctx.documents.as_ref()),
+                    email: ctx.email.as_deref(),
                     allowed_roots: &[],
                 };
                 // CLI user is the operator — direct invocation, still audited
@@ -1165,7 +1386,9 @@ async fn main() -> Result<()> {
                 println!("{}", out.summary);
             }
         },
-        Cmd::Pair { .. } | Cmd::Sync { .. } => unreachable!("handled before build"),
+        Cmd::Pair { .. } | Cmd::Sync { .. } | Cmd::Email { .. } => {
+            unreachable!("handled before build")
+        }
     }
     Ok(())
 }

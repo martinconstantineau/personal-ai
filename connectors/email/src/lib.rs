@@ -4,6 +4,9 @@
 //! `EmailProvider`; the core only ever sees this trait. Adapters map their
 //! API onto these types and declare which `Permission` each op needs.
 
+pub mod imap;
+pub use imap::{ImapConfig, ImapProvider};
+
 use async_trait::async_trait;
 use pai_core::*;
 use serde::{Deserialize, Serialize};

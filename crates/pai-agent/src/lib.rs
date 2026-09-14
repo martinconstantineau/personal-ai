@@ -163,6 +163,8 @@ pub struct AgentRuntime {
     pub persistence: Option<Persistence>,
     /// Document store exposed to `documents.*` tools.
     pub documents: Option<Arc<pai_documents::DocumentStore>>,
+    /// Email connector exposed to `email.*` tools.
+    pub email: Option<Arc<dyn pai_connector_email::EmailProvider>>,
     /// Filesystem jail for file-touching tools: canonicalized roots a tool
     /// may read inside. Empty = no filesystem reads.
     pub allowed_roots: Vec<std::path::PathBuf>,
@@ -721,6 +723,7 @@ impl AgentRuntime {
             memory: Some(self.memory.as_ref()),
             memory_scope,
             documents: self.documents.as_deref(),
+            email: self.email.as_deref(),
             allowed_roots: &self.allowed_roots,
         };
         match tool.execute(arguments, &ctx).await {

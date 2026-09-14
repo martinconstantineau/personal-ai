@@ -8,9 +8,16 @@ description = "Vendor-neutral email connector interface. Gmail/Outlook/IMAP adap
 [dependencies]
 pai-core.workspace = true
 pai-permissions.workspace = true
+pai-identity.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+base64.workspace = true
+imap = { version = "3.0.0-alpha.15", default-features = false }
+mail-parser = "0.11.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+tokio.workspace = true

@@ -61,6 +61,7 @@ fn runtime(store: Arc<Store>, table: PolicyTable) -> (AgentRuntime, Arc<SqliteMe
             runs: Arc::new(RunStore::new(store)),
         }),
         documents: None,
+        email: None,
         allowed_roots: vec![],
     };
     (agent, memory)

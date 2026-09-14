@@ -262,6 +262,14 @@ class _ChatScreenState extends State<ChatScreen> {
                     builder: (_) => DocumentsScreen(bridge: _pai!))),
           ),
           IconButton(
+            icon: const Icon(Icons.mail_outline),
+            tooltip: 'Email',
+            onPressed: _pai == null
+                ? null
+                : () => Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => EmailScreen(bridge: _pai!))),
+          ),
+          IconButton(
             icon: const Icon(Icons.policy_outlined),
             tooltip: 'Permissions',
             onPressed: _pai == null
@@ -854,6 +862,177 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
               ),
             ]),
     );
+  }
+}
+
+/// Mailbox view — search + read via the email connector. Send/delete stay
+/// tool-side and approval-gated; drafts can be composed here.
+class EmailScreen extends StatefulWidget {
+  const EmailScreen({super.key, required this.bridge});
+  final PaiBridge bridge;
+  @override
+  State<EmailScreen> createState() => _EmailScreenState();
+}
+
+class _EmailScreenState extends State<EmailScreen> {
+  List<dynamic> _hits = const [];
+  bool _loading = true;
+  String? _error;
+  final _searchCtrl = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _search();
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _search() async {
+    setState(() => _loading = true);
+    final r = await widget.bridge.emailSearch(
+        query: _searchCtrl.text.trim().isEmpty ? null : _searchCtrl.text.trim());
+    if (!mounted) return;
+    if (r['error'] != null) {
+      setState(() { _error = '${r['error']}'; _hits = const []; _loading = false; });
+    } else {
+      setState(() { _error = null; _hits = r['results'] as List<dynamic>? ?? const []; _loading = false; });
+    }
+  }
+
+  Future<void> _open(dynamic m) async {
+    final r = await widget.bridge.emailRead('${m['id']}');
+    if (!mounted) return;
+    if (r['error'] != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('${r['error']}')));
+      return;
+    }
+    final msg = r['message'] as Map<String, dynamic>;
+    showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              title: Text(msg['subject'] ?? '(no subject)'),
+              content: SingleChildScrollView(
+                  child: Text(msg['body_text'] ?? '(empty)')),
+              actions: [
+                TextButton(
+                    onPressed: () {
+                      Navigator.of(ctx).pop();
+                      _compose(
+                          to: (msg['from'] as Map?)?['address'] as String? ?? '',
+                          subject: 'Re: ${msg['subject'] ?? ''}',
+                          inReplyTo: '${msg['id']}');
+                    },
+                    child: const Text('Draft reply')),
+                TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    child: const Text('Close')),
+              ],
+            ));
+  }
+
+  Future<void> _compose(
+      {String to = '', String subject = '', String? inReplyTo}) async {
+    final toCtrl = TextEditingController(text: to);
+    final subjCtrl = TextEditingController(text: subject);
+    final bodyCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              title: const Text('New draft'),
+              content: SizedBox(
+                  width: 480,
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    TextField(
+                        controller: toCtrl,
+                        decoration: const InputDecoration(labelText: 'To')),
+                    TextField(
+                        controller: subjCtrl,
+                        decoration: const InputDecoration(labelText: 'Subject')),
+                    TextField(
+                        controller: bodyCtrl,
+                        maxLines: 8,
+                        decoration: const InputDecoration(labelText: 'Body')),
+                  ])),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(false),
+                    child: const Text('Cancel')),
+                FilledButton(
+                    onPressed: () => Navigator.of(ctx).pop(true),
+                    child: const Text('Save draft')),
+              ],
+            ));
+    if (ok != true) return;
+    final r = await widget.bridge.emailDraft(
+        to: [toCtrl.text.trim()],
+        subject: subjCtrl.text.trim(),
+        body: bodyCtrl.text,
+        inReplyTo: inReplyTo);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r['error'] != null
+            ? '${r['error']}'
+            : 'Draft saved (${r['draft_id']})')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+        appBar: AppBar(
+            title: const Text('Email'),
+            actions: [
+              IconButton(
+                  icon: const Icon(Icons.edit_outlined),
+                  tooltip: 'New draft',
+                  onPressed: () => _compose()),
+              IconButton(
+                  icon: const Icon(Icons.refresh),
+                  onPressed: _search),
+            ]),
+        body: Column(children: [
+          Padding(
+              padding: const EdgeInsets.all(8),
+              child: TextField(
+                  controller: _searchCtrl,
+                  decoration: const InputDecoration(
+                      hintText: 'Search mail',
+                      prefixIcon: Icon(Icons.search)),
+                  onSubmitted: (_) => _search())),
+          if (_error != null)
+            Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(_error!,
+                    style: TextStyle(
+                        color: Theme.of(context).colorScheme.error))),
+          Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : ListView.builder(
+                      itemCount: _hits.length,
+                      itemBuilder: (ctx, i) {
+                        final m = _hits[i] as Map<String, dynamic>;
+                        return ListTile(
+                            leading: Icon((m['flags'] as List?)
+                                        ?.contains('\\Seen') ==
+                                    true
+                                ? Icons.mark_email_read_outlined
+                                : Icons.mark_email_unread_outlined),
+                            title: Text(m['subject'] ?? '(no subject)',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                            subtitle: Text(
+                                '${m['from'] ?? ''} — ${m['snippet'] ?? ''}',
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis),
+                            onTap: () => _open(m));
+                      })),
+        ]));
   }
 }
 

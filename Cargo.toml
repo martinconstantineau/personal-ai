@@ -54,6 +54,7 @@ clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
+rpassword = "7"
 rand_core = { version = "0.6", features = ["getrandom"] }
   keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "sync-secret-service"] }
   chacha20poly1305 = "0.10"

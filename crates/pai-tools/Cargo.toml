@@ -10,6 +10,7 @@ pai-core.workspace = true
 pai-permissions.workspace = true
 pai-memory.workspace = true
 pai-documents.workspace = true
+pai-connector-email.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
