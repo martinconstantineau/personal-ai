@@ -42,7 +42,9 @@ trait SyncTransport {
   per object in a directory — works with Syncthing, iCloud Drive,
   Nextcloud, a mounted phone, or plain `rsync`. This is the debugging and
   power-user transport: sync state is inspectable files.
-- **Relay transport** (V2): a dumb append/fetch server; stores ciphertext
+- **Relay transport** (V2): a dumb append/fetch server; stores ciphertext.
+  Off-LAN deployments terminate TLS one hop in front — see
+  `docs/deployment/relay-tls.md`.
   only, can't correlate contents (ids are already encrypted
   deterministically in the design — final format lands with the impl).
 
