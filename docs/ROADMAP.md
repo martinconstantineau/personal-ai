@@ -90,8 +90,18 @@ FK chain, `pai conv sync`/`pai docs sync` scope toggles + `docs ingest
 device-local on purpose — a synced task could double-execute without a
 claim/lease mechanism.
 
-- E2EE sync: vault rotation/unpairing; relay behind TLS for off-LAN use;
-  task sync once a claim mechanism exists
+- E2EE sync: relay behind TLS for off-LAN use; task sync once a claim
+  mechanism exists
+**V2k done (2026-09-14):** vault rotation + peer revocation —
+`pai sync rotate` mints a fresh vault key and pushes it to every paired
+peer as `vrot/<to>/<from>` objects (peer-ECDH sealed — delivery doesn't
+depend on vault state — plus an ed25519 signature verified against the
+sender's `sync_peers` row). Adoption is epoch-gated and **gossiped**:
+an adopter re-signs and republishes to *its* peers, so a rotation
+reaches the whole vault even when the pairing mesh isn't fully
+connected. `sync pull|run` adopts pending rotations before pulling;
+`pair remove` now points at rotate for actual revocation. Verified
+live: rotate → adopt → post-rotation push/pull between two devices.
 **V2g done (2026-09-14):** live mic capture + playback — cpal 0.16
 (windows 0.54 chain → prebuilt windows-sys 0.52, no binutils needed on
 windows-gnu), VAD-endpointed `capture_utterance` (pre-roll, ~750 ms

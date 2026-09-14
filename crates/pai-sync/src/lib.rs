@@ -17,6 +17,7 @@ pub mod crypto;
 pub mod engine;
 pub mod pair;
 pub mod relay;
+pub mod rotate;
 
 use async_trait::async_trait;
 use pai_core::*;

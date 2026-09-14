@@ -133,6 +133,18 @@ pub fn adopt_vault_key(data_dir: &Path, key: &[u8; 32]) -> Result<()> {
     store_vault(data_dir, key)
 }
 
+/// Delete the vault key entirely (keystore + fallback file). The
+/// deliberate rotation path clears then re-adopts; pairing conflicts
+/// resolve by removing the old key this way too.
+pub fn reset_vault_key(data_dir: &Path) -> Result<()> {
+    keystore::delete(&vault_ks_name(data_dir));
+    let file = data_dir.join("sync-vault.key");
+    if file.exists() {
+        std::fs::remove_file(&file).map_err(store_err)?;
+    }
+    Ok(())
+}
+
 /// Load the vault key, generating a fresh one when absent.
 pub fn vault_key_or_generate(data_dir: &Path) -> Result<[u8; 32]> {
     if let Some(k) = vault_key(data_dir)? {

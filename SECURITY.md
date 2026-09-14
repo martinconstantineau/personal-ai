@@ -86,8 +86,14 @@ the full threat model lives in `docs/security/threat-model.md`.
   files over a channel they control — a substituted file can get a
   *different* device paired (never a forged signature). Compare device
   ids out-of-band.
-- No vault rotation / remote wipe: a removed peer may still hold the
-  vault key. Rebuild the vault (fresh key + re-pair) to revoke.
+- Vault rotation exists (`pai sync rotate`) but revocation is
+  transport-dependent: a removed peer keeps the *old* vault key and can
+  still read everything sealed under it — rotation only stops them
+  reading *new* objects, and only once remaining peers have pulled the
+  rotation object. A peer that never contacts the transport again keeps
+  whatever it already copied. Rotations are signed per-device and
+  epoch-gated; any paired member can still force-rotate (the vault is a
+  group secret, not a leader-follower model).
 - Sync conflict resolution is LWW on `updated_at`; clock skew can pick a
   stale winner. No vector clocks yet.
 

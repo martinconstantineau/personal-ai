@@ -277,6 +277,17 @@ enum SyncCmd {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Rotate the vault key and push sealed rotation objects to every
+    /// paired peer — they adopt on their next sync pull/run. Use after
+    /// `pair remove` to actually revoke a device's access.
+    Rotate {
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Peers + object count at the destination.
     Status {
         #[arg(long)]
@@ -1118,7 +1129,10 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             }
             PairCmd::Remove { id } => {
                 if pair::remove_peer(&store, DeviceId(parse_uuid(id, "device")?))? {
-                    println!("removed peer {id} (vault key NOT rotated)");
+                    println!(
+                        "removed peer {id} — run `pai sync rotate` to revoke \
+                         their access (they keep a stale vault key until then)"
+                    );
                 } else {
                     println!("no such peer: {id}");
                 }
@@ -1130,6 +1144,25 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             | SyncCmd::Run { dir, relay, token } => {
                 let t = sync_transport(dir, relay, token)?;
                 let kind = t.id().to_string();
+                // Adopt any pending vault rotation first — objects sealed
+                // under the new vault need the new key before pull.
+                let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
+                let adopted = pai_sync::rotate::adopt_rotations(
+                    &*t,
+                    &store,
+                    &cfg.data_dir,
+                    &agree,
+                    &device,
+                    &ids,
+                    &key_dir,
+                )
+                .await?;
+                if adopted > 0 {
+                    println!(
+                        "adopted vault rotation (epoch {})",
+                        pai_sync::rotate::vault_epoch(&cfg.data_dir)
+                    );
+                }
                 let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
                     Error::Sync("no vault key — pair a device first (pai pair)".into())
                 })?;
@@ -1142,6 +1175,25 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 println!(
                     "sync via {kind}: pushed {}, pulled {}, skipped {}",
                     out.pushed, out.pulled, out.skipped
+                );
+            }
+            SyncCmd::Rotate { dir, relay, token } => {
+                let t = sync_transport(dir, relay, token)?;
+                let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
+                let n = pai_sync::rotate::push_rotation(
+                    &*t,
+                    &store,
+                    &cfg.data_dir,
+                    &device,
+                    &agree,
+                    &ids,
+                    &key_dir,
+                )
+                .await?;
+                println!(
+                    "vault rotated (epoch {}) — notified {n} peer(s); \
+                     they adopt on their next sync pull/run",
+                    pai_sync::rotate::vault_epoch(&cfg.data_dir)
                 );
             }
             SyncCmd::Status { dir, relay, token } => {
