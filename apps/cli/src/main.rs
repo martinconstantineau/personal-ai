@@ -1412,7 +1412,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 dest.display()
             );
             println!("signed by device {:.8}", signer.to_string());
-            println!("note: package installed but no runtime yet - apps are not executed");
+            println!("run it: `pai apps run {}`", pkg.manifest.app_id());
         }
         Cmd::Apps { cmd } => match cmd {
             AppsCmd::List => {

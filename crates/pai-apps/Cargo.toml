@@ -19,3 +19,4 @@ wasmi_wasi.workspace = true
 [dev-dependencies]
 pai-storage.workspace = true
 uuid.workspace = true
+wasmi = { workspace = true, features = ["wat"] }

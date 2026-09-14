@@ -68,14 +68,11 @@ pub struct AppPackage {
 }
 
 pub struct AppManifest {
-    pub name: String,
-    pub version: String,
-    pub entrypoint: String,     // WASM module path or native binary
-    pub runtime: AppRuntime,    // Wasm | Native
-    pub permissions: Vec<Capability>,
-    pub storage: StorageSpec,   // "sqlite" | "kv" | "files"
-    pub network: NetworkSpec,   // "none" | "outbound" | "inbound"
-    pub sharing: SharingSpec,   // "private" | "shared"
+    pub app: AppSection,        // name, version, entrypoint, runtime, optional id
+    pub storage: StorageSpec,   // "sqlite" | "kv" | "files" | "none" + schema path
+    pub permissions: PermissionsSpec, // files[], network, devices[]
+    pub sharing: SharingSpec,   // "private" | "link" | "public" + pinned devices
+    pub migration: MigrationSpec,     // auto_migrate
 }
 
 pub enum AppRuntime {
@@ -90,10 +87,13 @@ pub struct AppSandbox {
 }
 
 impl AppPackage {
-    pub fn verify(&self, pubkey: &PublicKey) -> Result<(), VerifyError>;
-    pub fn unpack(&self, dest: &Path) -> Result<AppDir, PackError>;
-    pub fn install(&self, registry: &mut AppRegistry) -> Result<AppId, InstallError>;
-    pub fn run(&self, ctx: RunContext) -> Result<AppSandbox, RunError>;
+    pub fn verify(&self, ids: &IdentityStore, device: &Device) -> Result<(), AppError>;
+    pub fn verify_any(&self, ids: &IdentityStore, devices: &[Device]) -> Result<DeviceId, AppError>;
+    pub fn install_to(&self, dest: &Path) -> Result<(), AppError>;
+    pub fn sign(&self, ids: &IdentityStore, device: &Device, key_dir: &Path) -> Result<(), AppError>;
+    // Implemented: wasmi + WASI preview1, deny-by-default sandbox,
+    // fuel + memory limits. Returns captured stdout/stderr + exit code.
+    pub fn run(&self, app_dir: &Path, args: &[String], limits: RunLimits) -> Result<RunOutput, AppError>;
 }
 ```
 
