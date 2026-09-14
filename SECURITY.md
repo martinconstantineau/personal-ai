@@ -24,21 +24,35 @@ the full threat model lives in `docs/security/threat-model.md`.
   writes, and run lifecycle transitions are appended to a local audit table.
   Argument blobs pass through `pai_audit::redact`, which masks keys named
   like secrets (`password`, `token`, `api_key`, …).
-- **Keys.** Devices get ed25519 keypairs (signing now, key agreement via
-  X25519 conversion on the roadmap). Private keys are written `0600` in the
-  data dir today; the target is OS-keystore backing (ADR 0011).
-- **Sync is ciphertext-only.** Transports move opaque `SyncObject`s; the
-  folder transport proves the contract without seeing plaintext.
+- **At rest.** `personal-ai.db` is SQLCipher-encrypted under a 256-bit key
+  held by the OS keystore (Windows Credential Manager / macOS Keychain /
+  Secret Service) with a 0600 file fallback; `PAI_PLAINTEXT_STORE=1` is
+  the documented escape hatch. See ADR 0014.
+- **Keys.** Device signing keys are ed25519, keystore-backed
+  (`devices.key_storage` records the backend). Sync adds a separate
+  X25519 agreement keypair per device plus a shared 256-bit vault key —
+  all keystore-backed the same way (ADR 0015).
+- **Sync is end-to-end.** Devices pair via an ed25519-signed
+  offer/accept exchange; the vault key travels wrapped by an
+  ECDH-derived peer key. `SyncObject` payloads are
+  XChaCha20-Poly1305-sealed with the object key as AAD — transports and
+  shared folders handle ciphertext only. Possession of the vault key is
+  read+write access; `pair remove` does not rotate it.
 
 ## Known limitations (groundwork stage)
 
-- SQLite file is not yet encrypted at rest (SQLCipher/`age` decision in
-  ROADMAP). OS disk encryption is assumed until then.
-- Device keys are file-backed, not keystore-backed.
-- Approval UX in the CLI auto-approves via `AutoApprove`; the Flutter app
-  will own interactive approval.
+- Approval UX exists in the CLI (`[y/N]` prompt); richer approval UX is
+  the Flutter app's job.
 - `llama-server` traffic is localhost HTTP — do not point it at remote hosts
   without TLS in front.
+- Sync pairing authenticity depends on the user moving offer/accept
+  files over a channel they control — a substituted file can get a
+  *different* device paired (never a forged signature). Compare device
+  ids out-of-band.
+- No vault rotation / remote wipe: a removed peer may still hold the
+  vault key. Rebuild the vault (fresh key + re-pair) to revoke.
+- Sync conflict resolution is LWW on `updated_at`; clock skew can pick a
+  stale winner. No vector clocks yet.
 
 ## Reporting
 
@@ -49,6 +63,7 @@ contents in reports.
 
 ## Hardening checklist for releases
 
-- [ ] encrypt store at rest; [ ] keystore-backed device keys; [ ] interactive
-      approval UI; [ ] sync E2EE implementation; [ ] supply-chain: lockfile +
-      `cargo audit` in CI; [ ] sandboxed tool execution profiles.
+- [x] encrypt store at rest; [x] keystore-backed device keys; [x] sync
+      E2EE implementation; [x] interactive CLI approval; [x] supply-chain:
+      lockfile + `cargo audit`/`cargo deny` in CI; [ ] sandboxed tool
+      execution profiles; [ ] vault rotation / device revocation.

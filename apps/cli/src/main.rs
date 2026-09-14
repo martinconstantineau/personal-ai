@@ -85,6 +85,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<MemCmd>,
     },
+    /// Device pairing for end-to-end encrypted sync.
+    Pair {
+        #[command(subcommand)]
+        cmd: PairCmd,
+    },
+    /// Cross-device sync over a shared folder.
+    Sync {
+        #[command(subcommand)]
+        cmd: SyncCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -178,6 +188,53 @@ enum DocsCmd {
     /// Remove a document and its sections.
     Delete { id: String },
 }
+#[derive(Subcommand)]
+enum PairCmd {
+    /// Write a signed pairing offer for another device to accept.
+    Offer {
+        #[arg(long)]
+        out: String,
+    },
+    /// Accept an offer file; writes the signed accept (carries the vault
+    /// key sealed to the offerer).
+    Accept {
+        offer: String,
+        #[arg(long)]
+        out: String,
+    },
+    /// Complete pairing from an accept file; installs the vault key.
+    Complete { accept: String },
+    /// List trusted peer devices.
+    List,
+    /// Remove a peer. Note: does NOT rotate the vault key — a removed
+    /// peer may still hold it.
+    Remove { id: String },
+}
+
+#[derive(Subcommand)]
+enum SyncCmd {
+    /// Seal + push local changes to the shared folder.
+    Push {
+        #[arg(long)]
+        dir: String,
+    },
+    /// Pull + apply remote changes from the shared folder.
+    Pull {
+        #[arg(long)]
+        dir: String,
+    },
+    /// Push then pull in one pass.
+    Run {
+        #[arg(long)]
+        dir: String,
+    },
+    /// Peers + object count in the shared folder.
+    Status {
+        #[arg(long)]
+        dir: Option<String>,
+    },
+}
+
 struct Ctx {
     store: Arc<Store>,
     documents: Arc<pai_documents::DocumentStore>,
@@ -191,7 +248,18 @@ struct Ctx {
     model: Option<String>,
 }
 
-async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
+/// Config + store + identity without inference/embedder probing — used by
+/// commands that don't need a model (pair, sync).
+async fn base(
+    cli: &Cli,
+) -> Result<(
+    pai_config::Config,
+    Arc<Store>,
+    pai_identity::IdentityStore,
+    std::path::PathBuf,
+    User,
+    Device,
+)> {
     let cfg = match &cli.data_dir {
         Some(d) => pai_config::Config {
             data_dir: d.into(),
@@ -210,27 +278,29 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
     // Identity: reuse existing user/device or create on first run.
     let ids = pai_identity::IdentityStore::new(store.clone());
     let key_dir = cfg.data_dir.join("keys");
-    let (user, device) = {
-        let user = match store.with_conn(|c| {
-            c.query_row("SELECT id FROM users LIMIT 1", [], |r| {
-                r.get::<_, String>(0)
-            })
-        }) {
-            Ok(id) => ids.get_user(UserId(uuid::Uuid::parse_str(&id).unwrap()))?,
-            Err(_) => ids.create_user("local-user")?,
-        };
-        let device = match ids.list_devices(user.id)?.into_iter().next() {
-            Some(d) => d,
-            None => ids.register_device(
-                user.id,
-                "cli-host",
-                current_platform(),
-                pai_identity::probe_capabilities(),
-                &key_dir,
-            )?,
-        };
-        (user, device)
+    let user = match store.with_conn(|c| {
+        c.query_row("SELECT id FROM users LIMIT 1", [], |r| {
+            r.get::<_, String>(0)
+        })
+    }) {
+        Ok(id) => ids.get_user(UserId(uuid::Uuid::parse_str(&id).unwrap()))?,
+        Err(_) => ids.create_user("local-user")?,
     };
+    let device = match ids.list_devices(user.id)?.into_iter().next() {
+        Some(d) => d,
+        None => ids.register_device(
+            user.id,
+            "cli-host",
+            current_platform(),
+            pai_identity::probe_capabilities(),
+            &key_dir,
+        )?,
+    };
+    Ok((cfg, store, ids, key_dir, user, device))
+}
+
+async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
+    let (cfg, store, _ids, _key_dir, user, device) = base(cli).await?;
 
     let audit = Arc::new(pai_audit::AuditLog::new(store.clone()));
     let conversations = Arc::new(ConversationStore::new(store.clone()));
@@ -616,6 +686,106 @@ async fn run_models(cmd: &ModelsCmd, cfg: &pai_config::Config) -> Result<()> {
     Ok(())
 }
 
+/// `pai pair` + `pai sync` — store/identity only, no inference stack.
+async fn run_sync_cmds(cli: &Cli) -> Result<()> {
+    use pai_sync::{crypto, engine, pair, SyncTransport};
+    let (cfg, store, ids, key_dir, _user, device) = base(cli).await?;
+    match &cli.cmd {
+        Cmd::Pair { cmd } => match cmd {
+            PairCmd::Offer { out } => {
+                let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
+                let m = pair::make_offer(&device, &agree, &ids, &key_dir)?;
+                pair::write_message(&m, std::path::Path::new(out))?;
+                println!("offer for '{}' written to {out}", device.name);
+                println!("send it to the other device: pai pair accept {out} --out accept.pai");
+            }
+            PairCmd::Accept { offer, out } => {
+                let offer = pair::read_message(std::path::Path::new(offer))?;
+                let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
+                let m = pair::accept_offer(
+                    &store,
+                    &offer,
+                    &device,
+                    &agree,
+                    &ids,
+                    &key_dir,
+                    &cfg.data_dir,
+                )?;
+                pair::write_message(&m, std::path::Path::new(out))?;
+                println!(
+                    "paired with '{}' ({}…); accept written to {out}",
+                    offer.name,
+                    &offer.device_id[..8.min(offer.device_id.len())]
+                );
+                println!("return it to the offering device: pai pair complete {out}");
+            }
+            PairCmd::Complete { accept } => {
+                let accept = pair::read_message(std::path::Path::new(accept))?;
+                let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
+                pair::complete_pairing(&store, &accept, &agree, &cfg.data_dir)?;
+                println!("paired with '{}' — vault key installed", accept.name);
+            }
+            PairCmd::List => {
+                let peers = pair::list_peers(&store)?;
+                if peers.is_empty() {
+                    println!("no paired devices — see `pai pair offer`");
+                }
+                for p in peers {
+                    println!(
+                        "  {}  {:<16} {:<10} paired {}",
+                        &p.device_id.to_string()[..8],
+                        p.name,
+                        p.platform,
+                        p.paired_at.format("%Y-%m-%d %H:%M")
+                    );
+                }
+            }
+            PairCmd::Remove { id } => {
+                if pair::remove_peer(&store, DeviceId(parse_uuid(id, "device")?))? {
+                    println!("removed peer {id} (vault key NOT rotated)");
+                } else {
+                    println!("no such peer: {id}");
+                }
+            }
+        },
+        Cmd::Sync { cmd } => match cmd {
+            SyncCmd::Push { dir } | SyncCmd::Pull { dir } | SyncCmd::Run { dir } => {
+                let eng = engine::folder_engine(
+                    std::path::Path::new(dir),
+                    store.clone(),
+                    device.id,
+                    &cfg.data_dir,
+                )?;
+                let out = match cmd {
+                    SyncCmd::Push { .. } => eng.push().await?,
+                    SyncCmd::Pull { .. } => eng.pull().await?,
+                    _ => eng.run().await?,
+                };
+                println!(
+                    "sync via folder: pushed {}, pulled {}, skipped {}",
+                    out.pushed, out.pulled, out.skipped
+                );
+            }
+            SyncCmd::Status { dir } => {
+                let peers = pair::list_peers(&store)?;
+                println!("{} paired device(s)", peers.len());
+                if let Some(d) = dir {
+                    let t = pai_sync::FolderTransport::new(d.into())?;
+                    let metas = t.list().await?;
+                    let tombstones = metas.iter().filter(|m| m.tombstone).count();
+                    println!(
+                        "{d}: {} object(s) ({} tombstone(s))",
+                        metas.len(),
+                        tombstones
+                    );
+                }
+            }
+        },
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -624,6 +794,11 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
+
+    // Pair/sync need no inference — skip provider probing entirely.
+    if matches!(cli.cmd, Cmd::Pair { .. } | Cmd::Sync { .. }) {
+        return run_sync_cmds(&cli).await;
+    }
 
     let (ctx, cfg) = build(&cli).await?;
 
@@ -990,6 +1165,7 @@ async fn main() -> Result<()> {
                 println!("{}", out.summary);
             }
         },
+        Cmd::Pair { .. } | Cmd::Sync { .. } => unreachable!("handled before build"),
     }
     Ok(())
 }

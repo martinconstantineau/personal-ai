@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -207,6 +207,20 @@ CREATE TABLE IF NOT EXISTS policies (
 -- V3: OS-keystore marker for device keys; embeddings on document sections.
 ALTER TABLE devices ADD COLUMN key_storage TEXT NOT NULL DEFAULT 'file';
 ALTER TABLE document_sections ADD COLUMN embedding BLOB;
+"#,
+    r#"
+-- V4: trusted sync peers — devices paired via the signed offer/accept
+-- exchange in `pai-sync`. Kept separate from `devices` (self-registered
+-- rows) so pairing state is an explicit trust decision, not a capability
+-- record.
+CREATE TABLE IF NOT EXISTS sync_peers (
+    device_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    ed_pubkey BLOB NOT NULL,
+    agree_pubkey BLOB NOT NULL,
+    paired_at TEXT NOT NULL
+);
 "#,
 ];
 

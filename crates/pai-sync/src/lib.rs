@@ -6,8 +6,14 @@
 //! a Syncthing/rsync/NFS-shared directory and devices converge without any
 //! server. E2E encryption: objects are ciphertext to the transport.
 //!
-//! Implemented now: folder transport (push/pull/list, last-writer-wins).
-//! Documented-not-built: CRDT merge for richer types, NAT traversal.
+//! Implemented now: folder transport (push/pull/list, last-writer-wins),
+//! X25519 pairing + XChaCha20-Poly1305 sealed objects (`crypto`, `pair`),
+//! and a memory-sync engine (`engine`). Documented-not-built: CRDT merge
+//! for richer types, NAT traversal, vault rotation / unpairing.
+
+pub mod crypto;
+pub mod engine;
+pub mod pair;
 
 use async_trait::async_trait;
 use pai_core::*;

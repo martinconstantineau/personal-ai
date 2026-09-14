@@ -51,8 +51,15 @@ Monorepo, Rust core crates, FFI boundary, Flutter shell, vertical slice
 
 ## V2 — Connected devices
 
-- E2EE sync: X25519 key agreement, per-object sealing, `FolderTransport`
-  encrypted end-to-end; relay transport (ciphertext-only server)
+**V2a done (2026-09-14):** E2EE sync MVP — signed offer/accept pairing
+(`pai pair`), shared vault key wrapped via X25519+HKDF, per-object
+XChaCha20-Poly1305 sealing with object-key AAD, `SyncEngine` over
+`FolderTransport` pushing/pulling sealed memory objects + tombstones
+(LWW), `sync_peers` trust table (schema v4), `pai sync push|pull|run|status`.
+See ADR 0015.
+
+- E2EE sync: relay transport (ciphertext-only server); sync scope beyond
+  memories (conversations, documents, tasks); vault rotation/unpairing
 - Trusted-device placement via `pai-broker` (phone asks desktop to run STT)
 - Voice pipeline MVP: whisper.cpp STT + piper TTS + VAD
 - Vision: llama.cpp multimodal describe/OCR
