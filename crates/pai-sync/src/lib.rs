@@ -8,12 +8,15 @@
 //!
 //! Implemented now: folder transport (push/pull/list, last-writer-wins),
 //! X25519 pairing + XChaCha20-Poly1305 sealed objects (`crypto`, `pair`),
-//! and a memory-sync engine (`engine`). Documented-not-built: CRDT merge
-//! for richer types, NAT traversal, vault rotation / unpairing.
+//! a memory-sync engine (`engine`), and an HTTP relay transport
+//! (`relay`) — ciphertext-only objects over the network, no shared
+//! folder needed. Documented-not-built: CRDT merge for richer types,
+//! NAT traversal, vault rotation / unpairing.
 
 pub mod crypto;
 pub mod engine;
 pub mod pair;
+pub mod relay;
 
 use async_trait::async_trait;
 use pai_core::*;
@@ -26,6 +29,23 @@ pub trait SyncTransport: Send + Sync {
     async fn list(&self) -> Result<Vec<SyncObjectMeta>>;
     async fn push(&self, obj: &SyncObject) -> Result<()>;
     async fn pull(&self, key: &str) -> Result<Option<SyncObject>>;
+}
+
+/// Lets `SyncEngine` take a runtime-picked transport (folder vs relay).
+#[async_trait]
+impl SyncTransport for Box<dyn SyncTransport> {
+    fn id(&self) -> &'static str {
+        (**self).id()
+    }
+    async fn list(&self) -> Result<Vec<SyncObjectMeta>> {
+        (**self).list().await
+    }
+    async fn push(&self, obj: &SyncObject) -> Result<()> {
+        (**self).push(obj).await
+    }
+    async fn pull(&self, key: &str) -> Result<Option<SyncObject>> {
+        (**self).pull(key).await
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +78,8 @@ impl FolderTransport {
     }
 }
 
-fn urlenc(s: &str) -> String {
+/// Percent-encode an object key for paths/URLs (shared by transports).
+pub fn urlenc(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -68,6 +89,25 @@ fn urlenc(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Inverse of [`urlenc`].
+pub fn urldec(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(h) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(h);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[async_trait]

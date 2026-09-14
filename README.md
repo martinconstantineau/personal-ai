@@ -20,7 +20,8 @@ Canonical repo: [GitLab](https://gitlab.com/martin.constantineau.ca/personal-ai)
 - 📜 **Audited** — every decision, tool call, and memory write is recorded in
   a local, tamper-evident audit log.
 - 🔄 **Sync designed, not bolted on** — end-to-end-encrypted object sync via
-  pluggable transports (folder transport implemented; relays are ciphertext-only).
+  pluggable transports (shared folder + HTTP relay implemented; every
+  transport is ciphertext-only).
 
 ## Status: V1.1 — hardened local assistant
 

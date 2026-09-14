@@ -232,25 +232,54 @@ enum PairCmd {
 
 #[derive(Subcommand)]
 enum SyncCmd {
-    /// Seal + push local changes to the shared folder.
+    /// Seal + push local changes to a shared folder or relay.
     Push {
         #[arg(long)]
-        dir: String,
+        dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
+        /// Bearer token for the relay (or PAI_SYNC_TOKEN).
+        #[arg(long)]
+        token: Option<String>,
     },
-    /// Pull + apply remote changes from the shared folder.
+    /// Pull + apply remote changes from a shared folder or relay.
     Pull {
         #[arg(long)]
-        dir: String,
+        dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Push then pull in one pass.
     Run {
         #[arg(long)]
-        dir: String,
+        dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
     },
-    /// Peers + object count in the shared folder.
+    /// Peers + object count at the destination.
     Status {
         #[arg(long)]
         dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Run a sync relay server — stores ciphertext objects under --dir.
+    /// Put it behind TLS (reverse proxy) off localhost; the blobs are
+    /// sealed anyway, but auth keeps it from being a free object store.
+    Serve {
+        #[arg(long)]
+        dir: String,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        addr: String,
+        /// Require `Authorization: Bearer <token>` (or PAI_SYNC_TOKEN).
+        #[arg(long)]
+        token: Option<String>,
     },
 }
 
@@ -798,6 +827,25 @@ async fn run_models(cmd: &ModelsCmd, cfg: &pai_config::Config) -> Result<()> {
     Ok(())
 }
 
+/// Resolve --dir / --relay into a transport; mutually exclusive.
+fn sync_transport(
+    dir: &Option<String>,
+    relay: &Option<String>,
+    token: &Option<String>,
+) -> Result<Box<dyn pai_sync::SyncTransport>> {
+    match (dir, relay) {
+        (Some(d), None) => Ok(Box::new(pai_sync::FolderTransport::new(d.into())?)),
+        (None, Some(r)) => Ok(Box::new(pai_sync::relay::RelayTransport::new(
+            r,
+            token.clone(),
+        ))),
+        (None, None) => Err(Error::InvalidInput("specify --dir or --relay".into())),
+        (Some(_), Some(_)) => Err(Error::InvalidInput(
+            "--dir and --relay are mutually exclusive".into(),
+        )),
+    }
+}
+
 /// `pai pair` + `pai sync` — store/identity only, no inference stack.
 async fn run_sync_cmds(cli: &Cli) -> Result<()> {
     use pai_sync::{crypto, engine, pair, SyncTransport};
@@ -861,36 +909,55 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             }
         },
         Cmd::Sync { cmd } => match cmd {
-            SyncCmd::Push { dir } | SyncCmd::Pull { dir } | SyncCmd::Run { dir } => {
-                let eng = engine::folder_engine(
-                    std::path::Path::new(dir),
-                    store.clone(),
-                    device.id,
-                    &cfg.data_dir,
-                )?;
+            SyncCmd::Push { dir, relay, token }
+            | SyncCmd::Pull { dir, relay, token }
+            | SyncCmd::Run { dir, relay, token } => {
+                let t = sync_transport(dir, relay, token)?;
+                let kind = t.id().to_string();
+                let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
+                    Error::Sync("no vault key — pair a device first (pai pair)".into())
+                })?;
+                let eng = engine::SyncEngine::new(t, store.clone(), vault, device.id);
                 let out = match cmd {
                     SyncCmd::Push { .. } => eng.push().await?,
                     SyncCmd::Pull { .. } => eng.pull().await?,
                     _ => eng.run().await?,
                 };
                 println!(
-                    "sync via folder: pushed {}, pulled {}, skipped {}",
+                    "sync via {kind}: pushed {}, pulled {}, skipped {}",
                     out.pushed, out.pulled, out.skipped
                 );
             }
-            SyncCmd::Status { dir } => {
+            SyncCmd::Status { dir, relay, token } => {
                 let peers = pair::list_peers(&store)?;
                 println!("{} paired device(s)", peers.len());
-                if let Some(d) = dir {
-                    let t = pai_sync::FolderTransport::new(d.into())?;
+                if dir.is_some() || relay.is_some() {
+                    let t = sync_transport(dir, relay, token)?;
                     let metas = t.list().await?;
                     let tombstones = metas.iter().filter(|m| m.tombstone).count();
                     println!(
-                        "{d}: {} object(s) ({} tombstone(s))",
+                        "{}: {} object(s) ({} tombstone(s))",
+                        t.id(),
                         metas.len(),
                         tombstones
                     );
                 }
+            }
+            SyncCmd::Serve { dir, addr, token } => {
+                let token = token
+                    .clone()
+                    .or_else(|| std::env::var("PAI_SYNC_TOKEN").ok());
+                let srv = pai_sync::relay::bind(dir.into(), addr, token.clone())?;
+                println!(
+                    "relay on http://{} storing under {dir} {}",
+                    srv.addr(),
+                    if token.is_some() {
+                        "(token required)"
+                    } else {
+                        "(NO AUTH — localhost use only)"
+                    }
+                );
+                pai_sync::relay::serve(srv);
             }
         },
         Cmd::Email { cmd } => run_email_cmds(cmd, &cfg).await?,

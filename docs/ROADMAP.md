@@ -73,8 +73,15 @@ hangover, dependency-free), `voice.json` config with `PAI_WHISPER_URL`/
 status|configure|transcribe|say|turn`. File-based I/O for now — live mic
 capture needs OS audio permissions (cpal) and is the next step.
 
-- E2EE sync: relay transport (ciphertext-only server); sync scope beyond
-  memories (conversations, documents, tasks); vault rotation/unpairing
+**V2e done (2026-09-14):** sync relay transport — `pai sync serve`
+(tiny_http) stores opaque `.syncobj` blobs through `FolderTransport`;
+`RelayTransport` implements `SyncTransport` over HTTP so E2EE sync works
+across networks. Bearer-token auth (`--token`/`PAI_SYNC_TOKEN`), mutually
+exclusive `--dir`/`--relay` on `sync push|pull|run|status`, default bind
+127.0.0.1. The relay still only ever sees sealed objects.
+
+- E2EE sync: sync scope beyond memories (conversations, documents,
+  tasks); vault rotation/unpairing; relay behind TLS for off-LAN use
 - Trusted-device placement via `pai-broker` (phone asks desktop to run STT)
 - Voice: mic capture + playback (cpal), VAD-driven endpointing, streaming
   STT; Flutter voice UI + FFI ops once mic capture lands

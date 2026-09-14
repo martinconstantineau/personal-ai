@@ -48,8 +48,11 @@ the full threat model lives in `docs/security/threat-model.md`.
   offer/accept exchange; the vault key travels wrapped by an
   ECDH-derived peer key. `SyncObject` payloads are
   XChaCha20-Poly1305-sealed with the object key as AAD — transports and
-  shared folders handle ciphertext only. Possession of the vault key is
-  read+write access; `pair remove` does not rotate it.
+  shared folders handle ciphertext only. The optional HTTP relay
+  (`pai sync serve`) persists the same opaque `.syncobj` blobs via
+  `FolderTransport`; a bearer token gates it, but it is still
+  ciphertext-only. Possession of the vault key is read+write access;
+  `pair remove` does not rotate it.
 
 ## Known limitations (groundwork stage)
 
@@ -57,6 +60,10 @@ the full threat model lives in `docs/security/threat-model.md`.
   the Flutter app's job.
 - `llama-server` traffic is localhost HTTP — do not point it at remote hosts
   without TLS in front.
+- `pai sync serve` is plain HTTP and binds 127.0.0.1 by default — relaying
+  across networks means putting it behind a TLS-terminating proxy. The
+  stored blobs are sealed regardless; the bearer token only prevents the
+  relay becoming an anonymous object store.
 - Sync pairing authenticity depends on the user moving offer/accept
   files over a channel they control — a substituted file can get a
   *different* device paired (never a forged signature). Compare device
