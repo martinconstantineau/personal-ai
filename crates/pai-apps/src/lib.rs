@@ -265,23 +265,26 @@ impl AppManifest {
         if let Some(id) = &self.app.id {
             return id.clone();
         }
-        let slug: String = self
-            .app
-            .name
-            .to_lowercase()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        // Collapse runs of '-' and trim.
-        let mut out = String::with_capacity(slug.len());
-        for c in slug.chars() {
-            if c == '-' && out.ends_with('-') {
-                continue;
-            }
-            out.push(c);
-        }
-        out.trim_matches('-').to_string()
+        slugify(&self.app.name)
     }
+}
+
+/// Slug a display name into an app id: lowercase, non-alphanumeric
+/// runs collapse to single `-`, trimmed at both ends.
+pub fn slugify(name: &str) -> String {
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let mut out = String::with_capacity(slug.len());
+    for c in slug.chars() {
+        if c == '-' && out.ends_with('-') {
+            continue;
+        }
+        out.push(c);
+    }
+    out.trim_matches('-').to_string()
 }
 
 fn check_app_id(id: &str) -> AppResult<()> {
@@ -465,6 +468,138 @@ impl AppPackage {
             std::fs::copy(&sig, dest.join("signature.bin"))?;
         }
         Ok(())
+    }
+
+    /// Scaffold a new app source project under `dir` (id slugified from
+    /// `name`): a `manifest.toml` to edit, plus a minimal Rust bin
+    /// (`Cargo.toml` + `src/main.rs`) that `pai apps build` compiles
+    /// for `wasm32-wasip1`.
+    pub fn init(dir: &Path, name: &str) -> AppResult<PathBuf> {
+        let id = slugify(name);
+        check_app_id(&id)?;
+        let root = dir.join(&id);
+        if root.exists() {
+            return Err(AppError::Layout(format!("{root:?} already exists")));
+        }
+        std::fs::create_dir_all(root.join("src"))?;
+        std::fs::write(
+            root.join("manifest.toml"),
+            format!(
+                "[app]\nid = \"{id}\"\nname = \"{name}\"\nversion = \"0.1.0\"\nruntime = \"wasm\"\nentrypoint = \"app.wasm\"\n\n[permissions]\n# files = [\"files\"]\n\n[storage]\ntype = \"kv\"\npath = \"data\"\n"
+            ),
+        )?;
+        std::fs::write(
+            root.join("Cargo.toml"),
+            format!("[package]\nname = \"{id}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )?;
+        std::fs::write(
+            root.join("src/main.rs"),
+            format!("fn main() {{\n    println!(\"hello from {name}\");\n}}\n"),
+        )?;
+        Ok(root)
+    }
+
+    /// Build `project_dir` into a loadable package under `out_dir`.
+    /// - `manifest.toml` + `Cargo.toml`: cargo build for wasm32-wasip1,
+    ///   manifest + payload copied, compiled wasm written to the
+    ///   manifest's entrypoint.
+    /// - `manifest.toml` only: already a package — copied + validated.
+    /// - `Cargo.toml` only: compiled, with a manifest synthesized from
+    ///   `[package]` (entrypoint `app.wasm`).
+    pub fn build(project_dir: &Path, out_dir: &Path) -> AppResult<PathBuf> {
+        let manifest_src = project_dir.join("manifest.toml");
+        let cargo_src = project_dir.join("Cargo.toml");
+        if !manifest_src.is_file() && !cargo_src.is_file() {
+            return Err(AppError::Layout(format!(
+                "{project_dir:?} has no manifest.toml or Cargo.toml — `pai apps init <name>` scaffolds one"
+            )));
+        }
+
+        let manifest_text = if manifest_src.is_file() {
+            std::fs::read_to_string(&manifest_src)?
+        } else {
+            let doc: toml::Value = std::fs::read_to_string(&cargo_src)?
+                .parse()
+                .map_err(|e: toml::de::Error| AppError::Manifest(e.to_string()))?;
+            let name = doc["package"]["name"]
+                .as_str()
+                .ok_or_else(|| AppError::Manifest("Cargo.toml missing package.name".into()))?;
+            let version = doc["package"]["version"].as_str().unwrap_or("0.1.0");
+            format!(
+                "[app]\nname = \"{name}\"\nversion = \"{version}\"\nruntime = \"wasm\"\nentrypoint = \"app.wasm\"\n"
+            )
+        };
+        let manifest = AppManifest::parse(&manifest_text)?;
+
+        if cargo_src.is_file() {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "--target", "wasm32-wasip1", "--release"])
+                .current_dir(project_dir)
+                .status()
+                .map_err(|e| AppError::Layout(format!("cargo build: {e}")))?;
+            if !status.success() {
+                return Err(AppError::Layout(format!(
+                    "cargo build --target wasm32-wasip1 failed ({status})"
+                )));
+            }
+        }
+
+        // Copy payload: everything except build-only files and the
+        // output dir itself.
+        if out_dir.exists() {
+            std::fs::remove_dir_all(out_dir)?;
+        }
+        std::fs::create_dir_all(out_dir)?;
+        const SKIP_DIRS: &[&str] = &["src", "target", ".git"];
+        for e in std::fs::read_dir(project_dir)? {
+            let e = e?;
+            let p = e.path();
+            if p == out_dir {
+                continue;
+            }
+            let name = e.file_name();
+            if p.is_dir() {
+                if SKIP_DIRS.contains(&name.to_str().unwrap_or_default()) {
+                    continue;
+                }
+                copy_merge(&p, &out_dir.join(&name))?;
+            } else if name != "Cargo.toml" && name != "Cargo.lock" {
+                std::fs::copy(&p, out_dir.join(&name))?;
+            }
+        }
+        std::fs::write(out_dir.join("manifest.toml"), &manifest_text)?;
+
+        if cargo_src.is_file() {
+            // cargo output name: package.name with '-' → '_'.
+            let doc: toml::Value = std::fs::read_to_string(&cargo_src)?
+                .parse()
+                .map_err(|e: toml::de::Error| AppError::Manifest(e.to_string()))?;
+            let crate_name = doc["package"]["name"].as_str().unwrap_or_default();
+            let out_dir_t = project_dir.join("target/wasm32-wasip1/release");
+            // Top-level artifacts keep the package spelling; dep-level
+            // artifacts mangle '-' to '_'. Accept either.
+            let wasm = [crate_name.to_string(), crate_name.replace('-', "_")]
+                .iter()
+                .map(|n| out_dir_t.join(format!("{n}.wasm")))
+                .find(|p| p.is_file())
+                .unwrap_or_else(|| out_dir_t.join(format!("{crate_name}.wasm")));
+            if !wasm.is_file() {
+                return Err(AppError::Layout(format!(
+                    "{} not produced — the crate must build a wasm32-wasip1 bin",
+                    wasm.display()
+                )));
+            }
+            let entry = out_dir.join(&manifest.app.entrypoint);
+            if let Some(p) = entry.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            std::fs::copy(&wasm, &entry)?;
+        }
+
+        // Validate the assembled package — catches a missing entrypoint
+        // for manifest-only sources and bad payload paths either way.
+        Self::load(out_dir)?;
+        Ok(out_dir.to_path_buf())
     }
 }
 
@@ -1027,6 +1162,67 @@ auto_migrate = true
         reg.install(&pkg, &ids, &dev, false).unwrap();
         let pkg = AppPackage::load(&pkg_dir(&t)).unwrap();
         assert!(reg.install(&pkg, &ids, &dev, false).is_err());
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn slugify_works() {
+        assert_eq!(slugify("My Garage App!"), "my-garage-app");
+        assert_eq!(slugify("  spaced  out  "), "spaced-out");
+        assert_eq!(slugify("already-slugged"), "already-slugged");
+    }
+
+    #[test]
+    fn init_scaffolds_project() {
+        let t = tmp();
+        let root = AppPackage::init(&t, "My Cool App").unwrap();
+        assert_eq!(root, t.join("my-cool-app"));
+        for f in ["manifest.toml", "Cargo.toml", "src/main.rs"] {
+            assert!(root.join(f).is_file(), "missing {f}");
+        }
+        let m = AppManifest::parse(&std::fs::read_to_string(root.join("manifest.toml")).unwrap())
+            .unwrap();
+        assert_eq!(m.app_id(), "my-cool-app");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn init_refuses_existing_dir() {
+        let t = tmp();
+        AppPackage::init(&t, "dup").unwrap();
+        assert!(AppPackage::init(&t, "dup").is_err());
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn build_copies_existing_package() {
+        let t = tmp();
+        let src = pkg_dir(&t);
+        let out = t.join("out");
+        let built = AppPackage::build(&src, &out).unwrap();
+        assert_eq!(built, out);
+        assert!(out.join("app.wasm").is_file());
+        assert!(out.join("schema.sql").is_file());
+        // Output is a valid loadable package.
+        let pkg = AppPackage::load(&out).unwrap();
+        assert_eq!(pkg.manifest.app_id(), "my-garage-app");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn build_rejects_dir_without_sources() {
+        let t = tmp();
+        assert!(AppPackage::build(&t, &t.join("out")).is_err());
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn build_rejects_package_missing_entrypoint() {
+        let t = tmp();
+        let src = t.join("broken");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("manifest.toml"), MANIFEST).unwrap();
+        assert!(AppPackage::build(&src, &t.join("out")).is_err());
         let _ = std::fs::remove_dir_all(&t);
     }
 }

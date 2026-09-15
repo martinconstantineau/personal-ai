@@ -281,12 +281,6 @@ the default when no `oauth` block exists.
   `hex(peer_key)` bearer — only paired devices can authenticate.
 - `pai_apps_list` FFI + Dart `appsList` for the dashboard.
 
-**V4h done (2026-09-15):** app authoring loop — `pai apps init <name>`
-scaffolds a source project (editable `manifest.toml` + Rust wasm
-skeleton); `pai apps build <dir> [--sign]` compiles `wasm32-wasip1`
-(or validates an existing package dir) into a deployable package.
-init → build → deploy → run works end-to-end.
-
 **V4g done (2026-09-15):** portable model packs — `pai models install
 <slug> --to <dir>` writes weights plus a self-describing `index.json`
 (manifest + sha256 per file) into any directory. `pack_roots()` probes
@@ -304,6 +298,12 @@ signature before reinstalling and swapping `data/` with rollback — the
 PRD's versioned-backup + rescue path. `apps backups` lists,
 `apps backup-delete` tombstones, restore `--from <writer>` picks a
 device. ADR 0018.
+
+**V4i done (2026-09-15):** app authoring loop — `pai apps init <name>`
+scaffolds a source project (editable `manifest.toml` + Rust wasm
+skeleton); `pai apps build <dir> [--sign]` compiles `wasm32-wasip1`
+(or validates an existing package dir) into a deployable package.
+init → build → deploy → run works end-to-end.
 
 - Remaining: capability sharing (`pai-share`), multi-device
   app placement/migration, mobile runtime.

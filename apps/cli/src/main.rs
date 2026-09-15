@@ -166,6 +166,27 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum AppsCmd {
+    /// Scaffold a new app source project (manifest.toml + Rust wasm
+    /// skeleton) — then `pai apps build` it.
+    Init {
+        /// App name; the app id is slugified from it.
+        name: String,
+        /// Parent directory (default: current dir).
+        #[arg(long)]
+        dir: Option<String>,
+    },
+    /// Build a source dir into a verifiable package: Rust crate →
+    /// wasm32-wasip1, or an existing package dir → copy + validate.
+    Build {
+        /// Source directory (Cargo.toml and/or manifest.toml).
+        dir: String,
+        /// Output package dir (default: <dir>/pkg).
+        #[arg(long)]
+        out: Option<String>,
+        /// Sign the built package with this device's key.
+        #[arg(long)]
+        sign: bool,
+    },
     /// List installed apps.
     List,
     /// Sign a package in place with this device's key (writes
@@ -1584,6 +1605,32 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             println!("run it: `pai apps run {}`", pkg.manifest.app_id());
         }
         Cmd::Apps { cmd } => match cmd {
+            AppsCmd::Init { name, dir } => {
+                let base = match dir {
+                    Some(d) => std::path::PathBuf::from(d),
+                    None => std::env::current_dir().map_err(|e| Error::Other(e.to_string()))?,
+                };
+                let root = pai_apps::AppPackage::init(&base, name)
+                    .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                println!("created {}", root.display());
+                println!("next:    pai apps build {}", root.display());
+            }
+            AppsCmd::Build { dir, out, sign } => {
+                let out_dir = out
+                    .clone()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from(dir).join("pkg"));
+                let pkg_dir = pai_apps::AppPackage::build(&std::path::PathBuf::from(dir), &out_dir)
+                    .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                println!("package: {}", pkg_dir.display());
+                if *sign {
+                    let pkg = load_package(&pkg_dir.to_string_lossy())?;
+                    pkg.sign(&ids, &device, &key_dir)
+                        .map_err(|e| Error::Other(e.to_string()))?;
+                    println!("signed by device {:.8}", device.id);
+                }
+                println!("deploy:  pai deploy {}", pkg_dir.display());
+            }
             AppsCmd::List => {
                 let apps = pai_apps::AppRegistry::new(&cfg.data_dir)
                     .list()
