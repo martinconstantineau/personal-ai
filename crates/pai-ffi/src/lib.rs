@@ -1163,14 +1163,28 @@ pub unsafe extern "C" fn pai_notify_mark_read(
 pub unsafe extern "C" fn pai_apps_list(handle: *mut PaiRuntime) -> *mut c_char {
     let rt = &mut *handle;
     match pai_apps::AppRegistry::new(std::path::Path::new(&rt.data_dir)).list() {
-        Ok(apps) => to_c(serde_json::json!({
-            "apps": apps.iter().map(|(id, m)| serde_json::json!({
-                "id": id,
-                "name": m.app.name,
-                "version": m.app.version,
-                "runtime": m.app.runtime,
-            })).collect::<Vec<_>>(),
-        })),
+        Ok(apps) => {
+            let placement: std::collections::HashMap<String, Option<String>> = rt
+                .store
+                .with_conn(|c| {
+                    let mut s = c.prepare("SELECT id, active_device FROM apps")?;
+                    let rows = s.query_map([], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                    })?;
+                    rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+                })
+                .unwrap_or_default();
+            to_c(serde_json::json!({
+                "device": rt.device.to_string(),
+                "apps": apps.iter().map(|(id, m)| serde_json::json!({
+                    "id": id,
+                    "name": m.app.name,
+                    "version": m.app.version,
+                    "runtime": m.app.runtime,
+                    "active_device": placement.get(id).and_then(|p| p.clone()),
+                })).collect::<Vec<_>>(),
+            }))
+        }
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
     }
 }
@@ -1205,6 +1219,15 @@ pub unsafe extern "C" fn pai_apps_run(
             Err(e) => return to_c(serde_json::json!({"error": e})),
         }
     };
+    match pai_sync::backup::active_elsewhere(&rt.store, rt.device, &id) {
+        Ok(Some(other)) => {
+            return to_c(serde_json::json!({
+                "error": format!("app {id} is active on {other} — migrate it here first"),
+            }))
+        }
+        Ok(None) => {}
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    }
     let reg = pai_apps::AppRegistry::new(std::path::Path::new(&rt.data_dir));
     let pkg = match reg.get(&id) {
         Ok(Some(p)) => p,
@@ -1418,6 +1441,103 @@ pub unsafe extern "C" fn pai_detect() -> *mut c_char {
 // ---------------------------------------------------------------------------
 // Teardown
 // ---------------------------------------------------------------------------
+
+/// # Safety
+/// `s` must be a pointer previously returned by this library.
+/// List paired peer devices — the migrate picker needs them.
+/// Returns `{peers: [{id, name, platform}]}` or `{error}`.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_peers_list(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    match pai_sync::pair::list_peers(&rt.store) {
+        Ok(peers) => to_c(serde_json::json!({
+            "peers": peers.iter().map(|p| serde_json::json!({
+                "id": p.device_id.to_string(),
+                "name": p.name,
+                "platform": p.platform,
+            })).collect::<Vec<_>>(),
+        })),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Migrate an app to a paired device — the same steps as
+/// `pai apps migrate`: a migrate-flagged backup, the placement update,
+/// and local `data/` parked (recoverable). Ships on the next sync
+/// push; the target restores inline on its next pull.
+/// `to` is a device-id prefix resolved against paired peers.
+/// Returns `{ok: true, pak}` or `{error}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `id`/`to` are NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn pai_apps_migrate(
+    handle: *mut PaiRuntime,
+    id: *const c_char,
+    to: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let id = match read_str(id) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let prefix = match read_str(to) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let peers = match pai_sync::pair::list_peers(&rt.store) {
+        Ok(p) => p,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let matches: Vec<_> = peers
+        .iter()
+        .filter(|p| p.device_id.to_string().starts_with(&prefix))
+        .collect();
+    let target = match matches.as_slice() {
+        [p] => p.device_id,
+        [] => {
+            return to_c(serde_json::json!({"error":
+                format!("no paired device matching '{prefix}'")}))
+        }
+        _ => {
+            return to_c(serde_json::json!({"error":
+                format!("'{prefix}' matches {} devices — be more specific",
+                    matches.len())}))
+        }
+    };
+    // Order matters: snapshot while still active (create refuses on an
+    // inactive app), then hand over placement, then park local data.
+    let pak = match pai_sync::backup::create(
+        &rt.store,
+        std::path::Path::new(&rt.data_dir),
+        rt.device,
+        &id,
+        Some(target),
+    ) {
+        Ok(p) => p,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let now = pai_core::now().to_rfc3339();
+    let upd = rt.store.with_conn(|c| {
+        c.execute(
+            "UPDATE apps SET active_device=?2, updated_at=?3 WHERE id=?1",
+            rusqlite::params![id, target.to_string(), now],
+        )
+    });
+    if let Err(e) = upd {
+        return to_c(serde_json::json!({"error": e.to_string()}));
+    }
+    match pai_apps::AppRegistry::new(std::path::Path::new(&rt.data_dir)).deactivate_data(&id) {
+        Ok(_) => {}
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    }
+    let mut ev = pai_audit::event(AuditKind::AppMigrated, AuditOutcome::Ok);
+    ev.device = Some(rt.device);
+    ev.detail = serde_json::json!({"app_id": id, "to": target.to_string()});
+    let _ = rt.audit.record(&ev);
+    to_c(serde_json::json!({"ok": true, "pak": pak.display().to_string()}))
+}
 
 /// # Safety
 /// `s` must be a pointer previously returned by this library.

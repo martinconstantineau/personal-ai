@@ -328,11 +328,25 @@ code predates V4j's landing — ordering is commit order.)
 export + Dart binding + Apps screen. The Flutter app (desktop and
 Android FFI) lists synced packages and runs them in the same wasmi
 sandbox as the CLI, showing stdout/stderr/exit. Full path: packages
-sync → list → run, no shell needed. Placement enforcement stays
-caller-side.
+sync → list → run, no shell needed.
 
-- Remaining: capability sharing (`pai-share`), mobile runtime polish
-  (placement display, migrate button, run args UI).
+**V4m done (2026-09-15):** `pai-share` capability tokens — signed
+Ed25519 grants ({app_id, actions, grantee_key, device, expires}) with
+a file-backed ShareStore; verify() checks signature, revocation,
+expiry, action coverage. Primitive only so far — the non-vault
+requester class that consumes grants is V2 scope.
+
+**V4n done (2026-09-15):** mobile app polish — `pai_apps_list` FFI
+now carries `active_device` + own device id (the Apps screen badges
+here / →peer / everywhere and greys out runs that aren't active
+here), `pai_apps_run` enforces placement at the FFI boundary itself
+(closing the "caller-side" hole — the UI can no longer fork live
+state), `pai_apps_migrate` + `pai_peers_list` exports drive a
+migrate-to-peer sheet, and runs accept an args field.
+
+- Remaining: grant consumption (a non-vault requester class for
+  `pai-share` tokens — guest app-run / shared reads), deeper mobile
+  shell work.
 
 ## Known technical debt (tracked, not hidden)
 

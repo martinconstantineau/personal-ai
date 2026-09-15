@@ -186,6 +186,11 @@ class PaiBridge {
           {List<String> args = const []}) async =>
       (await _call(_Op.appsRun, arg: jsonEncode({'id': id, 'args': args})))
           as Map<String, dynamic>;
+  Future<Map<String, dynamic>> appsMigrate(String id, String to) async =>
+      (await _call(_Op.appsMigrate,
+          arg: jsonEncode({'id': id, 'to': to}))) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> peersList() async =>
+      (await _call(_Op.peersList)) as Map<String, dynamic>;
 
   Future<Map<String, dynamic>> voiceStatus() async =>
       (await _call(_Op.voiceStatus)) as Map<String, dynamic>;
@@ -327,6 +332,12 @@ class PaiBridge {
             final a = jsonDecode(req.arg!) as Map<String, dynamic>;
             result = client.appsRun(a['id'] as String,
                 args: (a['args'] as List).cast<String>());
+          case _Op.appsMigrate:
+            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+            result =
+                client.appsMigrate(a['id'] as String, a['to'] as String);
+          case _Op.peersList:
+            result = client.peersList();
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -382,6 +393,8 @@ enum _Op {
   voiceSay,
   appsList,
   appsRun,
+  appsMigrate,
+  peersList,
 }
 
 class _InitError {

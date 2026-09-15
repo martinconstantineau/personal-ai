@@ -113,6 +113,10 @@ Emergency/manual commits by maintainers follow the same rule — no
 - **Parked app data is plaintext residue**: deactivation renames
   `data/` to `apps/.<id>.data.inactive-<ts>` — recoverable, but the
   same cleartext exposure as live `data/` until manually removed.
+- **FFI enforces placement too**: `pai_apps_run` checks
+  `active_device` in the export itself — the Flutter shell can't
+  accidentally run an app that lives on another device (UI is a
+  convenience layer, not the trust boundary).
 - Android `RECORD_AUDIO` is declared for voice capture; the runtime
   grant is still required, and there is no in-app permission-request
   flow yet — voice capture simply fails until granted in system

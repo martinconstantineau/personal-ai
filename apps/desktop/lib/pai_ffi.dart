@@ -106,6 +106,11 @@ class PaiClient {
   late final _appsRun = _lib.lookupFunction<_ThreeStrNative,
           Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>(
       'pai_apps_run');
+  late final _appsMigrate = _lib.lookupFunction<_ThreeStrNative,
+          Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>(
+      'pai_apps_migrate');
+  late final _peersList = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_peers_list');
   late final _voiceSay = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_voice_say');
   late final _setPolicy = _lib.lookupFunction<_ThreeStrNative,
@@ -298,6 +303,16 @@ class PaiClient {
   /// {error}.
   Map<String, dynamic> appsRun(String id, {List<String> args = const []}) =>
       _call2(_appsRun, id, jsonEncode(args));
+
+  /// Migrate an app to a paired device (device-id prefix). Ships on
+  /// the next sync push; the target restores on pull. {ok, pak} or
+  /// {error}. Blocking — worker isolate only.
+  Map<String, dynamic> appsMigrate(String id, String to) =>
+      _call2(_appsMigrate, id, to);
+
+  /// Paired peer devices: {peers: [{id, name, platform}]}.
+  Map<String, dynamic> peersList() =>
+      _json(_peersList(_handle)) as Map<String, dynamic>;
 
   /// Voice capability probe: {stt, tts, mic, speaker, whisper_url}.
   Map<String, dynamic> voiceStatus() =>

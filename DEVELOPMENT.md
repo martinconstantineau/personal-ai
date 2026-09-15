@@ -124,6 +124,12 @@ parked at `apps/.<id>.data.inactive-<ts>` (recoverable, not deleted).
 that isn't active; `pai apps list` shows each app's placement.
 Coverage: `cargo test -p pai-integration-tests --test v4j_migration`.
 
+The same rules hold over FFI — `pai_apps_list` reports
+`active_device` + the local device id, `pai_apps_run` refuses on
+inactive devices (enforced in the export, not the UI), and
+`pai_apps_migrate`/`pai_peers_list` back the Flutter Apps screen's
+migrate sheet.
+
 LAN sync needs no --relay flag: `pai sync serve --announce` broadcasts a
 signed multicast announcement and authenticates callers by the
 pairing-derived `hex(peer_key)` bearer token; `pai mesh discover` lists

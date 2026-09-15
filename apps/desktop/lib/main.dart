@@ -1206,6 +1206,7 @@ class AppsScreen extends StatefulWidget {
 
 class _AppsScreenState extends State<AppsScreen> {
   List<dynamic> _apps = const [];
+  String _device = '';
   bool _loading = true;
   String? _running;
 
@@ -1220,15 +1221,31 @@ class _AppsScreenState extends State<AppsScreen> {
     if (mounted) {
       setState(() {
         _apps = (r['apps'] as List?) ?? const [];
+        _device = '${r['device'] ?? ''}';
         _loading = false;
       });
     }
   }
 
-  Future<void> _run(Map<String, dynamic> app) async {
+  /// Where this app's live data runs: null → everywhere (legacy),
+  /// this device → here, otherwise inactive-here.
+  String _placement(Map<String, dynamic> app) {
+    final active = app['active_device'];
+    if (active == null) return 'everywhere';
+    if (active == _device) return 'here';
+    return 'on ${'$active'.substring(0, 8)}…';
+  }
+
+  bool _runnableHere(Map<String, dynamic> app) {
+    final active = app['active_device'];
+    return active == null || active == _device;
+  }
+
+  Future<void> _run(Map<String, dynamic> app,
+      {List<String> args = const []}) async {
     final id = '${app['id']}';
     setState(() => _running = id);
-    final r = await widget.bridge.appsRun(id);
+    final r = await widget.bridge.appsRun(id, args: args);
     if (!mounted) return;
     setState(() => _running = null);
     final error = r['error'];
@@ -1256,6 +1273,79 @@ class _AppsScreenState extends State<AppsScreen> {
     );
   }
 
+  Future<void> _runWithArgs(Map<String, dynamic> app) async {
+    final ctrl = TextEditingController();
+    final args = await showDialog<List<String>>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Run ${app['name']}'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+              labelText: 'Arguments', hintText: 'space-separated'),
+          onSubmitted: (_) =>
+              Navigator.pop(ctx, ctrl.text.trim().split(RegExp(r'\s+'))
+                  .where((s) => s.isNotEmpty).toList()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(
+                  ctx,
+                  ctrl.text.trim().split(RegExp(r'\s+'))
+                      .where((s) => s.isNotEmpty).toList()),
+              child: const Text('Run')),
+        ],
+      ),
+    );
+    if (args != null) _run(app, args: args);
+  }
+
+  Future<void> _migrate(Map<String, dynamic> app) async {
+    final id = '${app['id']}';
+    final peers = await widget.bridge.peersList();
+    if (!mounted) return;
+    final list = (peers['peers'] as List?) ?? const [];
+    if (list.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('No paired devices — `pai pair` first')));
+      return;
+    }
+    final to = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const ListTile(
+                title: Text('Migrate to…'),
+                subtitle: Text('Moves the app + its live data')),
+            for (final p in list)
+              ListTile(
+                leading: const Icon(Icons.devices),
+                title: Text('${p['name']}'),
+                subtitle: Text(
+                    "${p['platform']} · ${(p['id'] as String).substring(0, 12)}…"),
+                onTap: () => Navigator.pop(ctx, '${p['id']}'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (to == null) return;
+    final r = await widget.bridge.appsMigrate(id, to);
+    if (!mounted) return;
+    final err = r['error'];
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(err != null
+            ? 'migrate failed: $err'
+            : 'migrating — ships on next sync push')));
+    _load();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1273,11 +1363,13 @@ class _AppsScreenState extends State<AppsScreen> {
                   itemBuilder: (_, i) {
                     final a = _apps[i] as Map<String, dynamic>;
                     final id = '${a['id']}';
+                    final runnable = _runnableHere(a);
                     return ListTile(
                       leading: const Icon(Icons.widgets_outlined),
                       title: Text('${a['name']}'),
                       subtitle: Text(
-                          '$id · v${a['version']} · ${a['runtime']}',
+                          '$id · v${a['version']} · ${a['runtime']} · '
+                          '${_placement(a)}',
                           style: const TextStyle(
                               fontFamily: 'monospace', fontSize: 12)),
                       trailing: _running == id
@@ -1286,10 +1378,31 @@ class _AppsScreenState extends State<AppsScreen> {
                               height: 20,
                               child: CircularProgressIndicator(
                                   strokeWidth: 2))
-                          : IconButton(
-                              icon: const Icon(Icons.play_arrow),
-                              tooltip: 'Run on this device',
-                              onPressed: () => _run(a)),
+                          : Row(mainAxisSize: MainAxisSize.min, children: [
+                              IconButton(
+                                  icon: const Icon(Icons.play_arrow),
+                                  tooltip: runnable
+                                      ? 'Run on this device'
+                                      : 'Active on another device',
+                                  onPressed:
+                                      runnable ? () => _run(a) : null),
+                              PopupMenuButton<String>(
+                                onSelected: (v) => switch (v) {
+                                  'args' => _runWithArgs(a),
+                                  'migrate' => _migrate(a),
+                                  _ => null,
+                                },
+                                itemBuilder: (_) => [
+                                  if (runnable)
+                                    const PopupMenuItem(
+                                        value: 'args',
+                                        child: Text('Run with args…')),
+                                  const PopupMenuItem(
+                                      value: 'migrate',
+                                      child: Text('Migrate to…')),
+                                ],
+                              ),
+                            ]),
                     );
                   },
                 ),

@@ -1922,6 +1922,7 @@ dependencies = [
  "pai-notify",
  "pai-permissions",
  "pai-storage",
+ "pai-sync",
  "pai-tools",
  "pai-vision",
  "pai-voice",
