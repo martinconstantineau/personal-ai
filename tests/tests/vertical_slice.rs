@@ -39,6 +39,7 @@ fn runtime(store: Arc<Store>) -> (AgentRuntime, Arc<SqliteMemory>, Arc<pai_audit
         email: None,
         vision: None,
         notify: None,
+        apps: None,
         allowed_roots: vec![],
     };
     (agent, memory, audit)

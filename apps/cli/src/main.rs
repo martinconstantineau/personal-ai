@@ -1120,6 +1120,11 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             config: pai_notify::load_config(&cfg.data_dir)?,
             email: email.clone(),
         })),
+        apps: Some(Arc::new(pai_agent::appops::StoreAppOperator::new(
+            store.clone(),
+            cfg.data_dir.clone(),
+            device.id,
+        ))),
         allowed_roots: vec![inbox],
     };
 
@@ -4595,6 +4600,7 @@ async fn main() -> Result<()> {
                     vision: None,
                     notify: None,
                     allowed_roots: &[],
+                    apps: None,
                 };
                 // CLI user is the operator — direct invocation, still audited
                 // via the audit log write below.
@@ -4617,6 +4623,7 @@ async fn main() -> Result<()> {
                     vision: None,
                     notify: None,
                     allowed_roots: &[],
+                    apps: None,
                 };
                 let out = pai_tools::MemoryShare
                     .execute(

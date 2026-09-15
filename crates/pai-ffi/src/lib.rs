@@ -215,6 +215,11 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
                 .unwrap_or_default(),
             email: email.clone(),
         })),
+        apps: Some(Arc::new(pai_agent::appops::StoreAppOperator::new(
+            store.clone(),
+            data_dir.clone(),
+            device.id,
+        ))),
         allowed_roots: vec![inbox],
     };
 

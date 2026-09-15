@@ -39,6 +39,10 @@ pub enum Permission {
     ComputeCloud,
     /// Publish to the notification inbox (+ configured external channels).
     NotificationSend,
+    /// Mint a capability token for an installed app (guest access).
+    AppShare,
+    /// Snapshot an app's package + data into a backup.
+    AppBackup,
 }
 
 /// The engine's verdict for one action.
@@ -92,6 +96,11 @@ impl PolicyTable {
             // Inbox is local + reversible; external channels only fire
             // when the user configured them in notify.json.
             (NotificationSend, AlwaysAllow),
+            // App Operator actions are security-sensitive per PRD §6.8 —
+            // a minted capability is a working credential, and a backup
+            // copies the app's data.
+            (AppShare, AskUser),
+            (AppBackup, AskUser),
         ] {
             t.set(p, pol);
         }
@@ -141,6 +150,9 @@ pub fn all_permissions() -> Vec<Permission> {
         ComputeLocal,
         ComputeTrustedDevice,
         ComputeCloud,
+        NotificationSend,
+        AppShare,
+        AppBackup,
     ]
 }
 

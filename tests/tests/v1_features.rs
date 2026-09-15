@@ -64,6 +64,7 @@ fn runtime(store: Arc<Store>, table: PolicyTable) -> (AgentRuntime, Arc<SqliteMe
         email: None,
         vision: None,
         notify: None,
+        apps: None,
         allowed_roots: vec![],
     };
     (agent, memory)

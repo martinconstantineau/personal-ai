@@ -448,10 +448,24 @@ guest read/write handles are all shipped and pushed.
   resurrected device parks its stale `data/` on pull — same healing
   as migration (ADR-0019 amendment). `app_rescued` audit events.
 
+- [x] **V5e — App Operator tools (PRD §6.8)**: `apps.share` and
+  `apps.backup` agent tools over a new `AppOperator` surface on
+  `ToolContext` — "give Sarah access" mints a real scoped capability
+  (`ShareStore::grant`, exec/read/write/share + expiry + optional
+  device binding), "back up the database" runs `backup::create`. Both
+  default to `AskUser` (a minted token is a working credential; a
+  backup copies app data) and run through the same `PolicyEngine`
+  approval flow as every other gated tool. `StoreAppOperator` in
+  pai-agent implements it over the local store — wired into both the
+  CLI and FFI runtimes, so the Flutter agent gets it too.
+  `all_permissions()` also fixed to list every enum variant (email
+  writes, calendar, files, mic/camera/contacts were missing from the
+  policy-editor surface).
+
 - Beyond V4 (PRD-level, future tracks): stable app URLs
-  (`app.user.devices`), the App Operator agent flows
-  (§6.8 — "give Sarah access" → scoped capability), and an app's own
-  CRDT-collaborative data layer.
+  (`app.user.devices`), App Operator OAuth/diagnostics flows
+  (§6.8 — "add Google login", "why is my app broken?"), and an app's
+  own CRDT-collaborative data layer.
 
 ## Known technical debt (tracked, not hidden)
 

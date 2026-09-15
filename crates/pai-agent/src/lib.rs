@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub mod appops;
 pub mod store;
 use store::run_state_name;
 pub use store::{ConversationStore, RunStore};
@@ -185,6 +186,9 @@ pub struct AgentRuntime {
     /// Notification sink for `notify.send` — absent = tool reports
     /// unavailable. Workflows/task handlers share this sink.
     pub notify: Option<Arc<dyn pai_notify::NotifySink>>,
+    /// App Operator surface for `apps.*` tools — capability grants
+    /// and backups. Absent = those tools report unavailable.
+    pub apps: Option<Arc<dyn pai_tools::AppOperator>>,
     /// Filesystem jail for file-touching tools: canonicalized roots a tool
     /// may read inside. Empty = no filesystem reads.
     pub allowed_roots: Vec<std::path::PathBuf>,
@@ -571,6 +575,7 @@ impl AgentRuntime {
             vision: self.vision.as_deref(),
             notify: self.notify.as_deref(),
             allowed_roots: &self.allowed_roots,
+            apps: self.apps.as_deref(),
         };
         let out = tool.execute(arguments, &ctx).await.inspect_err(|e| {
             self.audit_error(run, e);
@@ -878,6 +883,7 @@ impl AgentRuntime {
             vision: self.vision.as_deref(),
             notify: self.notify.as_deref(),
             allowed_roots: &self.allowed_roots,
+            apps: self.apps.as_deref(),
         };
         match tool.execute(arguments, &ctx).await {
             Ok(out) => {

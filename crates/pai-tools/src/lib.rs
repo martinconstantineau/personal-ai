@@ -81,6 +81,30 @@ pub struct ToolContext<'a> {
     /// paths (CLI `docs ingest`) bypass this; the jail guards *model-driven*
     /// reads.
     pub allowed_roots: &'a [std::path::PathBuf],
+    /// App Operator surface for `apps.*` tools — capability grants and
+    /// backups. Absent → the tool reports unavailable.
+    pub apps: Option<&'a dyn AppOperator>,
+}
+
+/// App-operations surface injected into the tool context — the runtime
+/// wires a concrete implementation (CLI: `pai-share` + `pai-sync`
+/// over the local store). Keeping this a trait avoids pai-tools
+/// depending on the share/sync crates.
+pub trait AppOperator: Send + Sync {
+    /// Mint a capability token for `app_id` — the `apps share` flow.
+    /// `actions` are `exec|read|write|share`; `for_device` is a paired
+    /// peer id/prefix to bind the grant. Returns token JSON.
+    fn share_grant(
+        &self,
+        app_id: &str,
+        actions: &[String],
+        days: i64,
+        for_device: Option<&str>,
+    ) -> Result<serde_json::Value>;
+
+    /// Snapshot `app_id`'s package + live data into a backup.
+    /// Returns `{path, created_at}`.
+    fn backup(&self, app_id: &str) -> Result<serde_json::Value>;
 }
 
 impl<'a> ToolContext<'a> {
@@ -948,6 +972,125 @@ impl Tool for NotifySendTool {
     }
 }
 
+/// `apps.share` — App Operator (PRD §6.8): "give Sarah access" mints
+/// a scoped capability token. Approval-gated via `AppShare`.
+pub struct AppsShareTool;
+
+#[async_trait]
+impl Tool for AppsShareTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "apps.share".into(),
+            description: "Grant guest access to an installed app: mints a \
+                          signed capability token (exec/read/write/share \
+                          actions, expiry, optional device binding). The \
+                          token JSON is the credential — hand it to the \
+                          guest out-of-band."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "string"},
+                    "actions": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["exec","read","write","share"]}
+                    },
+                    "days": {"type": "integer"},
+                    "for_device": {"type": "string"}
+                },
+                "required": ["app_id"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::AppShare],
+            risk: RiskLevel::High,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let ops = ctx
+            .apps
+            .ok_or_else(|| Error::InvalidInput("no app operator surface wired".into()))?;
+        let app_id = str_arg(&args, "app_id")?;
+        let actions: Vec<String> = args["actions"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["exec".into()]);
+        let days = args["days"].as_i64().unwrap_or(30);
+        let for_device = args["for_device"].as_str();
+        let v = ops.share_grant(app_id, &actions, days, for_device)?;
+        Ok(ToolOutput {
+            summary: format!(
+                "apps.share {app_id} [{}] → token {:.8}{}",
+                actions.join(","),
+                v["token_id"].as_str().unwrap_or("?"),
+                if for_device.is_some() {
+                    " (device-bound)"
+                } else {
+                    " (bearer)"
+                }
+            ),
+            value: v,
+        })
+    }
+}
+
+/// `apps.backup` — App Operator: "back up the database" snapshots the
+/// app's package + live data into a `bkp/` pak that ships on next sync.
+pub struct AppsBackupTool;
+
+#[async_trait]
+impl Tool for AppsBackupTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "apps.backup".into(),
+            description: "Snapshot an installed app's package and data into \
+                          a backup that syncs to paired devices."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "string"}
+                },
+                "required": ["app_id"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::AppBackup],
+            risk: RiskLevel::Medium,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let ops = ctx
+            .apps
+            .ok_or_else(|| Error::InvalidInput("no app operator surface wired".into()))?;
+        let app_id = str_arg(&args, "app_id")?;
+        let v = ops.backup(app_id)?;
+        Ok(ToolOutput {
+            summary: format!(
+                "apps.backup {app_id} → {}",
+                v["path"].as_str().unwrap_or("?")
+            ),
+            value: v,
+        })
+    }
+}
+
 fn pai_storage_err(e: impl std::fmt::Display) -> Error {
     Error::Storage(e.to_string())
 }
@@ -970,6 +1113,8 @@ pub fn builtin_registry() -> ToolRegistry {
     r.register(Arc::new(EmailDeleteTool));
     r.register(Arc::new(VisionDescribe));
     r.register(Arc::new(NotifySendTool));
+    r.register(Arc::new(AppsShareTool));
+    r.register(Arc::new(AppsBackupTool));
     r
 }
 
@@ -993,6 +1138,7 @@ mod tests {
             vision: None,
             notify: None,
             allowed_roots: &[],
+            apps: None,
         };
         let out = tool
             .execute(serde_json::json!({"a":2,"b":3}), &ctx)
