@@ -324,7 +324,15 @@ Verified live (A→B over a folder transport) and in
 same trust class as the existing stt/tts/infer ops. (Lettered V4k;
 code predates V4j's landing — ordering is commit order.)
 
-- Remaining: capability sharing (`pai-share`), mobile runtime.
+**V4l done (2026-09-15):** on-device app runtime — `pai_apps_run` FFI
+export + Dart binding + Apps screen. The Flutter app (desktop and
+Android FFI) lists synced packages and runs them in the same wasmi
+sandbox as the CLI, showing stdout/stderr/exit. Full path: packages
+sync → list → run, no shell needed. Placement enforcement stays
+caller-side.
+
+- Remaining: capability sharing (`pai-share`), mobile runtime polish
+  (placement display, migrate button, run args UI).
 
 ## Known technical debt (tracked, not hidden)
 

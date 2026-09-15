@@ -204,6 +204,20 @@ enum AppsCmd {
     Run {
         /// Installed app id (see `pai apps list`).
         id: String,
+        /// Run on a paired device instead of locally — a device-id
+        /// prefix, or `any` to route to a peer announcing the op.
+        /// Installed apps sync to every paired device.
+        #[arg(long)]
+        on: Option<String>,
+        /// Transport for --on: shared sync directory.
+        #[arg(long)]
+        dir: Option<String>,
+        /// Transport for --on: relay URL.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Transport for --on: relay bearer token.
+        #[arg(long)]
+        token: Option<String>,
         /// Arguments passed to the app.
         args: Vec<String>,
     },
@@ -1736,7 +1750,66 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     Err(e) => return Err(Error::InvalidInput(e.to_string())),
                 }
             }
-            AppsCmd::Run { id, args } => {
+            AppsCmd::Run {
+                id,
+                on,
+                dir,
+                relay,
+                token,
+                args,
+            } if on.is_some() => {
+                let dev = on.as_deref().unwrap();
+                let t = sync_transport(dir, relay, token)?;
+                let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
+                    Error::Sync("no vault key — pair a device first (pai pair)".into())
+                })?;
+                let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id);
+                let to = if dev == "any" {
+                    client.find_peer("app-run").await?.ok_or_else(|| {
+                        Error::NotFound(
+                            "no paired device advertises app-run — `pai broker serve` running?"
+                                .into(),
+                        )
+                    })?
+                } else {
+                    resolve_peer(&store, dev)?
+                };
+                let payload = serde_json::json!({"id": id, "args": args})
+                    .to_string()
+                    .into_bytes();
+                let resp = client
+                    .call(to, "app-run", &payload, std::time::Duration::from_secs(120))
+                    .await?;
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| Error::Other(format!("bad app-run response: {e}")))?;
+                use base64::Engine as _;
+                let b64 = base64::engine::general_purpose::STANDARD;
+                for (key, err) in [("stdout_b64", false), ("stderr_b64", true)] {
+                    let bytes = v[key]
+                        .as_str()
+                        .and_then(|x| b64.decode(x).ok())
+                        .unwrap_or_default();
+                    if err && !bytes.is_empty() {
+                        eprint!("{}", String::from_utf8_lossy(&bytes));
+                    } else if !err {
+                        print!("{}", String::from_utf8_lossy(&bytes));
+                    }
+                }
+                let mut ev = pai_audit::event(AuditKind::AppRun, AuditOutcome::Ok);
+                ev.device = Some(device.id);
+                ev.detail = serde_json::json!({
+                    "app_id": id,
+                    "on": to.to_string(),
+                    "exit_code": v["exit_code"],
+                });
+                pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                let short = &to.to_string()[..8.min(to.to_string().len())];
+                match v["exit_code"].as_i64() {
+                    Some(c) => println!("(remote {short} — exit {c})"),
+                    None => println!("(remote {short})"),
+                }
+            }
+            AppsCmd::Run { id, args, .. } => {
                 if let Some(other) = pai_sync::backup::active_elsewhere(&store, device.id, id)? {
                     return Err(Error::InvalidInput(format!(
                         "app {id} is active on {other} — run it there, or migrate it back with `pai apps migrate {id} --to <me>`"

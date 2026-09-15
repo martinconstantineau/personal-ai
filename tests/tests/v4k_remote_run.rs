@@ -137,9 +137,7 @@ async fn remote_app_run_roundtrip() {
     let transport = FolderTransport::new(shared.clone()).unwrap();
     let vault = crypto::vault_key(&a.dir).unwrap().unwrap();
 
-    let handler = AppRunHandler {
-        dir: b.dir.clone(),
-    };
+    let handler = AppRunHandler { dir: b.dir.clone() };
     let mut server = BrokerServer::new(&transport, &vault, b.device.id, &handler);
     let client = BrokerClient::new(&transport, &vault, a.device.id);
 
@@ -180,9 +178,7 @@ async fn remote_app_run_unknown_app_errors() {
     let transport = FolderTransport::new(shared.clone()).unwrap();
     let vault = crypto::vault_key(&a.dir).unwrap().unwrap();
 
-    let handler = AppRunHandler {
-        dir: b.dir.clone(),
-    };
+    let handler = AppRunHandler { dir: b.dir.clone() };
     let mut server = BrokerServer::new(&transport, &vault, b.device.id, &handler);
     let client = BrokerClient::new(&transport, &vault, a.device.id);
 
