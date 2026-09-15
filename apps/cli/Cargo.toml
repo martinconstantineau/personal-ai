@@ -21,6 +21,7 @@ pai-connector-email.workspace = true
 rpassword.workspace = true
 pai-sync.workspace = true
 pai-broker.workspace = true
+pai-mesh.workspace = true
 pai-voice.workspace = true
 pai-vision.workspace = true
 pai-tasks.workspace = true

@@ -275,9 +275,13 @@ the default when no `oauth` block exists.
   objects carrying the whole package + signature; the receiver re-verifies
   against `sync_peers.ed_pubkey`/own device keys before `install_trusted`,
   removals ship tombstones, and live `data/` never syncs.
+- ~~LAN device mesh (`pai-mesh`)~~ — shipped: signed multicast
+  announcements (`pai sync serve --announce`), `pai mesh discover`, and
+  zero-config `pai sync run --lan`; relay auth is the pairing-derived
+  `hex(peer_key)` bearer — only paired devices can authenticate.
 - `pai_apps_list` FFI + Dart `appsList` for the dashboard.
-- Remaining: `pai-mesh` LAN discovery, capability sharing (`pai-share`),
-  backups, multi-device app placement.
+- Remaining: capability sharing (`pai-share`), backups, multi-device
+  app placement/migration, mobile runtime.
 
 ## Known technical debt (tracked, not hidden)
 

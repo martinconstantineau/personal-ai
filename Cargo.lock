@@ -1738,6 +1738,7 @@ dependencies = [
  "pai-identity",
  "pai-inference",
  "pai-memory",
+ "pai-mesh",
  "pai-models",
  "pai-notify",
  "pai-permissions",
@@ -1986,6 +1987,7 @@ dependencies = [
  "pai-identity",
  "pai-inference",
  "pai-memory",
+ "pai-mesh",
  "pai-notify",
  "pai-permissions",
  "pai-storage",
@@ -2033,6 +2035,24 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "pai-mesh"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "pai-core",
+ "pai-identity",
+ "pai-storage",
+ "pai-sync",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+ "x25519-dalek",
 ]
 
 [[package]]

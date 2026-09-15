@@ -28,24 +28,49 @@ use std::time::Duration;
 // Server side
 // ---------------------------------------------------------------------------
 
+/// Bearer-token validator — `Some` gates every request.
+type AuthCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// A bound relay server — call [`serve`] to run the request loop
 /// (blocking; spawn it on a thread for tests or run it in `main`).
 pub struct RelayServer {
     inner: tiny_http::Server,
     store: Arc<FolderTransport>,
-    token: Option<String>,
+    auth: Option<AuthCheck>,
 }
 
 /// Bind a relay storing objects under `dir`. `token: Some(t)` requires
 /// `Authorization: Bearer t` on every request.
 pub fn bind(dir: PathBuf, addr: &str, token: Option<String>) -> Result<RelayServer> {
+    let auth = token.map(|t| Arc::new(move |given: &str| given == t) as AuthCheck);
+    bind_auth(dir, addr, auth)
+}
+
+/// Bind a relay whose valid bearer set is recomputed per request —
+/// LAN mesh mode: tokens are `hex(peer_key)` for each paired peer, so
+/// pairing and unpairing take effect without restarting the relay.
+pub fn bind_dynamic(
+    dir: PathBuf,
+    addr: &str,
+    tokens: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+) -> Result<RelayServer> {
+    bind_auth(
+        dir,
+        addr,
+        Some(Arc::new(move |given: &str| {
+            tokens().iter().any(|t| t == given)
+        })),
+    )
+}
+
+fn bind_auth(dir: PathBuf, addr: &str, auth: Option<AuthCheck>) -> Result<RelayServer> {
     let store = FolderTransport::new(dir)?;
     let inner = tiny_http::Server::http(addr)
         .map_err(|e| Error::Sync(format!("relay bind {addr}: {e}")))?;
     Ok(RelayServer {
         inner,
         store: Arc::new(store),
-        token,
+        auth,
     })
 }
 
@@ -85,9 +110,9 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 /// Run the relay loop forever (blocking).
 pub fn serve(server: RelayServer) -> ! {
     let store = server.store;
-    let token = server.token;
+    let auth = server.auth;
     for mut req in server.inner.incoming_requests() {
-        let resp = handle(&store, token.as_deref(), &mut req);
+        let resp = handle(&store, auth.as_deref(), &mut req);
         let _ = req.respond(resp);
     }
     unreachable!("incoming_requests never ends")
@@ -95,19 +120,18 @@ pub fn serve(server: RelayServer) -> ! {
 
 fn handle(
     store: &FolderTransport,
-    token: Option<&str>,
+    auth: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
     req: &mut tiny_http::Request,
 ) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    // Auth gate — one flat token; ciphertext blobs aren't secret-bearing
-    // but the relay shouldn't be a free-for-all object store.
-    if let Some(t) = token {
-        let want = format!("Bearer {t}");
+    // Auth gate — ciphertext blobs aren't secret-bearing but the relay
+    // shouldn't be a free-for-all object store.
+    if let Some(check) = auth {
         let ok = req.headers().iter().any(|h| {
             h.field
                 .as_str()
                 .as_str()
                 .eq_ignore_ascii_case("authorization")
-                && h.value.as_str() == want.as_str()
+                && h.value.as_str().strip_prefix("Bearer ").is_some_and(check)
         });
         if !ok {
             return json_response(401, serde_json::json!({"error": "unauthorized"}));

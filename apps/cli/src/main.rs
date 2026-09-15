@@ -100,6 +100,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SyncCmd,
     },
+    /// LAN discovery for paired devices (`pai sync serve --announce`
+    /// on the other end).
+    Mesh {
+        #[command(subcommand)]
+        cmd: MeshCmd,
+    },
     /// Trusted-device compute: serve ops to paired peers or call one.
     Broker {
         #[command(subcommand)]
@@ -460,6 +466,17 @@ enum CircleCmd {
 }
 
 #[derive(Subcommand)]
+enum MeshCmd {
+    /// Listen for signed LAN announcements and list the paired devices
+    /// serving a sync relay right now.
+    Discover {
+        /// Seconds to listen.
+        #[arg(long, default_value = "3")]
+        timeout_secs: u64,
+    },
+}
+
+#[derive(Subcommand)]
 enum SyncCmd {
     /// Seal + push local changes to a shared folder or relay.
     Push {
@@ -470,6 +487,12 @@ enum SyncCmd {
         /// Bearer token for the relay (or PAI_SYNC_TOKEN).
         #[arg(long)]
         token: Option<String>,
+        /// Find a paired peer's relay on the LAN (no --dir/--relay).
+        #[arg(long)]
+        lan: bool,
+        /// Peer device-id prefix to pick when several announce.
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Pull + apply remote changes from a shared folder or relay.
     Pull {
@@ -479,6 +502,12 @@ enum SyncCmd {
         relay: Option<String>,
         #[arg(long)]
         token: Option<String>,
+        /// Find a paired peer's relay on the LAN (no --dir/--relay).
+        #[arg(long)]
+        lan: bool,
+        /// Peer device-id prefix to pick when several announce.
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Push then pull in one pass.
     Run {
@@ -488,6 +517,12 @@ enum SyncCmd {
         relay: Option<String>,
         #[arg(long)]
         token: Option<String>,
+        /// Find a paired peer's relay on the LAN (no --dir/--relay).
+        #[arg(long)]
+        lan: bool,
+        /// Peer device-id prefix to pick when several announce.
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Rotate the vault key and push sealed rotation objects to every
     /// paired peer — they adopt on their next sync pull/run. Use after
@@ -508,6 +543,12 @@ enum SyncCmd {
         relay: Option<String>,
         #[arg(long)]
         token: Option<String>,
+        /// Find a paired peer's relay on the LAN (no --dir/--relay).
+        #[arg(long)]
+        lan: bool,
+        /// Peer device-id prefix to pick when several announce.
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Run a sync relay server — stores ciphertext objects under --dir.
     /// Put it behind TLS (reverse proxy) off localhost; the blobs are
@@ -520,6 +561,11 @@ enum SyncCmd {
         /// Require `Authorization: Bearer <token>` (or PAI_SYNC_TOKEN).
         #[arg(long)]
         token: Option<String>,
+        /// Mesh mode: broadcast a signed LAN announcement and accept
+        /// peer-key bearer tokens (no --token needed). Bind 0.0.0.0 to
+        /// serve other devices on the LAN.
+        #[arg(long)]
+        announce: bool,
     },
 }
 
@@ -1189,6 +1235,47 @@ fn sync_transport(
     }
 }
 
+/// Discover a paired peer's relay on the LAN and build an
+/// authenticated transport to it: bearer token = hex(peer_key), the
+/// pairing-derived secret — no shared token file needed.
+fn lan_transport(
+    to: &Option<String>,
+    store: &Store,
+    ids: &pai_identity::IdentityStore,
+    device: &Device,
+    data_dir: &std::path::Path,
+) -> Result<Box<dyn pai_sync::SyncTransport>> {
+    use pai_sync::crypto;
+    let bind = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        pai_mesh::MULTICAST_PORT,
+    );
+    let sock = pai_mesh::bind_listener(bind, Some(pai_mesh::MULTICAST_GROUP))?;
+    let found = pai_mesh::discover(&sock, std::time::Duration::from_secs(3));
+    let paired = pai_mesh::paired_announcements(store, ids, found)?;
+    let target = match to {
+        Some(prefix) => paired
+            .iter()
+            .find(|p| p.peer.device_id.to_string().starts_with(prefix.as_str())),
+        None => paired.first(),
+    }
+    .ok_or_else(|| {
+        Error::NotFound(
+            "no paired mesh peer announcing — run `pai sync serve --announce` on it".into(),
+        )
+    })?;
+    let agree = crypto::agreement_key(device.id, data_dir)?;
+    let token = pai_mesh::token_for(&agree.secret, &target.peer);
+    println!(
+        "mesh: {} ({}) at http://{}",
+        target.peer.name, target.peer.device_id, target.relay_addr
+    );
+    Ok(Box::new(pai_sync::relay::RelayTransport::new(
+        format!("http://{}", target.relay_addr),
+        Some(token),
+    )))
+}
+
 /// Match a device-id prefix against paired peers.
 fn resolve_peer(store: &Store, prefix: &str) -> Result<DeviceId> {
     use pai_sync::pair;
@@ -1527,6 +1614,32 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 }
             }
         },
+        Cmd::Mesh { cmd } => match cmd {
+            MeshCmd::Discover { timeout_secs } => {
+                let bind = std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    pai_mesh::MULTICAST_PORT,
+                );
+                let sock = pai_mesh::bind_listener(bind, Some(pai_mesh::MULTICAST_GROUP))?;
+                let found =
+                    pai_mesh::discover(&sock, std::time::Duration::from_secs(*timeout_secs));
+                let paired = pai_mesh::paired_announcements(&store, &ids, found.clone())?;
+                for p in &paired {
+                    println!(
+                        "  {}  {:<20} {:<10} relay http://{}",
+                        p.peer.device_id, p.peer.name, p.peer.platform, p.relay_addr
+                    );
+                }
+                println!(
+                    "{} paired device(s) announcing ({} datagram(s) ignored)",
+                    paired.len(),
+                    found.len() - paired.len()
+                );
+                if !paired.is_empty() {
+                    println!("sync now: `pai sync run --lan`");
+                }
+            }
+        },
         Cmd::Pair { cmd } => match cmd {
             PairCmd::Offer { out } => {
                 let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
@@ -1589,10 +1702,32 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
         },
         Cmd::Circle { cmd } => run_circle_cmds(&store, device.id, &cfg, cmd).await?,
         Cmd::Sync { cmd } => match cmd {
-            SyncCmd::Push { dir, relay, token }
-            | SyncCmd::Pull { dir, relay, token }
-            | SyncCmd::Run { dir, relay, token } => {
-                let t = sync_transport(dir, relay, token)?;
+            SyncCmd::Push {
+                dir,
+                relay,
+                token,
+                lan,
+                to,
+            }
+            | SyncCmd::Pull {
+                dir,
+                relay,
+                token,
+                lan,
+                to,
+            }
+            | SyncCmd::Run {
+                dir,
+                relay,
+                token,
+                lan,
+                to,
+            } => {
+                let t = if *lan {
+                    lan_transport(to, &store, &ids, &device, &cfg.data_dir)?
+                } else {
+                    sync_transport(dir, relay, token)?
+                };
                 let kind = t.id().to_string();
                 // Adopt any pending vault rotation first — objects sealed
                 // under the new vault need the new key before pull.
@@ -1647,11 +1782,21 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     pai_sync::rotate::vault_epoch(&cfg.data_dir)
                 );
             }
-            SyncCmd::Status { dir, relay, token } => {
+            SyncCmd::Status {
+                dir,
+                relay,
+                token,
+                lan,
+                to,
+            } => {
                 let peers = pair::list_peers(&store)?;
                 println!("{} paired device(s)", peers.len());
-                if dir.is_some() || relay.is_some() {
-                    let t = sync_transport(dir, relay, token)?;
+                if dir.is_some() || relay.is_some() || *lan {
+                    let t = if *lan {
+                        lan_transport(to, &store, &ids, &device, &cfg.data_dir)?
+                    } else {
+                        sync_transport(dir, relay, token)?
+                    };
                     let metas = t.list().await?;
                     let tombstones = metas.iter().filter(|m| m.tombstone).count();
                     println!(
@@ -1662,21 +1807,71 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     );
                 }
             }
-            SyncCmd::Serve { dir, addr, token } => {
-                let token = token
-                    .clone()
-                    .or_else(|| std::env::var("PAI_SYNC_TOKEN").ok());
-                let srv = pai_sync::relay::bind(dir.into(), addr, token.clone())?;
-                println!(
-                    "relay on http://{} storing under {dir} {}",
-                    srv.addr(),
-                    if token.is_some() {
-                        "(token required)"
-                    } else {
-                        "(NO AUTH — localhost use only)"
+            SyncCmd::Serve {
+                dir,
+                addr,
+                token,
+                announce,
+            } => {
+                if *announce {
+                    // Mesh mode: peer-key bearer auth + signed multicast
+                    // announcement. No token file — only paired devices
+                    // can compute hex(peer_key).
+                    let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
+                    let st = store.clone();
+                    let tokens = std::sync::Arc::new(move || {
+                        pai_mesh::relay_tokens(&st, &agree.secret).unwrap_or_default()
+                    });
+                    let srv = pai_sync::relay::bind_dynamic(dir.into(), addr, tokens)?;
+                    let port: u16 = srv
+                        .addr()
+                        .rsplit(':')
+                        .next()
+                        .and_then(|p| p.parse().ok())
+                        .ok_or_else(|| Error::Sync("bad relay addr".into()))?;
+                    {
+                        let (st2, dev2, kd2) = (store.clone(), device.clone(), key_dir.clone());
+                        std::thread::spawn(move || {
+                            let ids2 = pai_identity::IdentityStore::new(st2);
+                            let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else {
+                                return;
+                            };
+                            let _ = sock.set_multicast_loop_v4(true);
+                            let dest = std::net::SocketAddr::new(
+                                std::net::IpAddr::V4(pai_mesh::MULTICAST_GROUP),
+                                pai_mesh::MULTICAST_PORT,
+                            );
+                            loop {
+                                if let Ok(a) = pai_mesh::make_announcement(&ids2, &dev2, &kd2, port)
+                                {
+                                    let _ = pai_mesh::send_announcement(&sock, &a, dest);
+                                }
+                                std::thread::sleep(std::time::Duration::from_secs(2));
+                            }
+                        });
                     }
-                );
-                pai_sync::relay::serve(srv);
+                    println!(
+                        "mesh relay on http://{} storing under {dir} \
+                         — announcing to paired devices (peer-key auth)",
+                        srv.addr()
+                    );
+                    pai_sync::relay::serve(srv);
+                } else {
+                    let token = token
+                        .clone()
+                        .or_else(|| std::env::var("PAI_SYNC_TOKEN").ok());
+                    let srv = pai_sync::relay::bind(dir.into(), addr, token.clone())?;
+                    println!(
+                        "relay on http://{} storing under {dir} {}",
+                        srv.addr(),
+                        if token.is_some() {
+                            "(token required)"
+                        } else {
+                            "(NO AUTH — localhost use only)"
+                        }
+                    );
+                    pai_sync::relay::serve(srv);
+                }
             }
         },
         Cmd::Broker { cmd } => match cmd {
@@ -2896,6 +3091,7 @@ async fn main() -> Result<()> {
             | Cmd::Describe { .. }
             | Cmd::Deploy { .. }
             | Cmd::Apps { .. }
+            | Cmd::Mesh { .. }
     ) {
         return run_sync_cmds(&cli).await;
     }
@@ -3340,7 +3536,8 @@ async fn main() -> Result<()> {
         | Cmd::Email { .. }
         | Cmd::Describe { .. }
         | Cmd::Deploy { .. }
-        | Cmd::Apps { .. } => {
+        | Cmd::Apps { .. }
+        | Cmd::Mesh { .. } => {
             unreachable!("handled before build")
         }
     }

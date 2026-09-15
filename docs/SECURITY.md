@@ -87,6 +87,14 @@ Emergency/manual commits by maintainers follow the same rule — no
   ciphertext-only at the sync layer, but a compromised connector config
   could send plaintext HTTP. Tighten to `networkSecurityConfig` with a
   domain allowlist before shipping broadly.
+- **Mesh announcements are signed but visible**: `sync serve --announce`
+  multicasts a signed datagram (device id, name, platform, relay port,
+  timestamp) to `239.255.71.77:47677` — any LAN host sees that a device
+  is present. Forged announcements fail Ed25519 verification against
+  `sync_peers` and are dropped. Relay auth uses the pairing-derived
+  `hex(peer_key)` bearer — replayable on the LAN, but only a paired
+  device can mint it, and the objects it protects are sealed anyway.
+  Freshness window (±15 min) bounds replay of stale datagrams.
 - Android `RECORD_AUDIO` is declared for voice capture; the runtime
   grant is still required, and there is no in-app permission-request
   flow yet — voice capture simply fails until granted in system

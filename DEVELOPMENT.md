@@ -106,6 +106,13 @@ Live `data/` never syncs — recipients provision it fresh and upgrades
 preserve it. Coverage: `cargo test -p pai-integration-tests --test
 v4d_app_sync`.
 
+LAN sync needs no --relay flag: `pai sync serve --announce` broadcasts a
+signed multicast announcement and authenticates callers by the
+pairing-derived `hex(peer_key)` bearer token; `pai mesh discover` lists
+announcing paired devices and `pai sync run|push|pull|status --lan`
+picks one and syncs. Coverage: `cargo test -p pai-integration-tests
+--test v4e_mesh`.
+
 Model sources: `pai models install` accepts a catalog **slug** or an
 `hf://<owner>/<repo>/<file.gguf>[@revision]` reference — resolved against
 the Hugging Face hub (size + sha256 from `x-linked-*` headers, verified on
