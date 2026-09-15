@@ -175,13 +175,45 @@ pub fn installed_dir(data_dir: &Path, app_id: &str) -> PathBuf {
 /// (`{"stdout_b64","stderr_b64","exit_code","fuel"}`). Lives in the
 /// crate (not the CLI) so it's testable and the binary's handler stays
 /// a thin guard + delegation.
-pub fn app_run_op(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<Vec<u8>> {
+/// Run an installed app and record the run log — shared by the local
+/// CLI path and the broker/guest `app-run` op so every run lands in
+/// `apps/<id>/logs/` regardless of caller.
+pub fn run_logged(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<RunOutput> {
     let reg = crate::AppRegistry::new(data_dir);
     let pkg = reg
         .get(app_id)?
         .ok_or_else(|| AppError::Layout(format!("app {app_id} not installed")))?;
     let dir = installed_dir(data_dir, app_id);
-    let out = pkg.run(&dir, args, RunLimits::default())?;
+    let entry = |out: Result<&RunOutput, &AppError>| crate::logs::RunLog {
+        at: pai_core::now().to_rfc3339(),
+        app_id: app_id.into(),
+        args: args.to_vec(),
+        exit_code: out.ok().and_then(|o| o.exit_code),
+        fuel: out.map(|o| o.fuel_consumed).unwrap_or(0),
+        trap: out.err().map(|e| e.to_string()),
+        stdout: out
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default(),
+        stderr: out
+            .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+            .unwrap_or_default(),
+    };
+    match pkg.run(&dir, args, RunLimits::default()) {
+        Ok(out) => {
+            crate::logs::record(data_dir, app_id, &entry(Ok(&out)));
+            Ok(out)
+        }
+        // A trapped run is exactly what "why is my app broken" needs —
+        // record the error text, then propagate.
+        Err(e) => {
+            crate::logs::record(data_dir, app_id, &entry(Err(&e)));
+            Err(e)
+        }
+    }
+}
+
+pub fn app_run_op(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<Vec<u8>> {
+    let out = run_logged(data_dir, app_id, args)?;
     use base64::Engine;
     Ok(serde_json::json!({
         "stdout_b64": base64::engine::general_purpose::STANDARD.encode(&out.stdout),

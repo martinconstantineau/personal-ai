@@ -1799,6 +1799,7 @@ dependencies = [
  "pai-core",
  "pai-identity",
  "pai-storage",
+ "rand_core 0.6.4",
  "rusqlite",
  "serde",
  "serde_json",

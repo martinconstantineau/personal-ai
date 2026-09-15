@@ -220,6 +220,18 @@ impl AppOperator for StoreAppOperator {
             shares[k] = serde_json::json!(shares[k].as_u64().unwrap_or(0) + 1);
         }
 
+        // Run-log rollup: how many runs are on disk + the last one's
+        // outcome and stderr tail — the actual failure text.
+        let run_logs = pai_apps::logs::tail(&self.data_dir, app_id, 1);
+        let last = run_logs.first();
+        let logs_rollup = serde_json::json!({
+            "count": pai_apps::logs::tail(&self.data_dir, app_id, pai_apps::logs::LOG_KEEP).len(),
+            "last_at": last.map(|l| l.at.clone()),
+            "last_exit_code": last.and_then(|l| l.exit_code),
+            "last_trap": last.and_then(|l| l.trap.clone()),
+            "last_stderr_tail": last.map(|l| pai_apps::logs::tail_str(&l.stderr, 5, 2048)),
+        });
+
         // Recent audit events for this app — the "what went wrong" trail.
         let recent: Vec<_> = pai_audit::AuditLog::new(self.store.clone())
             .recent(200)
@@ -253,8 +265,17 @@ impl AppOperator for StoreAppOperator {
             },
             "backups": backups,
             "shares": shares,
+            "logs": logs_rollup,
             "recent_events": recent,
         }))
+    }
+
+    fn logs(&self, app_id: &str, limit: usize) -> Result<serde_json::Value> {
+        let entries: Vec<_> = pai_apps::logs::tail(&self.data_dir, app_id, limit)
+            .into_iter()
+            .map(|l| serde_json::to_value(l).unwrap_or_default())
+            .collect();
+        Ok(serde_json::json!({"app_id": app_id, "entries": entries}))
     }
 }
 

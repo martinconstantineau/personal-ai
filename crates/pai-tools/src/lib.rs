@@ -110,6 +110,10 @@ pub trait AppOperator: Send + Sync {
     /// storage, backups, share tokens, and recent audit events
     /// (PRD §6.8: "why is my app broken?").
     fn status(&self, app_id: &str) -> Result<serde_json::Value>;
+
+    /// Recent run logs for `app_id` (newest first, capped by `limit`)
+    /// — exit codes, traps, and captured stdout/stderr.
+    fn logs(&self, app_id: &str, limit: usize) -> Result<serde_json::Value>;
 }
 
 impl<'a> ToolContext<'a> {
@@ -1164,6 +1168,55 @@ impl Tool for AppsStatusTool {
     }
 }
 
+/// `apps.logs` — the concrete evidence behind `apps.status`: recent
+/// runs' exit codes, traps, and captured stdout/stderr tails.
+pub struct AppsLogsTool;
+
+#[async_trait]
+impl Tool for AppsLogsTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "apps.logs".into(),
+            description: "Read an app's recent run logs: exit code, trap \
+                          message, and captured stdout/stderr for each of \
+                          the last runs. Logs are local to the device that \
+                          ran the app and rotate after 20 entries."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "string"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["app_id"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::AppInspect],
+            risk: RiskLevel::Low,
+            execution: ExecutionMode::Local,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let ops = ctx
+            .apps
+            .ok_or_else(|| Error::InvalidInput("no app operator surface wired".into()))?;
+        let app_id = str_arg(&args, "app_id")?;
+        let limit = args["limit"].as_u64().unwrap_or(5).min(20) as usize;
+        let v = ops.logs(app_id, limit)?;
+        let n = v["entries"].as_array().map(|a| a.len()).unwrap_or(0);
+        Ok(ToolOutput {
+            summary: format!("apps.logs {app_id} → {n} entries"),
+            value: v,
+        })
+    }
+}
+
 fn pai_storage_err(e: impl std::fmt::Display) -> Error {
     Error::Storage(e.to_string())
 }
@@ -1189,6 +1242,7 @@ pub fn builtin_registry() -> ToolRegistry {
     r.register(Arc::new(AppsShareTool));
     r.register(Arc::new(AppsBackupTool));
     r.register(Arc::new(AppsStatusTool));
+    r.register(Arc::new(AppsLogsTool));
     r
 }
 

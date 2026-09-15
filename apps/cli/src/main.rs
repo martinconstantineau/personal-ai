@@ -283,8 +283,16 @@ enum AppsCmd {
     /// Diagnose an installed app: install state, placement, storage,
     /// backups, share tokens, and recent audit outcomes.
     Status {
-        /// Installed app id (see ).
+        /// Installed app id (see `pai apps list`).
         id: String,
+    },
+    /// Show an app's recent run logs (exit code, trap, stdout/stderr).
+    Logs {
+        /// Installed app id.
+        id: String,
+        /// How many entries to show (newest first, max 20).
+        #[arg(short = 'n', long, default_value = "5")]
+        limit: usize,
     },
     /// Issue a capability token for an installed app — a signed,
     /// expiring grant a guest device uses with `pai apps run --cap`.
@@ -2075,15 +2083,13 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                         "app {id} is active on {other} — run it there, or migrate it back with `pai apps migrate {id} --to <me>`"
                     )));
                 }
-                let reg = pai_apps::AppRegistry::new(&cfg.data_dir);
-                let pkg = reg
-                    .get(id)
-                    .map_err(|e| Error::InvalidInput(e.to_string()))?
-                    .ok_or_else(|| Error::NotFound(format!("app {id}")))?;
-                let app_dir = pai_apps::installed_dir(&cfg.data_dir, id);
-                let out = pkg
-                    .run(&app_dir, args, pai_apps::RunLimits::default())
-                    .map_err(|e| Error::Other(e.to_string()))?;
+                let out = pai_apps::run_logged(&cfg.data_dir, id, args).map_err(|e| {
+                    if e.to_string().contains("not installed") {
+                        Error::NotFound(format!("app {id}"))
+                    } else {
+                        Error::Other(e.to_string())
+                    }
+                })?;
                 print!("{}", String::from_utf8_lossy(&out.stdout));
                 if !out.stderr.is_empty() {
                     eprint!("{}", String::from_utf8_lossy(&out.stderr));
@@ -2328,6 +2334,24 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     v["shares"]["expired"].as_u64().unwrap_or(0),
                     v["shares"]["revoked"].as_u64().unwrap_or(0)
                 );
+                let lg = &v["logs"];
+                print!("run logs: {}", lg["count"].as_u64().unwrap_or(0));
+                match lg["last_at"].as_str() {
+                    None => println!(),
+                    Some(at) => {
+                        let last = match lg["last_trap"].as_str() {
+                            Some(t) => format!("last {at} — trap: {t}"),
+                            None => format!(
+                                "last {at} — exit {}",
+                                lg["last_exit_code"]
+                                    .as_i64()
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "ok".into())
+                            ),
+                        };
+                        println!(" ({last})");
+                    }
+                }
                 let events = v["recent_events"].as_array().cloned().unwrap_or_default();
                 if events.is_empty() {
                     println!("recent events: none");
@@ -2340,6 +2364,29 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                             e["kind"].as_str().unwrap_or("?"),
                             e["outcome"].as_str().unwrap_or("?")
                         );
+                    }
+                }
+            }
+            AppsCmd::Logs { id, limit } => {
+                let entries = pai_apps::logs::tail(&cfg.data_dir, id, (*limit).min(20));
+                if entries.is_empty() {
+                    println!("{id}: no run logs (apps/<id>/logs/ is empty — has it run?)");
+                }
+                for e in entries {
+                    let outcome = match (e.trap, e.exit_code) {
+                        (Some(t), _) => format!("trap: {t}"),
+                        (None, Some(c)) => format!("exit {c}"),
+                        (None, None) => "ok".into(),
+                    };
+                    println!("── {} · {outcome} · fuel {}", e.at, e.fuel);
+                    if !e.stdout.is_empty() {
+                        print!("{}", e.stdout);
+                        if !e.stdout.ends_with('\n') {
+                            println!();
+                        }
+                    }
+                    if !e.stderr.is_empty() {
+                        eprintln!("--- stderr ---\n{}", e.stderr);
                     }
                 }
             }

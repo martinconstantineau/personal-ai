@@ -473,6 +473,18 @@ guest read/write handles are all shipped and pushed.
   `ExecutionMode::Local`. `StoreAppOperator::status` is the single
   impl — CLI, FFI, and the agent all answer from the same query.
 
+- [x] **V5g — app run logs**: every `app-run` — local `apps run`,
+  broker-served remote, guest — now writes `apps/<id>/logs/<ts>.json`
+  (exit code / trap message / stdout / stderr / fuel), newest 20 kept.
+  Logs are local-only by design: they never sync, never ride `bkp/`
+  paks (`snapshot_data` walks `data/` only), and aren't a sandbox
+  preopen. Surfaces: `pai apps logs <id> [-n]`, the `apps.logs` agent
+  tool (`AppInspect`), and a `logs` rollup inside `apps.status` —
+  "why is my app broken?" now reaches the actual stderr, not just the
+  audit outcome. `run_logged` in pai-apps is the single funnel, so all
+  callers (CLI arm, `app_run_op`, guest ops) record identically;
+  trapped runs log the error text before propagating.
+
 - Beyond V4 (PRD-level, future tracks): stable app URLs
   (`app.user.devices`), App Operator OAuth config
   (§6.8 — "add Google login"), and an app's own

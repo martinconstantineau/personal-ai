@@ -187,6 +187,13 @@ impl AppOperator for StubOps {
             "recent_events": [{"outcome": "ok"}, {"outcome": "error"}],
         }))
     }
+
+    fn logs(&self, app_id: &str, _limit: usize) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "app_id": app_id,
+            "entries": [{"exit_code": 0}, {"trap": "oom"}],
+        }))
+    }
 }
 
 #[tokio::test]
@@ -426,4 +433,56 @@ async fn store_operator_status_rolls_up_state() {
     let ghost = ops.status("ghost-app").unwrap();
     assert_eq!(ghost["installed"], false);
     assert_eq!(ghost["backups"]["count"], 0);
+}
+
+#[tokio::test]
+async fn logs_tool_returns_entries() {
+    let ops = StubOps::new();
+    let c = ctx(Some(&ops));
+    let tool = pai_tools::AppsLogsTool;
+    let d = tool.descriptor();
+    assert_eq!(d.required_permissions, vec![Permission::AppInspect]);
+    assert_eq!(d.risk, RiskLevel::Low);
+    assert_eq!(d.execution, ExecutionMode::Local);
+    let out = tool
+        .execute(serde_json::json!({"app_id":"notes","limit":3}), &c)
+        .await
+        .unwrap();
+    assert_eq!(out.value["entries"].as_array().unwrap().len(), 2);
+    assert!(out.summary.contains("2 entries"));
+    let no_ops = ctx(None);
+    assert!(tool
+        .execute(serde_json::json!({"app_id":"x"}), &no_ops)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("no app operator surface wired"));
+}
+
+/// Running through `app_run_op` (what the broker/guest op and now the
+/// local `apps run` arm call) writes a log the operator can read back —
+/// including a trap record when the wasm faults.
+#[tokio::test]
+async fn store_operator_sees_run_logs() {
+    let a = dev("a");
+    let app_id = deploy(&a);
+    let ops = StoreAppOperator::new(a.store.clone(), a.dir.clone(), a.device.id);
+
+    // The deployed manifest's app.wasm is a bare header — it has no
+    // _start/main/run, so the run traps and the log records the trap.
+    let e = pai_apps::app_run_op(&a.dir, &app_id, &[]).unwrap_err();
+    assert!(e.to_string().contains("no _start"));
+
+    let v = ops.logs(&app_id, 5).unwrap();
+    let entries = v["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0]["trap"].as_str().unwrap().contains("no _start"));
+
+    // And status rolls it up as the last run.
+    let st = ops.status(&app_id).unwrap();
+    assert_eq!(st["logs"]["count"], 1);
+    assert!(st["logs"]["last_trap"]
+        .as_str()
+        .unwrap()
+        .contains("no _start"));
 }

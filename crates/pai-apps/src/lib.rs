@@ -16,10 +16,12 @@
 //! checks `signature.bin` against the signing device's public key.
 //! Unverified packages are rejected.
 
+pub mod logs;
 mod run;
 
 pub use run::{
-    app_read_op, app_run_op, app_write_op, installed_dir, RunLimits, RunOutput, APP_IO_MAX,
+    app_read_op, app_run_op, app_write_op, installed_dir, run_logged, RunLimits, RunOutput,
+    APP_IO_MAX,
 };
 
 use pai_core::*;
