@@ -184,7 +184,7 @@ async fn backup_syncs_and_restores_state() {
 
     let app_id = deploy(&a, &signed_pkg(&a.dir, &a));
     seed_note(&a, &app_id, "from-a");
-    backup::create(&a.store, &a.dir, a.device.id, &app_id).unwrap();
+    backup::create(&a.store, &a.dir, a.device.id, &app_id, None).unwrap();
     eng(&a, &shared).push().await.unwrap();
 
     let out = eng(&b, &shared).pull().await.unwrap();
@@ -197,7 +197,7 @@ async fn backup_syncs_and_restores_state() {
 
     // The synced install provisioned an empty db; restore swaps in A's.
     assert!(note_vals(&b, &app_id).is_empty());
-    let p = backup::restore(&b.store, &b.dir, &app_id, None).unwrap();
+    let p = backup::restore(&b.store, &b.dir, b.device.id, &app_id, None).unwrap();
     assert_eq!(p.writer, a.device.id.to_string());
     assert_eq!(note_vals(&b, &app_id), vec!["from-a".to_string()]);
 }
@@ -212,7 +212,7 @@ async fn restore_rebuilds_app_from_pak_alone() {
 
     let app_id = deploy(&a, &signed_pkg(&a.dir, &a));
     seed_note(&a, &app_id, "rescue-me");
-    backup::create(&a.store, &a.dir, a.device.id, &app_id).unwrap();
+    backup::create(&a.store, &a.dir, a.device.id, &app_id, None).unwrap();
     eng(&a, &shared).push().await.unwrap();
     eng(&b, &shared).pull().await.unwrap();
 
@@ -220,7 +220,7 @@ async fn restore_rebuilds_app_from_pak_alone() {
     assert!(AppRegistry::new(&b.dir).remove(&app_id).unwrap());
     assert!(!app_dir(&b, &app_id).exists());
 
-    backup::restore(&b.store, &b.dir, &app_id, None).unwrap();
+    backup::restore(&b.store, &b.dir, b.device.id, &app_id, None).unwrap();
     assert!(app_dir(&b, &app_id).join("manifest.toml").is_file());
     assert_eq!(note_vals(&b, &app_id), vec!["rescue-me".to_string()]);
 }
@@ -234,7 +234,7 @@ async fn received_backup_never_repushes() {
     pair_devices(&b, &a);
 
     let app_id = deploy(&a, &signed_pkg(&a.dir, &a));
-    backup::create(&a.store, &a.dir, a.device.id, &app_id).unwrap();
+    backup::create(&a.store, &a.dir, a.device.id, &app_id, None).unwrap();
     eng(&a, &shared).push().await.unwrap();
     eng(&b, &shared).pull().await.unwrap();
     assert!(pak_path(&b, &app_id, &a.device.id).is_file());
@@ -260,7 +260,7 @@ async fn backup_delete_propagates_tombstone() {
     pair_devices(&b, &a);
 
     let app_id = deploy(&a, &signed_pkg(&a.dir, &a));
-    backup::create(&a.store, &a.dir, a.device.id, &app_id).unwrap();
+    backup::create(&a.store, &a.dir, a.device.id, &app_id, None).unwrap();
     eng(&a, &shared).push().await.unwrap();
     eng(&b, &shared).pull().await.unwrap();
     assert!(pak_path(&b, &app_id, &a.device.id).is_file());
@@ -330,7 +330,7 @@ async fn unpaired_writer_backup_is_dropped() {
     pair_devices(&b, &a);
 
     let app_id = deploy(&a, &signed_pkg(&a.dir, &a));
-    backup::create(&a.store, &a.dir, a.device.id, &app_id).unwrap();
+    backup::create(&a.store, &a.dir, a.device.id, &app_id, None).unwrap();
     eng(&a, &shared).push().await.unwrap();
     eng(&b, &shared).pull().await.unwrap();
     let first = backup_row(&b, &app_id, &a.device.id.to_string()).unwrap().0;
@@ -348,7 +348,7 @@ async fn unpaired_writer_backup_is_dropped() {
 
     // A re-snapshots (newer created_at) and ships it.
     std::thread::sleep(std::time::Duration::from_millis(2));
-    backup::create(&a.store, &a.dir, a.device.id, &app_id).unwrap();
+    backup::create(&a.store, &a.dir, a.device.id, &app_id, None).unwrap();
     eng(&a, &shared).push().await.unwrap();
     eng(&b, &shared).pull().await.unwrap();
 

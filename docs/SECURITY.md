@@ -103,6 +103,16 @@ Emergency/manual commits by maintainers follow the same rule — no
 - **Restore re-verifies, doesn't re-trust**: a pak's embedded package
   must still signature-verify against own/peer keys at `apps restore`
   time — a tampered backup on disk fails closed rather than installing.
+- **Migration is the one inline restore**: a `bkp/` object flagged
+  `migrate_to=<me>` restores package + data during pull — an explicit,
+  authenticated hand-off from a paired writer whose placement update
+  landed first. `migrate_to` naming any other device stores the pak
+  without touching live state, and an unpaired/forged writer is
+  dropped before the flag is read. Inactive devices refuse `run`,
+  `backup`, and `restore` so two devices can't fork live state.
+- **Parked app data is plaintext residue**: deactivation renames
+  `data/` to `apps/.<id>.data.inactive-<ts>` — recoverable, but the
+  same cleartext exposure as live `data/` until manually removed.
 - Android `RECORD_AUDIO` is declared for voice capture; the runtime
   grant is still required, and there is no in-app permission-request
   flow yet — voice capture simply fails until granted in system

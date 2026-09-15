@@ -864,6 +864,25 @@ impl AppRegistry {
         Ok(())
     }
 
+    /// Move a live `data/` aside to `apps/.<id>.data.inactive-<ts>` —
+    /// the source half of a migration, or the deactivation applied
+    /// when a peer claims active_device. The dir is recoverable, not
+    /// deleted: merge it back manually if the migrate is cancelled.
+    /// Returns the rescue path when data existed.
+    pub fn deactivate_data(&self, app_id: &str) -> AppResult<Option<PathBuf>> {
+        check_app_id(app_id)?;
+        let live = self.root.join(app_id).join("data");
+        if !live.is_dir() {
+            return Ok(None);
+        }
+        let rescue = self.root.join(format!(
+            ".{app_id}.data.inactive-{}",
+            pai_core::now().format("%Y%m%d%H%M%S")
+        ));
+        std::fs::rename(&live, &rescue)?;
+        Ok(Some(rescue))
+    }
+
     /// List installed apps as `(app_id, manifest)`.
     pub fn list(&self) -> AppResult<Vec<(String, AppManifest)>> {
         let mut out = Vec::new();
@@ -873,6 +892,15 @@ impl AppRegistry {
         for e in std::fs::read_dir(&self.root)? {
             let dir = e?.path();
             if !dir.is_dir() {
+                continue;
+            }
+            // Dot-dirs are internal state (parked `.inactive-*` data),
+            // never packages.
+            if dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'))
+            {
                 continue;
             }
             match AppPackage::load(&dir) {

@@ -305,6 +305,15 @@ skeleton); `pai apps build <dir> [--sign]` compiles `wasm32-wasip1`
 (or validates an existing package dir) into a deployable package.
 init → build → deploy → run works end-to-end.
 
+**V4j done (2026-09-15):** app placement + migration — schema v12
+`apps.active_device` names the one device running an app's live
+`data/` (`NULL` = legacy everywhere). `pai apps migrate <id> --to
+<peer>` snapshots into a migrate-flagged `bkp/` object, hands over
+placement via the `app/` object, and parks local `data/`; the target
+restores inline on pull (rank order: package, then restore), everyone
+else sheds stale state. `run`/`backup`/`restore` refuse on inactive
+devices — no divergent instances. ADR 0019.
+
 **V4k done (2026-09-15):** remote app execution — `pai apps run --on
 <peer|any>` sends the run over the sealed broker transport (`app-run`
 op → `pai_apps::app_run_op`); the peer runs it in the same wasmi
@@ -315,8 +324,7 @@ Verified live (A→B over a folder transport) and in
 same trust class as the existing stt/tts/infer ops. (Lettered V4k;
 code predates V4j's landing — ordering is commit order.)
 
-- Remaining: capability sharing (`pai-share`), multi-device
-  app placement/migration, mobile runtime.
+- Remaining: capability sharing (`pai-share`), mobile runtime.
 
 ## Known technical debt (tracked, not hidden)
 

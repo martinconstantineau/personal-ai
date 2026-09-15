@@ -206,6 +206,11 @@ pub struct AppPayload {
     pub updated_at: String,
     pub signature_b64: String,
     pub files: Vec<AppFileEntry>,
+    /// Which device runs the app's live `data/` — `None` keeps the
+    /// legacy "every device has an instance" semantics. Set by
+    /// `pai apps migrate`; absent in pre-V4j objects.
+    #[serde(default)]
+    pub active_device: Option<String>,
 }
 
 /// Result of staging + verifying + installing a synced package —
@@ -739,7 +744,8 @@ impl<T: SyncTransport> SyncEngine<T> {
     async fn push_apps(&self, out: &mut SyncOutcome) -> Result<()> {
         let rows = self.store.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, name, version, runtime, updated_at, deleted
+                "SELECT id, name, version, runtime, updated_at, deleted,
+                        active_device
                  FROM apps",
             )?;
             let rows = stmt.query_map([], |r| {
@@ -750,11 +756,12 @@ impl<T: SyncTransport> SyncEngine<T> {
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, i64>(5)?,
+                    r.get::<_, Option<String>>(6)?,
                 ))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })?;
-        for (id, name, version, runtime, updated, deleted) in rows {
+        for (id, name, version, runtime, updated, deleted, active_device) in rows {
             let updated_at = parse_ts(&updated);
             let key = format!("{APP_PREFIX}{id}");
             let tombstone = deleted != 0;
@@ -767,27 +774,21 @@ impl<T: SyncTransport> SyncEngine<T> {
                     out.skipped += 1;
                     continue;
                 }
-                let payload = self.app_payload(&dir, &id, &name, &version, &runtime, &updated)?;
+                let payload = app_payload_for(
+                    &dir,
+                    &id,
+                    &name,
+                    &version,
+                    &runtime,
+                    &updated,
+                    active_device.as_deref(),
+                )?;
                 serde_json::to_vec(&payload).map_err(|e| Error::Sync(e.to_string()))?
             };
             self.push_sealed(key, &raw, version_of(&updated), updated_at, tombstone, out)
                 .await?;
         }
         Ok(())
-    }
-
-    /// Read an installed app dir into a sync payload — see
-    /// [`app_payload_for`].
-    fn app_payload(
-        &self,
-        dir: &std::path::Path,
-        id: &str,
-        name: &str,
-        version: &str,
-        runtime: &str,
-        updated: &str,
-    ) -> Result<AppPayload> {
-        app_payload_for(dir, id, name, version, runtime, updated)
     }
 
     /// App backup snapshots — `bkp/<app>/<writer>` objects. Only rows
@@ -1075,6 +1076,7 @@ impl<T: SyncTransport> SyncEngine<T> {
             return crate::backup::apply(
                 &self.store,
                 &self.data_dir,
+                self.device,
                 app_id,
                 writer,
                 obj.writer,
@@ -1105,14 +1107,38 @@ impl<T: SyncTransport> SyncEngine<T> {
                 self.store.with_conn(|c| {
                     c.execute(
                         "INSERT INTO apps(id, name, version, runtime, installed_at,
-                            updated_at, deleted) VALUES(?1,?2,?3,?4,?5,?6,0)
+                            updated_at, deleted, active_device)
+                            VALUES(?1,?2,?3,?4,?5,?6,0,?7)
                          ON CONFLICT(id) DO UPDATE SET name=excluded.name,
                             version=excluded.version, runtime=excluded.runtime,
-                            updated_at=excluded.updated_at, deleted=0",
-                        params![p.id, p.name, p.version, p.runtime, ts(&now()), p.updated_at],
+                            updated_at=excluded.updated_at, deleted=0,
+                            active_device=excluded.active_device",
+                        params![
+                            p.id,
+                            p.name,
+                            p.version,
+                            p.runtime,
+                            ts(&now()),
+                            p.updated_at,
+                            p.active_device
+                        ],
                     )?;
                     Ok(())
                 })?;
+                // Placement: the app lives elsewhere now — a stale
+                // local data/ must not keep pretending to be live.
+                if let Some(active) = &p.active_device {
+                    if *active != self.device.to_string() {
+                        match pai_apps::AppRegistry::new(&self.data_dir).deactivate_data(&p.id) {
+                            Ok(Some(rescue)) => tracing::info!(
+                                app = %p.id,
+                                "app active on {active}; local data moved to {rescue:?}"
+                            ),
+                            Ok(None) => {}
+                            Err(e) => tracing::warn!(app = %p.id, "deactivate data: {e}"),
+                        }
+                    }
+                }
                 tracing::info!(app = %p.id, signer = %signer, "installed synced app");
             }
             StageOutcome::Rejected(e) => {
@@ -1597,6 +1623,7 @@ pub fn app_payload_for(
     version: &str,
     runtime: &str,
     updated: &str,
+    active_device: Option<&str>,
 ) -> Result<AppPayload> {
     let files = collect_package_files(dir)?;
     let signature_b64 = base64::engine::general_purpose::STANDARD
@@ -1610,6 +1637,7 @@ pub fn app_payload_for(
         updated_at: updated.into(),
         signature_b64,
         files,
+        active_device: active_device.map(Into::into),
     })
 }
 

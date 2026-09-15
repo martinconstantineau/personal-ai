@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 12;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -339,6 +339,14 @@ CREATE TABLE app_backups (
     deleted INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (app_id, writer)
 );
+"#,
+    r#"
+-- V12: app placement — `active_device` marks which device runs the
+-- app's live data/ (NULL = legacy "every device has an instance").
+-- `pai apps migrate` sets it to the target + ships a migrate-flagged
+-- bkp/ object; the target restores on apply, everyone else keeps the
+-- package but holds no live state.
+ALTER TABLE apps ADD COLUMN active_device TEXT;
 "#,
 ];
 

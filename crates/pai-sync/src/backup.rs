@@ -32,6 +32,11 @@ pub struct BackupPayload {
     pub package: engine::AppPayload,
     /// Files under `data/` — paths relative to that dir.
     pub data_files: Vec<engine::AppFileEntry>,
+    /// When set, this backup is a *migration*: the named device is the
+    /// app's new home and restores it on apply — the one case a backup
+    /// touches live state without a manual `apps restore`.
+    #[serde(default)]
+    pub migrate_to: Option<String>,
 }
 
 /// An `app_backups` row — local snapshots and received ones.
@@ -53,7 +58,15 @@ pub fn create(
     data_dir: &Path,
     device: DeviceId,
     app_id: &str,
+    migrate_to: Option<DeviceId>,
 ) -> Result<PathBuf> {
+    // Snapshotting an inactive instance would capture stale state —
+    // backups and migrations only make sense from the active device.
+    if let Some(other) = active_elsewhere(store, device, app_id)? {
+        return Err(Error::Sync(format!(
+            "app {app_id} is active on {other} — migrate it here first"
+        )));
+    }
     let dir = data_dir.join("apps").join(app_id);
     if !dir.is_dir() {
         return Err(Error::NotFound(format!("app {app_id} not installed")));
@@ -62,6 +75,17 @@ pub fn create(
         .map_err(|e| Error::Sync(format!("load app for backup: {e}")))?;
     let m = &pkg.manifest;
     let now = ts(&now());
+    // The pak carries placement-at-snapshot so a restore upserts the
+    // same active_device rather than clobbering a migration's target.
+    let active: Option<String> = store.with_conn(|c| {
+        Ok(c.query_row(
+            "SELECT active_device FROM apps WHERE id=?1",
+            params![app_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten())
+    })?;
     let package = engine::app_payload_for(
         &dir,
         app_id,
@@ -69,6 +93,7 @@ pub fn create(
         &m.app.version,
         &format!("{:?}", m.app.runtime).to_lowercase(),
         &now,
+        active.as_deref(),
     )?;
     let data_files = pai_apps::AppRegistry::new(data_dir)
         .snapshot_data(app_id)
@@ -86,6 +111,7 @@ pub fn create(
         created_at: now.clone(),
         package,
         data_files,
+        migrate_to: migrate_to.map(|d| d.to_string()),
     };
     let rel = format!("backups/{app_id}/{device}.pak");
     let abs = data_dir.join(&rel);
@@ -170,6 +196,25 @@ pub fn delete(store: &Arc<Store>, data_dir: &Path, device: DeviceId, app_id: &st
 pub fn restore(
     store: &Arc<Store>,
     data_dir: &Path,
+    device: DeviceId,
+    app_id: &str,
+    from: Option<&str>,
+) -> Result<BackupPayload> {
+    // Restoring on an inactive device would fork live state.
+    if let Some(other) = active_elsewhere(store, device, app_id)? {
+        return Err(Error::Sync(format!(
+            "app {app_id} is active on {other} — migrate it here first"
+        )));
+    }
+    restore_unchecked(store, data_dir, app_id, from)
+}
+
+/// Restore without the placement guard — used by migration apply,
+/// where `active_device == me` was already landed by the `app/`
+/// object earlier in the same pull batch.
+pub(crate) fn restore_unchecked(
+    store: &Arc<Store>,
+    data_dir: &Path,
     app_id: &str,
     from: Option<&str>,
 ) -> Result<BackupPayload> {
@@ -222,17 +267,22 @@ pub fn restore(
     store.with_conn(|c| {
         c.execute(
             "INSERT INTO apps(id, name, version, runtime, installed_at,
-                updated_at, deleted) VALUES(?1,?2,?3,?4,?5,?6,0)
+                updated_at, deleted, active_device)
+                VALUES(?1,?2,?3,?4,?5,?6,0,?7)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name,
                 version=excluded.version, runtime=excluded.runtime,
                 updated_at=excluded.updated_at, deleted=0",
+            // active_device is in the INSERT (fresh row from the pak's
+            // snapshot) but NOT the UPDATE — an existing row's
+            // placement is more current than the backup's.
             params![
                 app_id,
                 p.package.name,
                 p.package.version,
                 p.package.runtime,
                 ts(&now()),
-                p.package.updated_at
+                p.package.updated_at,
+                p.package.active_device
             ],
         )?;
         Ok(())
@@ -263,6 +313,7 @@ pub fn restore(
 pub(crate) fn apply(
     store: &Arc<Store>,
     data_dir: &Path,
+    me: DeviceId,
     app_id: &str,
     writer: &str,
     obj_writer: DeviceId,
@@ -306,7 +357,25 @@ pub(crate) fn apply(
         )?;
         Ok(())
     })?;
-    tracing::info!(app = %app_id, writer = %writer, "stored app backup");
+    // Migration flag: this device is the app's new home. The `app/`
+    // object carrying active_device=me applied earlier in this pull
+    // batch (rank ordering), so restoring here is the explicit,
+    // requested move — a routine backup (no flag) never restores.
+    if p.migrate_to.as_deref() == Some(me.to_string().as_str()) {
+        match restore_unchecked(store, data_dir, app_id, Some(writer)) {
+            Ok(_) => tracing::info!(
+                app = %app_id,
+                writer = %writer,
+                "app migrated in — restored package + data"
+            ),
+            Err(e) => tracing::warn!(
+                app = %app_id,
+                "migration restore failed (pak stored for manual restore): {e}"
+            ),
+        }
+    } else {
+        tracing::info!(app = %app_id, writer = %writer, "stored app backup");
+    }
     Ok(())
 }
 
@@ -328,6 +397,26 @@ pub(crate) fn apply_tombstone(
     })?;
     let _ = std::fs::remove_file(data_dir.join(format!("backups/{app_id}/{writer}.pak")));
     Ok(())
+}
+
+/// `Some(other)` when the apps row names a different active device —
+/// the signal that backing up / restoring / running on this device
+/// would fork live state. `None` = legacy (unplaced) or active-here.
+pub fn active_elsewhere(
+    store: &Arc<Store>,
+    device: DeviceId,
+    app_id: &str,
+) -> Result<Option<String>> {
+    let active: Option<String> = store.with_conn(|c| {
+        Ok(c.query_row(
+            "SELECT active_device FROM apps WHERE id=?1",
+            params![app_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten())
+    })?;
+    Ok(active.filter(|a| *a != device.to_string()))
 }
 
 fn is_paired(store: &Arc<Store>, writer: &str) -> Result<bool> {

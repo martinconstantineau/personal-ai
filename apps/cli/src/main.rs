@@ -235,6 +235,17 @@ enum AppsCmd {
         /// Installed app id.
         id: String,
     },
+    /// Move an app to a paired device: snapshot package + data into a
+    /// migration-flagged backup, hand over active_device, deactivate
+    /// local data. Ships on next `pai sync push`; the target restores
+    /// inline on its next pull.
+    Migrate {
+        /// Installed app id.
+        id: String,
+        /// Destination device — a paired device-id prefix.
+        #[arg(long)]
+        to: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1386,11 +1397,20 @@ struct BrokerOps {
     tts: Option<pai_voice::PiperTts>,
     server_url: String,
     model: String,
+    data_dir: std::path::PathBuf,
+    store: Arc<Store>,
+    device: DeviceId,
 }
 
 impl BrokerOps {
     fn ops(&self) -> Vec<String> {
-        let mut v = vec!["infer".to_string(), "describe".to_string()];
+        // app-run is announced unconditionally: installed apps sync to
+        // every paired device, so any peer may serve the run.
+        let mut v = vec![
+            "infer".to_string(),
+            "describe".to_string(),
+            "app-run".to_string(),
+        ];
         if self.stt.is_some() {
             v.push("stt".into());
         }
@@ -1450,6 +1470,26 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
                     require_structured: false,
                 };
                 Ok(p.generate(&req).await?.text.into_bytes())
+            }
+            "app-run" => {
+                #[derive(serde::Deserialize)]
+                struct RunArgs {
+                    id: String,
+                    #[serde(default)]
+                    args: Vec<String>,
+                }
+                let a: RunArgs = serde_json::from_slice(payload)
+                    .map_err(|e| Error::InvalidInput(format!("app-run payload JSON: {e}")))?;
+                if let Some(other) =
+                    pai_sync::backup::active_elsewhere(&self.store, self.device, &a.id)?
+                {
+                    return Err(Error::InvalidInput(format!(
+                        "app {} is active on {other} — not runnable here",
+                        a.id
+                    )));
+                }
+                pai_apps::app_run_op(&self.data_dir, &a.id, &a.args)
+                    .map_err(|e| Error::Other(e.to_string()))
             }
             "describe" => {
                 #[derive(serde::Deserialize)]
@@ -1525,7 +1565,12 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
 
 /// Detect this device's serveable ops (whisper/piper via voice config;
 /// llama-server from inference config).
-async fn broker_ops(cfg: &pai_config::Config, cli: &Cli) -> BrokerOps {
+async fn broker_ops(
+    cfg: &pai_config::Config,
+    cli: &Cli,
+    store: Arc<Store>,
+    device: DeviceId,
+) -> BrokerOps {
     let (stt, tts) = pai_voice::detect(&cfg.data_dir, std::time::Duration::from_secs(2))
         .await
         .map(|v| (v.stt, v.tts))
@@ -1539,6 +1584,9 @@ async fn broker_ops(cfg: &pai_config::Config, cli: &Cli) -> BrokerOps {
         tts,
         server_url: cfg.inference.local_server_url.clone(),
         model,
+        data_dir: cfg.data_dir.clone(),
+        store,
+        device,
     }
 }
 
@@ -1638,13 +1686,30 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 if apps.is_empty() {
                     println!("(no apps installed - `pai deploy <dir>`)");
                 }
+                // Placement from the sync table — `apps` rows only
+                // exist once the app has been synced or migrated.
+                let placement: std::collections::HashMap<String, Option<String>> = store
+                    .with_conn(|c| {
+                        let mut s = c.prepare("SELECT id, active_device FROM apps")?;
+                        let rows = s.query_map([], |r| {
+                            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                        })?;
+                        rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+                    })
+                    .unwrap_or_default();
                 for (id, m) in apps {
+                    let where_ = match placement.get(&id).and_then(|p| p.as_deref()) {
+                        Some(d) if d == device.id.to_string() => " here".to_string(),
+                        Some(d) => format!(" → {:.8}", d),
+                        None => " everywhere".to_string(),
+                    };
                     println!(
-                        "  {:<28} {:<10} {:<6} {}",
+                        "  {:<28} {:<10} {:<6} {}{}",
                         id,
                         m.app.version,
                         format!("{:?}", m.app.runtime).to_lowercase(),
-                        m.app.name
+                        m.app.name,
+                        where_
                     );
                 }
             }
@@ -1672,6 +1737,11 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 }
             }
             AppsCmd::Run { id, args } => {
+                if let Some(other) = pai_sync::backup::active_elsewhere(&store, device.id, id)? {
+                    return Err(Error::InvalidInput(format!(
+                        "app {id} is active on {other} — run it there, or migrate it back with `pai apps migrate {id} --to <me>`"
+                    )));
+                }
                 let reg = pai_apps::AppRegistry::new(&cfg.data_dir);
                 let pkg = reg
                     .get(id)
@@ -1748,7 +1818,13 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 }
             }
             AppsCmd::Restore { id, from } => {
-                let p = pai_sync::backup::restore(&store, &cfg.data_dir, device.id, id, from.as_deref())?;
+                let p = pai_sync::backup::restore(
+                    &store,
+                    &cfg.data_dir,
+                    device.id,
+                    id,
+                    from.as_deref(),
+                )?;
                 let mut ev = pai_audit::event(AuditKind::AppRestored, AuditOutcome::Ok);
                 ev.device = Some(device.id);
                 ev.detail = serde_json::json!({
@@ -1768,6 +1844,43 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 } else {
                     println!("no backup of mine for {id}");
                 }
+            }
+            AppsCmd::Migrate { id, to } => {
+                let target = resolve_peer(&store, to)?;
+                // Order matters: snapshot while still active here
+                // (create refuses on an inactive app), then hand over
+                // placement, then quiesce local data. The app/ object
+                // carries active_device; the bkp/ object carries
+                // migrate_to — pull applies them in that rank order.
+                let pak =
+                    pai_sync::backup::create(&store, &cfg.data_dir, device.id, id, Some(target))?;
+                let now = pai_core::now().to_rfc3339();
+                store.with_conn(|c| {
+                    c.execute(
+                        "UPDATE apps SET active_device=?2, updated_at=?3 WHERE id=?1",
+                        rusqlite::params![id, target.to_string(), now],
+                    )?;
+                    Ok(())
+                })?;
+                let rescue = pai_apps::AppRegistry::new(&cfg.data_dir)
+                    .deactivate_data(id)
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                let mut ev = pai_audit::event(AuditKind::AppMigrated, AuditOutcome::Ok);
+                ev.device = Some(device.id);
+                ev.detail = serde_json::json!({
+                    "app_id": id,
+                    "to": target.to_string(),
+                });
+                pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                println!(
+                    "migrating {id} to {:.8} — snapshot {}, local data {}",
+                    target,
+                    pak.display(),
+                    rescue
+                        .map(|p| format!("parked at {}", p.display()))
+                        .unwrap_or_else(|| "was empty".into())
+                );
+                println!("`pai sync push` ships it; the target restores on pull");
             }
         },
         Cmd::Mesh { cmd } => match cmd {
@@ -2056,7 +2169,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
                     Error::Sync("no vault key — pair a device first (pai pair)".into())
                 })?;
-                let ops = broker_ops(&cfg, cli).await;
+                let ops = broker_ops(&cfg, cli, store.clone(), device.id).await;
                 let mut srv = pai_broker::rpc::BrokerServer::new(&*t, &vault, device.id, &ops)
                     .with_ops(ops.ops());
                 println!(

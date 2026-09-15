@@ -114,6 +114,16 @@ the embedded signature, reinstalls, and swaps `data/` with rollback —
 it's also the rescue path when an install is lost. Coverage: `cargo
 test -p pai-integration-tests --test v4f_backups`.
 
+Placement: `apps.active_device` (schema v12) names the single device
+running an app's live `data/` — `NULL` means legacy "runs
+everywhere". `pai apps migrate <id> --to <peer>` moves an app: a
+migrate-flagged backup + the placement update ship on the next push,
+the target restores inline on pull, and the source's `data/` is
+parked at `apps/.<id>.data.inactive-<ts>` (recoverable, not deleted).
+`apps run`, `apps backup`, and `apps restore` all refuse on a device
+that isn't active; `pai apps list` shows each app's placement.
+Coverage: `cargo test -p pai-integration-tests --test v4j_migration`.
+
 LAN sync needs no --relay flag: `pai sync serve --announce` broadcasts a
 signed multicast announcement and authenticates callers by the
 pairing-derived `hex(peer_key)` bearer token; `pai mesh discover` lists
