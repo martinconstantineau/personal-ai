@@ -191,6 +191,29 @@ enum AppsCmd {
         /// Installed app id.
         id: String,
     },
+    /// Snapshot an installed app (package + live data) into a backup
+    /// that ships to paired devices on the next `pai sync push`.
+    Backup {
+        /// Installed app id.
+        id: String,
+    },
+    /// List known app backups — own snapshots and ones received from
+    /// paired devices.
+    Backups,
+    /// Restore an app's package + data from a backup snapshot.
+    Restore {
+        /// Installed app id.
+        id: String,
+        /// Backup writer device-id prefix (default: newest backup).
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Delete my backup for an app — ships a tombstone so paired
+    /// devices drop their copy too.
+    BackupDelete {
+        /// Installed app id.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1649,6 +1672,54 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     println!("removed {id}");
                 } else {
                     println!("no such app: {id}");
+                }
+            }
+            AppsCmd::Backup { id } => {
+                let path = pai_sync::backup::create(&store, &cfg.data_dir, device.id, id)?;
+                let mut ev = pai_audit::event(AuditKind::AppBackedUp, AuditOutcome::Ok);
+                ev.device = Some(device.id);
+                ev.detail = serde_json::json!({"app_id": id});
+                pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                println!(
+                    "backup recorded at {} — `pai sync push` ships it to paired devices",
+                    path.display()
+                );
+            }
+            AppsCmd::Backups => {
+                let rows = pai_sync::backup::list(&store)?;
+                if rows.is_empty() {
+                    println!("(no backups — `pai apps backup <id>`)");
+                }
+                let me = device.id.to_string();
+                for r in rows {
+                    let who = if r.writer == me { "mine" } else { "peer" };
+                    let state = if r.deleted { " (deleted)" } else { "" };
+                    println!(
+                        "  {:<28} {:.8}  {:<6} {}{}",
+                        r.app_id, r.writer, who, r.created_at, state
+                    );
+                }
+            }
+            AppsCmd::Restore { id, from } => {
+                let p = pai_sync::backup::restore(&store, &cfg.data_dir, id, from.as_deref())?;
+                let mut ev = pai_audit::event(AuditKind::AppRestored, AuditOutcome::Ok);
+                ev.device = Some(device.id);
+                ev.detail = serde_json::json!({
+                    "app_id": id,
+                    "backup_writer": p.writer,
+                    "backup_created_at": p.created_at,
+                });
+                pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                println!(
+                    "restored {id} from backup by {:.8} ({})",
+                    p.writer, p.created_at
+                );
+            }
+            AppsCmd::BackupDelete { id } => {
+                if pai_sync::backup::delete(&store, &cfg.data_dir, device.id, id)? {
+                    println!("backup deleted — tombstone ships on next push");
+                } else {
+                    println!("no backup of mine for {id}");
                 }
             }
         },

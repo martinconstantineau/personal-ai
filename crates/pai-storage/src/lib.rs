@@ -323,6 +323,23 @@ CREATE TABLE apps (
     deleted INTEGER NOT NULL DEFAULT 0
 );
 "#,
+    r#"
+-- V11: app backup snapshots — the sync surface for `bkp/<app>/<writer>`
+-- objects. The payload file lives at `path` under data_dir (plaintext —
+-- same at-rest exposure as live data/); the sealed copy is what travels.
+-- pushed_at marks "we shipped this"; foreign-writer rows are never
+-- re-pushed. deleted ships as a tombstone so `apps backup-delete`
+-- propagates.
+CREATE TABLE app_backups (
+    app_id TEXT NOT NULL,
+    writer TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    path TEXT NOT NULL,
+    pushed_at TEXT,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (app_id, writer)
+);
+"#,
 ];
 
 /// A 32-byte SQLCipher raw key, sourced from the OS keystore (or a 0600

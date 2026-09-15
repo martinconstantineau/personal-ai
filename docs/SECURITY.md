@@ -95,6 +95,14 @@ Emergency/manual commits by maintainers follow the same rule — no
   `hex(peer_key)` bearer — replayable on the LAN, but only a paired
   device can mint it, and the objects it protects are sealed anyway.
   Freshness window (±15 min) bounds replay of stale datagrams.
+- **Backup paks are plaintext at rest**: `backups/<app>/<writer>.pak`
+  holds app `data/` in cleartext — the same exposure as the live
+  `data/` dir itself (app sqlite is unencrypted by design). In transit
+  they're vault-sealed like every sync object. Don't point data_dir at
+  a synced/cloud folder; a future hardening pass could seal paks too.
+- **Restore re-verifies, doesn't re-trust**: a pak's embedded package
+  must still signature-verify against own/peer keys at `apps restore`
+  time — a tampered backup on disk fails closed rather than installing.
 - Android `RECORD_AUDIO` is declared for voice capture; the runtime
   grant is still required, and there is no in-app permission-request
   flow yet — voice capture simply fails until granted in system

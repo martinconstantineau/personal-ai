@@ -661,6 +661,74 @@ impl AppRegistry {
         Ok(true)
     }
 
+    /// Read the app's live `data/` subtree as `(relative path, bytes)`
+    /// pairs — the backup snapshot. Stateless apps yield an empty vec.
+    /// Paths use forward slashes so snapshots are portable.
+    pub fn snapshot_data(&self, app_id: &str) -> AppResult<Vec<(String, Vec<u8>)>> {
+        check_app_id(app_id)?;
+        let data = self.root.join(app_id).join("data");
+        let mut out = Vec::new();
+        if !data.is_dir() {
+            return Ok(out);
+        }
+        let mut rels = Vec::new();
+        collect_files(&data, &data, &mut rels)?;
+        for rel in rels {
+            out.push((
+                rel.to_string_lossy().replace('\\', "/"),
+                std::fs::read(data.join(&rel))?,
+            ));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// Replace the app's `data/` with a backup's files — same
+    /// move-aside contract as upgrades: live state is rescued first and
+    /// rolled back if the write fails midway. Call after the package
+    /// itself is installed; the swap is exact (no merge) because a
+    /// restore means "the state at backup time", not "union".
+    pub fn restore_data(&self, app_id: &str, files: &[(String, Vec<u8>)]) -> AppResult<()> {
+        check_app_id(app_id)?;
+        for (rel, _) in files {
+            check_rel_path(rel)?;
+        }
+        let dest = self.root.join(app_id);
+        if !dest.is_dir() {
+            return Err(AppError::Layout(format!("app {app_id} not installed")));
+        }
+        let live = dest.join("data");
+        let rescue = self.root.join(format!(".{app_id}.data.rescue"));
+        if live.is_dir() {
+            if rescue.exists() {
+                std::fs::remove_dir_all(&rescue)?;
+            }
+            std::fs::rename(&live, &rescue)?;
+        }
+        let r = (|| -> AppResult<()> {
+            std::fs::create_dir_all(&live)?;
+            for (rel, bytes) in files {
+                let to = live.join(rel);
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&to, bytes)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = r {
+            let _ = std::fs::remove_dir_all(&live);
+            if rescue.is_dir() {
+                let _ = std::fs::rename(&rescue, &live);
+            }
+            return Err(e);
+        }
+        if rescue.is_dir() {
+            std::fs::remove_dir_all(&rescue)?;
+        }
+        Ok(())
+    }
+
     /// List installed apps as `(app_id, manifest)`.
     pub fn list(&self) -> AppResult<Vec<(String, AppManifest)>> {
         let mut out = Vec::new();

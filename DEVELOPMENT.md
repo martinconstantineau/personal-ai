@@ -106,6 +106,14 @@ Live `data/` never syncs — recipients provision it fresh and upgrades
 preserve it. Coverage: `cargo test -p pai-integration-tests --test
 v4d_app_sync`.
 
+App state instead travels via backups: `pai apps backup <id>` snapshots
+the package + `data/` into `backups/<app>/<writer>.pak` and ships a
+sealed `bkp/<app>/<writer>` object on the next push. Peers store it
+(never auto-restore); `pai apps restore <id> [--from <writer>]` verifies
+the embedded signature, reinstalls, and swaps `data/` with rollback —
+it's also the rescue path when an install is lost. Coverage: `cargo
+test -p pai-integration-tests --test v4f_backups`.
+
 LAN sync needs no --relay flag: `pai sync serve --announce` broadcasts a
 signed multicast announcement and authenticates callers by the
 pairing-derived `hex(peer_key)` bearer token; `pai mesh discover` lists

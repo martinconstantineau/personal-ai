@@ -281,6 +281,12 @@ the default when no `oauth` block exists.
   `hex(peer_key)` bearer — only paired devices can authenticate.
 - `pai_apps_list` FFI + Dart `appsList` for the dashboard.
 
+**V4h done (2026-09-15):** app authoring loop — `pai apps init <name>`
+scaffolds a source project (editable `manifest.toml` + Rust wasm
+skeleton); `pai apps build <dir> [--sign]` compiles `wasm32-wasip1`
+(or validates an existing package dir) into a deployable package.
+init → build → deploy → run works end-to-end.
+
 **V4g done (2026-09-15):** portable model packs — `pai models install
 <slug> --to <dir>` writes weights plus a self-describing `index.json`
 (manifest + sha256 per file) into any directory. `pack_roots()` probes
@@ -290,7 +296,16 @@ registers+repoints entries — plug a drive into a fresh device and its
 models are usable on sight. `list` marks unplugged packs `offline`.
 ADR 0017.
 
-- Remaining: capability sharing (`pai-share`), backups, multi-device
+**V4h done (2026-09-15):** app backups — `pai apps backup` snapshots
+package + live `data/` into a sealed `bkp/<app>/<writer>` object that
+roams to paired devices; apply only stores the pak (never touches the
+live install), and `pai apps restore` re-verifies the embedded package
+signature before reinstalling and swapping `data/` with rollback — the
+PRD's versioned-backup + rescue path. `apps backups` lists,
+`apps backup-delete` tombstones, restore `--from <writer>` picks a
+device. ADR 0018.
+
+- Remaining: capability sharing (`pai-share`), multi-device
   app placement/migration, mobile runtime.
 
 ## Known technical debt (tracked, not hidden)

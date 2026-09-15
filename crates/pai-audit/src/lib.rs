@@ -140,6 +140,8 @@ fn kind_name(k: AuditKind) -> &'static str {
         AuditKind::AppDeployed => "app_deployed",
         AuditKind::AppRun => "app_run",
         AuditKind::AppRemoved => "app_removed",
+        AuditKind::AppBackedUp => "app_backed_up",
+        AuditKind::AppRestored => "app_restored",
     }
 }
 

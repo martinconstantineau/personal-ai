@@ -534,6 +534,8 @@ pub enum AuditKind {
     AppDeployed,
     AppRun,
     AppRemoved,
+    AppBackedUp,
+    AppRestored,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
