@@ -1722,7 +1722,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 }
             }
             AppsCmd::Backup { id } => {
-                let path = pai_sync::backup::create(&store, &cfg.data_dir, device.id, id)?;
+                let path = pai_sync::backup::create(&store, &cfg.data_dir, device.id, id, None)?;
                 let mut ev = pai_audit::event(AuditKind::AppBackedUp, AuditOutcome::Ok);
                 ev.device = Some(device.id);
                 ev.detail = serde_json::json!({"app_id": id});
@@ -1748,7 +1748,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 }
             }
             AppsCmd::Restore { id, from } => {
-                let p = pai_sync::backup::restore(&store, &cfg.data_dir, id, from.as_deref())?;
+                let p = pai_sync::backup::restore(&store, &cfg.data_dir, device.id, id, from.as_deref())?;
                 let mut ev = pai_audit::event(AuditKind::AppRestored, AuditOutcome::Ok);
                 ev.device = Some(device.id);
                 ev.detail = serde_json::json!({
