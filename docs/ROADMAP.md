@@ -399,7 +399,30 @@ parent JSON, checkboxes offered only for the parent's actions). Grant
 listings show the chain: `pai apps grants` prints `↳ <parent>` on
 delegated tokens and `pai_share_list` gains a `parent` field.
 
-- Remaining: deeper mobile shell work.
+**V4t done (2026-09-15):** guest calls over FFI — `pai_guest_call`
+takes one JSON request (`{op, app_id, args, token, to, dir|relay,
+timeout_secs}`) and runs `call_guest` on the runtime's tokio loop:
+`to` empty resolves the root issuer through a delegated chain, bound
+tokens are signed by the local device key (a token bound elsewhere
+fails fast). Dart `guestCall` + bridge op + a "Use a shared token"
+dialog on the Apps screen — paste the token, pick folder/relay
+transport, run/read/write with decoded results. Also fixes
+`--on any` on delegated tokens: the target was the child's
+`issued_by` (the delegator) instead of the root host — the CLI arm
+and `guest_call` resolved it twice; `guest_call` now returns the
+resolved target so the label/audit show the real host.
+
+**V4 checklist complete.** Signed sandboxed app packages, per-app
+storage, package sync, LAN mesh, portable model packs, backups,
+authoring loop, placement + migration, remote execution (broker +
+capability-shared guest), mobile runtime + share/delegate UI, and
+guest read/write handles are all shipped and pushed.
+
+- Beyond V4 (PRD-level, future tracks): scoring-based placement
+  engine (`pai-broker` currently routes by advertised ops, not load),
+  stable app URLs (`app.user.devices`), the App Operator agent flows
+  (§6.8 — "give Sarah access" → scoped capability), rescue-mode whole-
+  cloud restore, and an app's own CRDT-collaborative data layer.
 
 ## Known technical debt (tracked, not hidden)
 

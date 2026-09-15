@@ -124,6 +124,9 @@ class PaiClient {
   late final _shareRevoke = _lib.lookupFunction<_SendNative,
           Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
       'pai_share_revoke');
+  late final _guestCall = _lib.lookupFunction<_SendNative,
+          Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
+      'pai_guest_call');
   late final _voiceSay = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_voice_say');
   late final _setPolicy = _lib.lookupFunction<_ThreeStrNative,
@@ -362,6 +365,11 @@ class PaiClient {
 
   Map<String, dynamic> shareRevoke(String tokenId) =>
       _call1(_shareRevoke, tokenId);
+
+  /// Guest-side capability call — runs an op on the token's host.
+  /// [request] fields: op, app_id, args, token (JSON), to, dir/relay.
+  Map<String, dynamic> guestCall(String request) =>
+      _call1(_guestCall, request);
 
   /// Voice capability probe: {stt, tts, mic, speaker, whisper_url}.
   Map<String, dynamic> voiceStatus() =>

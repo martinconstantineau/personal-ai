@@ -217,6 +217,12 @@ class PaiBridge {
             'for': forKey,
           }))) as Map<String, dynamic>;
 
+  /// Guest-side capability call — [request] is a JSON object:
+  /// {op, app_id, args, token, to, dir | relay, relay_token}.
+  Future<Map<String, dynamic>> guestCall(Map<String, dynamic> request) async =>
+      (await _call(_Op.guestCall, arg: jsonEncode(request)))
+          as Map<String, dynamic>;
+
   Future<Map<String, dynamic>> shareList() async =>
       (await _call(_Op.shareList)) as Map<String, dynamic>;
 
@@ -383,6 +389,8 @@ class PaiBridge {
                 a['actions'] as String,
                 a['days'] as int,
                 a['for'] as String);
+          case _Op.guestCall:
+            result = client.guestCall(req.arg!);
           case _Op.shareList:
             result = client.shareList();
           case _Op.shareRevoke:
@@ -446,6 +454,7 @@ enum _Op {
   peersList,
   appsShareGrant,
   shareDelegate,
+  guestCall,
   shareList,
   shareRevoke,
 }

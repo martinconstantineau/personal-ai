@@ -1537,6 +1537,157 @@ class _AppsScreenState extends State<AppsScreen> {
     );
   }
 
+  /// Act as a guest: present a capability token to run/read/write an
+  /// app on its host over a shared folder (or relay).
+  Future<void> _useToken() async {
+    var tokenJson = '';
+    Map<String, dynamic>? token;
+    var dir = '';
+    var relay = '';
+    var path = 'data/note.txt';
+    var text = '';
+    String op = 'app-run';
+    const opAction = {'app-run': 'exec', 'app-read': 'read', 'app-write': 'write'};
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          final acts =
+              (token?['actions'] as List?)?.cast<String>() ?? const [];
+          final ops = opAction.entries
+              .where((e) => acts.contains(e.value))
+              .map((e) => e.key)
+              .toList();
+          return AlertDialog(
+            title: const Text('Use a shared token'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                        labelText: 'Capability token JSON'),
+                    onChanged: (v) => setD(() {
+                      tokenJson = v;
+                      try {
+                        token = jsonDecode(v) as Map<String, dynamic>;
+                        if (!ops.contains(op) && ops.isNotEmpty) {
+                          op = ops.first;
+                        }
+                      } catch (_) {
+                        token = null;
+                      }
+                    }),
+                  ),
+                  if (tokenJson.isNotEmpty && token == null)
+                    const Text('not a token JSON',
+                        style: TextStyle(color: Colors.redAccent)),
+                  if (token != null)
+                    Text('app ${token!['app_id']} — '
+                        '${acts.join(",")}'
+                        '${token!['bound'] == true || token!['grantee_key'] != null ? " (bound)" : ""}'),
+                  TextFormField(
+                    decoration: const InputDecoration(
+                        labelText: 'Shared folder (transport dir)'),
+                    onChanged: (v) => setD(() => dir = v.trim()),
+                  ),
+                  TextFormField(
+                    decoration: const InputDecoration(
+                        labelText: 'or relay URL'),
+                    onChanged: (v) => setD(() => relay = v.trim()),
+                  ),
+                  if (token != null)
+                    DropdownButtonFormField<String>(
+                      initialValue: ops.contains(op) ? op : null,
+                      decoration:
+                          const InputDecoration(labelText: 'Operation'),
+                      items: [
+                        for (final o in ops)
+                          DropdownMenuItem(value: o, child: Text(o)),
+                      ],
+                      onChanged: (v) => op = v ?? op,
+                    ),
+                  if (op != 'app-run')
+                    TextFormField(
+                      initialValue: path,
+                      decoration: const InputDecoration(
+                          labelText: 'App path (data/… or files/…)'),
+                      onChanged: (v) => path = v.trim(),
+                    ),
+                  if (op == 'app-write')
+                    TextFormField(
+                      decoration:
+                          const InputDecoration(labelText: 'Text to write'),
+                      onChanged: (v) => text = v,
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel')),
+              FilledButton(
+                  onPressed: token != null && (dir.isNotEmpty || relay.isNotEmpty)
+                      ? () => Navigator.pop(ctx, true)
+                      : null,
+                  child: const Text('Call')),
+            ],
+          );
+        },
+      ),
+    );
+    if (ok != true || token == null) return;
+    final args = op == 'app-write'
+        ? [path, base64Encode(utf8.encode(text))]
+        : op == 'app-read'
+            ? [path]
+            : <String>[];
+    final r = await widget.bridge.guestCall({
+      'op': op,
+      'app_id': '${token!['app_id']}',
+      'args': args,
+      'token': tokenJson,
+      'dir': dir,
+      'relay': relay,
+      'timeout_secs': 60,
+    });
+    if (!mounted) return;
+    String shown;
+    final err = r['error'];
+    if (err != null) {
+      shown = '$err';
+    } else {
+      final payload =
+          base64Decode('${r['payload_b64']}');
+      final v = jsonDecode(utf8.decode(payload));
+      if (op == 'app-run') {
+        final out = utf8.decode(base64Decode('${v['stdout_b64']}'));
+        final stderr = '${v['stderr_b64']}';
+        shown = '$out'
+            '${stderr.isNotEmpty ? "\nstderr: ${utf8.decode(base64Decode(stderr))}" : ""}'
+            '\n(exit ${v['exit_code'] ?? 0})';
+      } else if (op == 'app-read') {
+        shown = utf8.decode(base64Decode('${v['data_b64']}'));
+      } else {
+        shown = '$v';
+      }
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(err != null ? 'Guest call failed' : 'Result'),
+        content: SingleChildScrollView(child: SelectableText(shown)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Done')),
+        ],
+      ),
+    );
+  }
+
   /// Issued grants with revoke — the `pai apps grants` surface.
   Future<void> _grants() async {
     final r = await widget.bridge.shareList();
@@ -1608,6 +1759,10 @@ class _AppsScreenState extends State<AppsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Apps'), actions: [
+        IconButton(
+            icon: const Icon(Icons.login),
+            tooltip: 'Use a shared token (guest)',
+            onPressed: _useToken),
         IconButton(
             icon: const Icon(Icons.key_outlined),
             tooltip: 'Issued grants',

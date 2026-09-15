@@ -1539,7 +1539,7 @@ async fn guest_call(
     want_app: &str,
     op: &str,
     args: &[String],
-) -> Result<Vec<u8>> {
+) -> Result<(DeviceId, Vec<u8>)> {
     let json = std::fs::read_to_string(cap_path)
         .map_err(|e| Error::InvalidInput(format!("{cap_path}: {e}")))?;
     let capability = pai_share::Capability::from_json(&json)
@@ -1552,8 +1552,14 @@ async fn guest_call(
     }
     // Guests can't read sealed bcap announcements — a literal device
     // id, a paired prefix, or the token's issuer (`any`) name the host.
+    // For a delegated token the serving host is the ROOT issuer — the
+    // child's own `issued_by` is the delegating device.
     let to = if on == "any" {
-        capability.issued_by
+        let mut root = &capability;
+        while let Some(p) = &root.parent {
+            root = p;
+        }
+        root.issued_by
     } else {
         match uuid::Uuid::parse_str(on) {
             Ok(u) => DeviceId(u),
@@ -1565,7 +1571,7 @@ async fn guest_call(
             .sign(cx.device.id, cx.key_dir, msg)
             .map_err(|e| pai_share::ShareError::InvalidInput(e.to_string()))
     };
-    pai_share::guest::call_guest(
+    let resp = pai_share::guest::call_guest(
         t,
         to,
         capability,
@@ -1574,7 +1580,8 @@ async fn guest_call(
         std::time::Duration::from_secs(120),
         Some(&signer),
     )
-    .await
+    .await?;
+    Ok((to, resp))
 }
 
 struct BrokerOps {
@@ -1936,26 +1943,13 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     // Guest path: a capability token stands in for
                     // vault membership — request goes out unsealed,
                     // response seals to an ephemeral key in it.
-                    let cap_json = std::fs::read_to_string(cap_path)
-                        .map_err(|e| Error::InvalidInput(format!("{cap_path}: {e}")))?;
-                    let to = if dev == "any" {
-                        pai_share::Capability::from_json(&cap_json)
-                            .map_err(|e| Error::InvalidInput(format!("bad token: {e}")))?
-                            .issued_by
-                    } else {
-                        match uuid::Uuid::parse_str(dev) {
-                            Ok(u) => DeviceId(u),
-                            Err(_) => resolve_peer(&store, dev)?,
-                        }
-                    };
                     let cx = GuestCtx {
                         store: &store,
                         ids: &ids,
                         key_dir: &key_dir,
                         device: &device,
                     };
-                    let resp = guest_call(&*t, &cx, cap_path, dev, id, "app-run", args).await?;
-                    (to, resp)
+                    guest_call(&*t, &cx, cap_path, dev, id, "app-run", args).await?
                 } else {
                     let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
                         Error::Sync("no vault key — pair a device first (pai pair)".into())
@@ -2456,7 +2450,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                             key_dir: &key_dir,
                             device: &device,
                         };
-                        guest_call(&*t, &cx, c, dev, id, "app-read", &args).await?
+                        guest_call(&*t, &cx, c, dev, id, "app-read", &args).await?.1
                     }
                     None => pai_apps::app_read_op(&cfg.data_dir, id, &args)
                         .map_err(|e| Error::InvalidInput(e.to_string()))?,

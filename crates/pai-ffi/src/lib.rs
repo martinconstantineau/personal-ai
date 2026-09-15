@@ -1859,6 +1859,158 @@ pub unsafe extern "C" fn pai_share_revoke(
     to_c(serde_json::json!({"ok": true}))
 }
 
+/// Guest-side capability call — the `apps run/read/write --cap` ops
+/// over FFI. `request_json`:
+/// `{op: "app-run"|"app-read"|"app-write", app_id, args: [..],
+///   token: <token JSON>, to: <device id | "" → root issuer>,
+///   dir: <shared folder> | relay: <url>, relay_token,
+///   timeout_secs}`.
+/// Bound tokens are signed with this device's key — a token bound
+/// elsewhere fails fast with a readable error. Returns
+/// `{ok, payload_b64}` or `{error}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `request_json` is NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn pai_guest_call(
+    handle: *mut PaiRuntime,
+    request_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let req_raw = match read_str(request_json) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let req: serde_json::Value = match serde_json::from_str(&req_raw) {
+        Ok(v) => v,
+        Err(e) => return to_c(serde_json::json!({"error": format!("bad request json: {e}")})),
+    };
+    let get = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let op = get("op").to_string();
+    let app_id = get("app_id").to_string();
+    let args: Vec<String> = req
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let token_json = get("token").to_string();
+    let timeout_secs = req
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
+    let capability = match pai_share::Capability::from_json(&token_json) {
+        Ok(c) => c,
+        Err(e) => return to_c(serde_json::json!({"error": format!("bad token: {e}")})),
+    };
+    if capability.app_id != app_id {
+        return to_c(serde_json::json!({"error":
+            format!("token grants app {} not {app_id}", capability.app_id)}));
+    }
+    // `to` empty → the root issuer (walks a delegated chain's parents).
+    let to_str = get("to");
+    let to = if to_str.is_empty() {
+        let mut root = &capability;
+        while let Some(p) = &root.parent {
+            root = p;
+        }
+        root.issued_by
+    } else {
+        match uuid::Uuid::parse_str(to_str) {
+            Ok(u) => DeviceId(u),
+            Err(_) => {
+                // fall back to a paired-peer prefix
+                let peers = match pai_sync::pair::list_peers(&rt.store) {
+                    Ok(p) => p,
+                    Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+                };
+                match peers
+                    .iter()
+                    .find(|p| p.device_id.to_string().starts_with(to_str))
+                {
+                    Some(p) => p.device_id,
+                    None => {
+                        return to_c(serde_json::json!({"error":
+                            format!("no device matching '{to_str}'")}))
+                    }
+                }
+            }
+        }
+    };
+    // A bound token must be signed by THIS device — otherwise it can
+    // never verify on the host.
+    if capability.grantee_key.is_some() {
+        let my_key: Option<String> = rt
+            .store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT public_key FROM devices WHERE id=?1",
+                    rusqlite::params![rt.device.to_string()],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+            })
+            .ok()
+            .map(hex::encode);
+        if capability.grantee_key.as_deref() != my_key.as_deref() {
+            return to_c(serde_json::json!({"error":
+                "token is bound to a different device's key"}));
+        }
+    }
+    let dir = get("dir").to_string();
+    let relay = get("relay").to_string();
+    let relay_token = req
+        .get("relay_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let ids = pai_identity::IdentityStore::new(rt.store.clone());
+    let key_dir = std::path::Path::new(&rt.data_dir).join("keys");
+    let dev = rt.device;
+    let signer = move |msg: &[u8]| {
+        ids.sign(dev, &key_dir, msg)
+            .map_err(|e| pai_share::ShareError::InvalidInput(e.to_string()))
+    };
+    let out = if !dir.is_empty() {
+        let t = match pai_sync::FolderTransport::new(dir.into()) {
+            Ok(t) => t,
+            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+        };
+        rt.rt.block_on(pai_share::guest::call_guest(
+            &t,
+            to,
+            capability,
+            &op,
+            &args,
+            Duration::from_secs(timeout_secs),
+            Some(&signer),
+        ))
+    } else if !relay.is_empty() {
+        let t = pai_sync::relay::RelayTransport::new(relay, relay_token);
+        rt.rt.block_on(pai_share::guest::call_guest(
+            &t,
+            to,
+            capability,
+            &op,
+            &args,
+            Duration::from_secs(timeout_secs),
+            Some(&signer),
+        ))
+    } else {
+        return to_c(serde_json::json!({"error": "pass dir or relay"}));
+    };
+    match out {
+        Ok(payload) => {
+            use base64::Engine as _;
+            to_c(serde_json::json!({
+                "ok": true,
+                "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload),
+            }))
+        }
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
 /// # Safety
 /// `s` must be a pointer previously returned by this library.
 #[no_mangle]
