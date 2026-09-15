@@ -462,10 +462,21 @@ guest read/write handles are all shipped and pushed.
   writes, calendar, files, mic/camera/contacts were missing from the
   policy-editor surface).
 
+- [x] **V5f — App Operator diagnostics (PRD §6.8)**: "why is my app
+  broken?" → `apps.status` tool + `pai apps status <id>` roll install
+  state (registry + `apps` row), placement (resolved to a local or
+  paired device name, stale-claim flag when the device isn't a peer),
+  live `data/` size, backup freshness, share tokens by status, and the
+  last 10 audit events mentioning the app (deploy/run/migrate/rescue
+  failures included) into one report. Read-only → new
+  `Permission::AppInspect` defaults `AlwaysAllow`, `RiskLevel::Low`,
+  `ExecutionMode::Local`. `StoreAppOperator::status` is the single
+  impl — CLI, FFI, and the agent all answer from the same query.
+
 - Beyond V4 (PRD-level, future tracks): stable app URLs
-  (`app.user.devices`), App Operator OAuth/diagnostics flows
-  (§6.8 — "add Google login", "why is my app broken?"), and an app's
-  own CRDT-collaborative data layer.
+  (`app.user.devices`), App Operator OAuth config
+  (§6.8 — "add Google login"), and an app's own
+  CRDT-collaborative data layer.
 
 ## Known technical debt (tracked, not hidden)
 

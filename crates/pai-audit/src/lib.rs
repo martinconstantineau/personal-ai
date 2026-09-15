@@ -119,7 +119,7 @@ impl AuditLog {
     }
 }
 
-fn kind_name(k: AuditKind) -> &'static str {
+pub fn kind_name(k: AuditKind) -> &'static str {
     match k {
         AuditKind::MessageSent => "message_sent",
         AuditKind::RunStarted => "run_started",
@@ -153,7 +153,7 @@ fn kind_from(s: &str) -> AuditKind {
     AuditKind::deserialize(serde_json::Value::String(s.into())).unwrap_or(AuditKind::ToolExecuted)
 }
 
-fn outcome_name(o: AuditOutcome) -> &'static str {
+pub fn outcome_name(o: AuditOutcome) -> &'static str {
     match o {
         AuditOutcome::Ok => "ok",
         AuditOutcome::Denied => "denied",

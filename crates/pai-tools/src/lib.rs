@@ -105,6 +105,11 @@ pub trait AppOperator: Send + Sync {
     /// Snapshot `app_id`'s package + live data into a backup.
     /// Returns `{path, created_at}`.
     fn backup(&self, app_id: &str) -> Result<serde_json::Value>;
+
+    /// Diagnostics rollup for `app_id` — install state, placement,
+    /// storage, backups, share tokens, and recent audit events
+    /// (PRD §6.8: "why is my app broken?").
+    fn status(&self, app_id: &str) -> Result<serde_json::Value>;
 }
 
 impl<'a> ToolContext<'a> {
@@ -1091,6 +1096,74 @@ impl Tool for AppsBackupTool {
     }
 }
 
+/// `apps.status` — App Operator diagnostics: "why is my app broken?"
+/// rolls install state, placement, storage, backups, shares, and recent
+/// run/deploy outcomes into one read-only report.
+pub struct AppsStatusTool;
+
+#[async_trait]
+impl Tool for AppsStatusTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "apps.status".into(),
+            description: "Diagnose an installed app: install state, which \
+                          device runs it, data dir size, backup freshness, \
+                          active share tokens, and recent audit outcomes \
+                          (deploy/run/migrate/rescue failures included)."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "string"}
+                },
+                "required": ["app_id"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::AppInspect],
+            risk: RiskLevel::Low,
+            execution: ExecutionMode::Local,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let ops = ctx
+            .apps
+            .ok_or_else(|| Error::InvalidInput("no app operator surface wired".into()))?;
+        let app_id = str_arg(&args, "app_id")?;
+        let v = ops.status(app_id)?;
+        let installed = v["installed"].as_bool().unwrap_or(false);
+        let recent_errs = v["recent_events"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|e| {
+                        matches!(
+                            e["outcome"].as_str(),
+                            Some("error") | Some("denied") | Some("cancelled")
+                        )
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        Ok(ToolOutput {
+            summary: format!(
+                "apps.status {app_id} — installed={installed}, \
+                 active_device={}, backups={}, shares_active={}, \
+                 recent_failures={recent_errs}",
+                v["placement"]["device_name"].as_str().unwrap_or("(none)"),
+                v["backups"]["count"].as_u64().unwrap_or(0),
+                v["shares"]["active"].as_u64().unwrap_or(0),
+            ),
+            value: v,
+        })
+    }
+}
+
 fn pai_storage_err(e: impl std::fmt::Display) -> Error {
     Error::Storage(e.to_string())
 }
@@ -1115,6 +1188,7 @@ pub fn builtin_registry() -> ToolRegistry {
     r.register(Arc::new(NotifySendTool));
     r.register(Arc::new(AppsShareTool));
     r.register(Arc::new(AppsBackupTool));
+    r.register(Arc::new(AppsStatusTool));
     r
 }
 

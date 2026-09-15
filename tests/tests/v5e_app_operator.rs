@@ -94,6 +94,24 @@ fn deploy(d: &Dev) -> String {
     AppRegistry::new(&d.dir)
         .install(&pkg, &d.ids, dev, false)
         .unwrap();
+    let now = pai_storage::ts(&now());
+    d.store
+        .with_conn(|c| {
+            c.execute(
+                "INSERT INTO apps(id, name, version, runtime, installed_at,
+                    updated_at, deleted) VALUES(?1,?2,?3,?4,?5,?6,0)",
+                rusqlite::params![
+                    pkg.manifest.app_id(),
+                    pkg.manifest.app.name,
+                    pkg.manifest.app.version,
+                    "wasm",
+                    now,
+                    now
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     pkg.manifest.app_id()
 }
 
@@ -157,6 +175,17 @@ impl AppOperator for StubOps {
     fn backup(&self, app_id: &str) -> Result<serde_json::Value> {
         self.backed_up.lock().unwrap().push(app_id.to_string());
         Ok(serde_json::json!({"app_id": app_id, "path": "/tmp/x.pak"}))
+    }
+
+    fn status(&self, app_id: &str) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "app_id": app_id,
+            "installed": true,
+            "placement": {"device_id": null, "device_name": null},
+            "backups": {"count": 1},
+            "shares": {"active": 2},
+            "recent_events": [{"outcome": "ok"}, {"outcome": "error"}],
+        }))
     }
 }
 
@@ -336,4 +365,65 @@ async fn store_operator_backups_real_pak() {
         .any(|r| r.app_id == app_id && r.writer == a.device.id.to_string()));
 
     assert!(ops.backup("ghost").is_err());
+}
+
+#[tokio::test]
+async fn status_tool_summarizes_operator_report() {
+    let ops = StubOps::new();
+    let c = ctx(Some(&ops));
+    let tool = pai_tools::AppsStatusTool;
+    let d = tool.descriptor();
+    assert_eq!(d.required_permissions, vec![Permission::AppInspect]);
+    assert_eq!(d.risk, RiskLevel::Low);
+    assert_eq!(d.execution, ExecutionMode::Local);
+    pai_tools::validate_args(&d.input_schema, &serde_json::json!({}))
+        .err()
+        .unwrap();
+    let out = tool
+        .execute(serde_json::json!({"app_id":"notes"}), &c)
+        .await
+        .unwrap();
+    assert!(out.summary.contains("installed=true"));
+    assert!(out.summary.contains("recent_failures=1"));
+    let no_ops = ctx(None);
+    let e = tool
+        .execute(serde_json::json!({"app_id":"notes"}), &no_ops)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("no app operator surface wired"));
+}
+
+/// Real operator: status rolls up install + placement + data + backups
+/// + shares + audit trail for an app that has actually lived a little.
+#[tokio::test]
+async fn store_operator_status_rolls_up_state() {
+    let (a, b) = (dev("a"), dev("b"));
+    pair_devices(&b, &a);
+    let app_id = deploy(&a);
+    let ops = StoreAppOperator::new(a.store.clone(), a.dir.clone(), a.device.id);
+
+    // Live a little: a share grant + a backup + an audit event.
+    ops.share_grant(&app_id, &["exec".into()], 7, None).unwrap();
+    ops.backup(&app_id).unwrap();
+    let mut ev = pai_audit::event(AuditKind::AppRun, AuditOutcome::Error);
+    ev.detail = serde_json::json!({"app_id": app_id, "exit_code": 1});
+    pai_audit::AuditLog::new(a.store.clone())
+        .record(&ev)
+        .unwrap();
+
+    let v = ops.status(&app_id).unwrap();
+    assert_eq!(v["installed"], true);
+    assert_eq!(v["app_id"], app_id);
+    assert_eq!(v["name"], "Operator Test App");
+    assert!(v["storage"]["data_present"].as_bool().unwrap());
+    assert_eq!(v["backups"]["count"], 1);
+    assert_eq!(v["shares"]["active"], 1);
+    let events = v["recent_events"].as_array().unwrap();
+    assert!(events.iter().any(|e| e["kind"] == "app_run"));
+    assert!(events.iter().any(|e| e["outcome"] == "error"));
+
+    // Uninstalled app reports installed=false, not an error.
+    let ghost = ops.status("ghost-app").unwrap();
+    assert_eq!(ghost["installed"], false);
+    assert_eq!(ghost["backups"]["count"], 0);
 }

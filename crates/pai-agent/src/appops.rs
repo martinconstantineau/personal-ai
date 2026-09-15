@@ -106,4 +106,173 @@ impl AppOperator for StoreAppOperator {
             "path": p.display().to_string(),
         }))
     }
+
+    fn status(&self, app_id: &str) -> Result<serde_json::Value> {
+        // apps-table row: the sync'd install record (deleted/active_device).
+        let row = self.store.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT name, version, runtime, installed_at, deleted,
+                        active_device FROM apps WHERE id=?1",
+                rusqlite::params![app_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)? != 0,
+                        r.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .ok())
+        })?;
+        let (name, version, runtime, installed_at, deleted, active) = match &row {
+            Some((n, v, r, at, d, a)) => (
+                Some(n.clone()),
+                Some(v.clone()),
+                Some(r.clone()),
+                Some(at.clone()),
+                *d,
+                a.clone(),
+            ),
+            None => (None, None, None, None, false, None),
+        };
+        // On-disk package presence is the ground truth for "installed
+        // here" — a synced apps row can exist without the package (or
+        // vice versa mid-sync).
+        let pkg = pai_apps::AppRegistry::new(&self.data_dir)
+            .get(app_id)
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let installed = pkg.is_some() && !deleted;
+
+        // Resolve the placed device to a name: local `devices` first,
+        // then paired peers.
+        let placement = match active.as_deref() {
+            None => serde_json::json!({"device_id": null, "device_name": null,
+                                       "this_device": false, "paired": false}),
+            Some(dev) => {
+                let this = uuid::Uuid::parse_str(dev).ok() == Some(self.device.0);
+                let name = self.store.with_conn(|c| {
+                    Ok(c.query_row(
+                        "SELECT name FROM devices WHERE id=?1",
+                        rusqlite::params![dev],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()
+                    .or_else(|| {
+                        c.query_row(
+                            "SELECT name FROM sync_peers WHERE device_id=?1",
+                            rusqlite::params![dev],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .ok()
+                    }))
+                })?;
+                let paired = pai_sync::pair::list_peers(&self.store)?
+                    .iter()
+                    .any(|p| p.device_id.to_string() == dev);
+                serde_json::json!({
+                    "device_id": dev, "device_name": name,
+                    "this_device": this, "paired": paired,
+                })
+            }
+        };
+
+        // Live data dir: presence + size answers "is there state here
+        // worth backing up / did the last run even create it".
+        let data_dir = self.data_dir.join("apps").join(app_id).join("data");
+        let data_bytes = if data_dir.is_dir() {
+            dir_size(&data_dir)
+        } else {
+            0
+        };
+
+        // Backups for this app (all writers).
+        let bkps: Vec<_> = pai_sync::backup::list(&self.store)?
+            .into_iter()
+            .filter(|b| b.app_id == app_id)
+            .collect();
+        let newest = bkps
+            .iter()
+            .filter(|b| !b.deleted)
+            .map(|b| b.created_at.clone())
+            .max();
+        let backups = serde_json::json!({
+            "count": bkps.iter().filter(|b| !b.deleted).count(),
+            "newest": newest,
+        });
+
+        // Share tokens by status.
+        let mut shares = serde_json::json!({"active": 0, "expired": 0, "revoked": 0});
+        for (cap, st) in pai_share::ShareStore::new(&self.data_dir)
+            .list()
+            .map_err(|e| Error::Other(e.to_string()))?
+            .into_iter()
+            .filter(|(c, _)| c.app_id == app_id)
+        {
+            let _ = cap;
+            let k = match st {
+                pai_share::TokenStatus::Active => "active",
+                pai_share::TokenStatus::Expired => "expired",
+                pai_share::TokenStatus::Revoked => "revoked",
+            };
+            shares[k] = serde_json::json!(shares[k].as_u64().unwrap_or(0) + 1);
+        }
+
+        // Recent audit events for this app — the "what went wrong" trail.
+        let recent: Vec<_> = pai_audit::AuditLog::new(self.store.clone())
+            .recent(200)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.detail["app_id"].as_str() == Some(app_id))
+            .take(10)
+            .map(|e| {
+                serde_json::json!({
+                    "kind": pai_audit::kind_name(e.kind),
+                    "outcome": pai_audit::outcome_name(e.outcome),
+                    "at": e.at.to_rfc3339(),
+                    "detail": e.detail,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "app_id": app_id,
+            "installed": installed,
+            "name": name,
+            "version": version,
+            "runtime": runtime,
+            "installed_at": installed_at,
+            "deleted": deleted,
+            "placement": placement,
+            "storage": {
+                "data_dir": data_dir.display().to_string(),
+                "data_bytes": data_bytes,
+                "data_present": data_dir.is_dir(),
+            },
+            "backups": backups,
+            "shares": shares,
+            "recent_events": recent,
+        }))
+    }
+}
+
+/// Recursive size of `dir` in bytes (best-effort — unreadable entries
+/// are skipped, matching "how much state is here" intent).
+fn dir_size(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|it| {
+            it.flatten()
+                .map(|e| {
+                    let p = e.path();
+                    if p.is_dir() {
+                        dir_size(&p)
+                    } else {
+                        e.metadata().map(|m| m.len()).unwrap_or(0)
+                    }
+                })
+                .sum()
+        })
+        .unwrap_or(0)
 }

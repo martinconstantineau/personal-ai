@@ -43,6 +43,9 @@ pub enum Permission {
     AppShare,
     /// Snapshot an app's package + data into a backup.
     AppBackup,
+    /// Read an app's diagnostics (install, placement, backups, shares,
+    /// recent run outcomes) — local metadata, no side effects.
+    AppInspect,
 }
 
 /// The engine's verdict for one action.
@@ -101,6 +104,9 @@ impl PolicyTable {
             // copies the app's data.
             (AppShare, AskUser),
             (AppBackup, AskUser),
+            // Read-only local diagnostics — same posture as
+            // MemoryRead/DocumentRead/FilesRead.
+            (AppInspect, AlwaysAllow),
         ] {
             t.set(p, pol);
         }
@@ -153,6 +159,7 @@ pub fn all_permissions() -> Vec<Permission> {
         NotificationSend,
         AppShare,
         AppBackup,
+        AppInspect,
     ]
 }
 

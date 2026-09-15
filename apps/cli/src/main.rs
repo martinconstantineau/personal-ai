@@ -280,6 +280,12 @@ enum AppsCmd {
         #[arg(long)]
         from: Option<String>,
     },
+    /// Diagnose an installed app: install state, placement, storage,
+    /// backups, share tokens, and recent audit outcomes.
+    Status {
+        /// Installed app id (see ).
+        id: String,
+    },
     /// Issue a capability token for an installed app — a signed,
     /// expiring grant a guest device uses with `pai apps run --cap`.
     Share {
@@ -2271,6 +2277,71 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     }
                 }
                 println!("claim ships on next `pai sync push`");
+            }
+            AppsCmd::Status { id } => {
+                let ops = pai_agent::appops::StoreAppOperator::new(
+                    store.clone(),
+                    cfg.data_dir.clone(),
+                    device.id,
+                );
+                use pai_tools::AppOperator as _;
+                let v = ops.status(id)?;
+                if !v["installed"].as_bool().unwrap_or(false) {
+                    println!("{id}: not installed here");
+                }
+                let p = &v["placement"];
+                let placed = p["device_id"].as_str();
+                match placed {
+                    None => println!("placement: unplaced (local instance)"),
+                    Some(d) if p["this_device"].as_bool() == Some(true) => {
+                        println!("placement: this device ({:.8})", d)
+                    }
+                    Some(d) => println!(
+                        "placement: {} ({:.8}){}",
+                        p["device_name"].as_str().unwrap_or("?"),
+                        d,
+                        if p["paired"].as_bool() == Some(true) {
+                            ""
+                        } else {
+                            " (not a paired peer — stale claim?)"
+                        }
+                    ),
+                }
+                let st = &v["storage"];
+                println!(
+                    "storage: {} ({} bytes)",
+                    if st["data_present"].as_bool() == Some(true) {
+                        "data present"
+                    } else {
+                        "no data dir"
+                    },
+                    st["data_bytes"].as_u64().unwrap_or(0)
+                );
+                println!(
+                    "backups: {} (newest {})",
+                    v["backups"]["count"].as_u64().unwrap_or(0),
+                    v["backups"]["newest"].as_str().unwrap_or("none")
+                );
+                println!(
+                    "shares: {} active, {} expired, {} revoked",
+                    v["shares"]["active"].as_u64().unwrap_or(0),
+                    v["shares"]["expired"].as_u64().unwrap_or(0),
+                    v["shares"]["revoked"].as_u64().unwrap_or(0)
+                );
+                let events = v["recent_events"].as_array().cloned().unwrap_or_default();
+                if events.is_empty() {
+                    println!("recent events: none");
+                } else {
+                    println!("recent events:");
+                    for e in events {
+                        println!(
+                            "  {} {} — {}",
+                            e["at"].as_str().unwrap_or("?"),
+                            e["kind"].as_str().unwrap_or("?"),
+                            e["outcome"].as_str().unwrap_or("?")
+                        );
+                    }
+                }
             }
             AppsCmd::Share {
                 id,
