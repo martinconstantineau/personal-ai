@@ -22,8 +22,8 @@ mod run;
 pub mod serve;
 
 pub use run::{
-    app_read_op, app_run_op, app_run_op_guest, app_serve_op, app_write_op, installed_dir,
-    run_logged, RunLimits, RunOutput, APP_IO_MAX,
+    app_read_op, app_run_op, app_run_op_guest, app_serve_op, app_write_op, host_match,
+    installed_dir, run_logged, RunLimits, RunOutput, APP_IO_MAX,
 };
 
 use pai_core::*;
@@ -176,6 +176,12 @@ pub struct PermissionsSpec {
     /// Network access level.
     #[serde(default)]
     pub network: NetworkSpec,
+    /// Hosts `pai_fetch` may reach — exact (`api.github.com`) or
+    /// subdomain wildcard (`*.googleapis.com`). `network = "outbound"`
+    /// without a list allows no fetches: the capability is the level,
+    /// this list is the scope.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
     /// Other devices (by id) the app may call via the broker.
     #[serde(default)]
     pub devices: Vec<String>,

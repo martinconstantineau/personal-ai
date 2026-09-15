@@ -538,6 +538,21 @@ guest read/write handles are all shipped and pushed.
   name layer on top is a deployment concern. Run logs + `app_served`
   audit events cover the surface like any other run.
 
+- [x] **V5k — `pai_fetch`: host-mediated HTTP for sandboxed apps** —
+  WASI preview1 has no sockets, so an app that needs HTTP (including
+  spending its injected `PAI_OAUTH_*` token) calls the `env::pai_fetch`
+  host function: JSON request in (`{"method","url","headers","
+  body_b64"}`), JSON response out (`{"status","headers","body_b64"}`),
+  with a size-probe return convention. Gated inside the sandbox by
+  `network = "outbound"` AND the manifest's new `allowed_hosts` list
+  (exact or `*.suffix`, so `network = "outbound"` alone permits no
+  fetches — the level is the capability, the list is the scope).
+  HTTPS-only except loopback; redirects never auto-followed (a 3xx
+  could hop outside the allowlist — the app re-requests `Location`
+  through the same gate). 10s timeout, 4 MiB body caps, and every call
+  — allowed or denied — appends to `logs/fetch.log` beside the run
+  logs, so `pai apps status`/`apps.logs` surfaces cover it.
+
 ## Known technical debt (tracked, not hidden)
 
 | Item | Why it's deferred | Exit |

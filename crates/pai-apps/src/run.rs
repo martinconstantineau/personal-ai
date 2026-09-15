@@ -6,7 +6,7 @@
 //! directories via preopens. Execution is bounded by fuel and a
 //! memory limiter.
 
-use crate::{AppError, AppPackage, AppResult, AppRuntime, StorageKind};
+use crate::{AppError, AppPackage, AppResult, AppRuntime, NetworkSpec, StorageKind};
 use std::path::{Path, PathBuf};
 use wasmi::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmi_wasi::sync::{ambient_authority, Dir, WasiCtxBuilder};
@@ -44,6 +44,12 @@ pub struct RunOutput {
 struct Host {
     wasi: WasiCtx,
     limits: StoreLimits,
+    /// `network = "outbound"` — `pai_fetch` is gated on this.
+    outbound: bool,
+    /// Manifest's `allowed_hosts` — the fetch scope.
+    allowed_hosts: Vec<String>,
+    /// `app_dir/logs/fetch.log` — append-only audit of every fetch.
+    fetch_log: PathBuf,
 }
 
 impl AppPackage {
@@ -125,6 +131,9 @@ impl AppPackage {
             limits: StoreLimitsBuilder::new()
                 .memory_size(limits.memory_bytes)
                 .build(),
+            outbound: matches!(self.manifest.permissions.network, NetworkSpec::Outbound),
+            allowed_hosts: self.manifest.permissions.allowed_hosts.clone(),
+            fetch_log: app_dir.join("logs").join("fetch.log"),
         };
         let mut store = Store::new(&engine, host);
         store
@@ -137,6 +146,14 @@ impl AppPackage {
         let mut linker = <Linker<Host>>::new(&engine);
         wasmi_wasi::sync::add_to_linker(&mut linker, |h: &mut Host| &mut h.wasi)
             .map_err(|e| AppError::Layout(format!("wasi linker: {e}")))?;
+        // `env::pai_fetch(req_ptr, req_len, resp_ptr, resp_cap)` — the
+        // app's only network: a host-mediated JSON request/response.
+        // req JSON: {"method","url","headers":{},"body_b64"}; resp JSON:
+        // {"status","headers":{},"body_b64"}. Return: >=0 bytes written;
+        // -1..-9 fixed errors; <=-10 means "needs -ret resp bytes".
+        linker
+            .func_wrap("env", "pai_fetch", host_fetch)
+            .map_err(|e| AppError::Layout(format!("pai_fetch linker: {e}")))?;
         let instance = linker
             .instantiate_and_start(&mut store, &module)
             .map_err(|e| AppError::Layout(format!("instantiate: {e}")))?;
@@ -367,6 +384,197 @@ pub fn app_write_op(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult
     Ok(serde_json::json!({"path": rel, "bytes": data.len()})
         .to_string()
         .into_bytes())
+}
+
+// --- pai_fetch: host-mediated HTTP for sandboxed apps ----------------
+//
+// The app's only network: a host function it imports as
+// `env::pai_fetch`. WASI preview1 has no sockets, so this is how an app
+// uses its injected OAuth tokens — the host performs the request, the
+// manifest's `[permissions] network = "outbound"` + `allowed_hosts`
+// scope it. Redirects are never followed automatically (a 3xx could
+// hop outside the allowlist); the app re-requests the Location itself,
+// which is host-checked again. Every call appends to `logs/fetch.log`.
+
+/// Error codes returned by `pai_fetch` (negative, -1..=-9).
+const FETCH_ERR_DENIED: i32 = -2;
+const FETCH_ERR_TRANSPORT: i32 = -3;
+const FETCH_ERR_BAD_REQ: i32 = -4;
+const FETCH_ERR_NO_MEM: i32 = -5;
+
+#[derive(serde::Deserialize)]
+struct FetchReq {
+    #[serde(default = "default_get")]
+    method: String,
+    url: String,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    body_b64: String,
+}
+
+fn default_get() -> String {
+    "GET".into()
+}
+
+/// `*.example.com` matches `a.example.com` and `example.com`; a bare
+/// pattern matches exactly. Case-insensitive.
+pub fn host_match(pattern: &str, host: &str) -> bool {
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        host.eq_ignore_ascii_case(suffix)
+            || host
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", suffix.to_ascii_lowercase()))
+    } else {
+        host.eq_ignore_ascii_case(pattern)
+    }
+}
+
+/// Loopback HTTP is allowed for dev/test; anything else must be https.
+fn scheme_ok(url: &reqwest::Url, host: &str) -> bool {
+    url.scheme() == "https"
+        || (url.scheme() == "http"
+            && (host == "localhost" || host == "::1" || host.starts_with("127.")))
+}
+
+fn log_fetch(log: &PathBuf, line: &str) {
+    if let Some(parent) = log.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
+        let _ = writeln!(f, "{} {line}", pai_core::now().to_rfc3339());
+    }
+}
+
+fn host_fetch(
+    mut caller: wasmi::Caller<'_, Host>,
+    req_ptr: i32,
+    req_len: i32,
+    resp_ptr: i32,
+    resp_cap: i32,
+) -> i32 {
+    let Some(wasmi::Extern::Memory(mem)) = caller.get_export("memory") else {
+        return FETCH_ERR_NO_MEM;
+    };
+    let (req_ptr, req_len) = (req_ptr as usize, req_len as usize);
+    let (resp_ptr, resp_cap) = (resp_ptr as usize, resp_cap as usize);
+    let Some(req_raw) = mem
+        .data(&caller)
+        .get(req_ptr..req_ptr.saturating_add(req_len))
+        .map(<[u8]>::to_vec)
+    else {
+        return FETCH_ERR_BAD_REQ;
+    };
+    let Ok(freq) = serde_json::from_slice::<FetchReq>(&req_raw) else {
+        return FETCH_ERR_BAD_REQ;
+    };
+    let Ok(url) = reqwest::Url::parse(&freq.url) else {
+        return FETCH_ERR_BAD_REQ;
+    };
+    let host_str = url.host_str().unwrap_or_default().to_string();
+
+    // Gate: manifest grants outbound AND the host is allowlisted AND
+    // the scheme is safe. Denials are logged like successes.
+    let allowed = caller.data().outbound
+        && caller
+            .data()
+            .allowed_hosts
+            .iter()
+            .any(|h| host_match(h, &host_str))
+        && scheme_ok(&url, &host_str);
+    if !allowed {
+        log_fetch(
+            &caller.data().fetch_log,
+            &format!("DENIED {} {}", freq.method, freq.url),
+        );
+        return FETCH_ERR_DENIED;
+    }
+
+    let method =
+        reqwest::Method::from_bytes(freq.method.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return FETCH_ERR_TRANSPORT,
+    };
+    let mut b = client.request(method, url);
+    for (k, v) in &freq.headers {
+        if let (Ok(name), Ok(value)) = (
+            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+            reqwest::header::HeaderValue::from_str(v),
+        ) {
+            b = b.header(name, value);
+        }
+    }
+    if !freq.body_b64.is_empty() {
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(&freq.body_b64) {
+            Ok(body) if body.len() <= crate::serve::BODY_CAP => b = b.body(body),
+            Ok(_) => return FETCH_ERR_BAD_REQ,
+            Err(_) => return FETCH_ERR_BAD_REQ,
+        }
+    }
+    let out = match b.send() {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let headers: std::collections::BTreeMap<String, String> = resp
+                .headers()
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.to_str()
+                        .ok()
+                        .map(|s| (k.as_str().to_string(), s.to_string()))
+                })
+                .collect();
+            let body = resp.bytes().unwrap_or_default();
+            use base64::Engine;
+            let body_b64 = if body.len() <= crate::serve::BODY_CAP {
+                base64::engine::general_purpose::STANDARD.encode(&body)
+            } else {
+                base64::engine::general_purpose::STANDARD.encode(&body[..crate::serve::BODY_CAP])
+            };
+            log_fetch(
+                &caller.data().fetch_log,
+                &format!("{} {} → {status}", freq.method, freq.url),
+            );
+            serde_json::json!({
+                "status": status,
+                "headers": headers,
+                "body_b64": body_b64,
+            })
+        }
+        Err(e) => {
+            log_fetch(
+                &caller.data().fetch_log,
+                &format!("ERROR {} {} — {e}", freq.method, freq.url),
+            );
+            return FETCH_ERR_TRANSPORT;
+        }
+    };
+    let out = serde_json::to_vec(&out).unwrap_or_default();
+    if out.len() > resp_cap {
+        // Size probe / undersized buffer: return -needed (always ≤ -10
+        // since a response JSON is never shorter than that).
+        return -(out.len() as i32);
+    }
+    match mem
+        .data_mut(&mut caller)
+        .get_mut(resp_ptr..resp_ptr.saturating_add(out.len()))
+    {
+        Some(dst) => {
+            dst.copy_from_slice(&out);
+            out.len() as i32
+        }
+        None => FETCH_ERR_NO_MEM,
+    }
 }
 
 #[cfg(test)]
