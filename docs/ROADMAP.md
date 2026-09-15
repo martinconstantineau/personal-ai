@@ -522,8 +522,21 @@ guest read/write handles are all shipped and pushed.
   same two-phase flow under `AppConfigure` (default `AskUser`) with an
   `app_auth_configured` audit event.
 
-- Beyond V4 (PRD-level, future tracks): stable app URLs
-  (`app.user.devices`).
+- [x] **V5j — stable app URLs** (`pai serve`): every app that opts in
+  with `serve = true` gets an HTTP surface at
+  `http://<device>:<port>/apps/<id>/<path>` — the gateway runs the app
+  CGI-style (request → `REQUEST_METHOD`/`PATH_INFO`/`QUERY_STRING`/
+  `HTTP_*` env vars + body on stdin; the app prints `Status:`/
+  `Content-Type:` + blank line + body). Follows `active_device`, so
+  the same path works on every device — the URL survives migration;
+  apps placed elsewhere are forwarded over a new `app-serve` broker op
+  (vault members and capability guests alike — guests' requests carry
+  no owner OAuth envs, same as `app-run` guest runs). The `serve` flag
+  lives in the signed manifest, so the opt-in is re-checked on the
+  serving device rather than trusted from the gateway. This is the
+  addressable half of the PRD's `app.user.devices`; a DNS/Tailscale
+  name layer on top is a deployment concern. Run logs + `app_served`
+  audit events cover the surface like any other run.
 
 ## Known technical debt (tracked, not hidden)
 

@@ -19,10 +19,11 @@
 pub mod auth;
 pub mod logs;
 mod run;
+pub mod serve;
 
 pub use run::{
-    app_read_op, app_run_op, app_run_op_guest, app_write_op, installed_dir, run_logged, RunLimits,
-    RunOutput, APP_IO_MAX,
+    app_read_op, app_run_op, app_run_op_guest, app_serve_op, app_write_op, installed_dir,
+    run_logged, RunLimits, RunOutput, APP_IO_MAX,
 };
 
 use pai_core::*;
@@ -106,6 +107,11 @@ pub struct AppSection {
     /// derived from `name` as a slug (`my-garage-app`).
     #[serde(default)]
     pub id: Option<String>,
+    /// `serve = true` opts the app into HTTP — `pai serve` answers
+    /// `/apps/<id>/…` by running it CGI-style. Off by default: the app
+    /// decides whether it speaks HTTP.
+    #[serde(default)]
+    pub serve: bool,
 }
 
 fn default_entrypoint() -> String {

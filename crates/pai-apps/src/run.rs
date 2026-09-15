@@ -58,6 +58,7 @@ impl AppPackage {
         args: &[String],
         limits: RunLimits,
         envs: &[(String, String)],
+        input: &[u8],
     ) -> AppResult<RunOutput> {
         if self.manifest.app.runtime != AppRuntime::Wasm {
             return Err(AppError::Layout(
@@ -76,7 +77,7 @@ impl AppPackage {
         let err_pipe = stderr.clone();
 
         let mut ctx = WasiCtxBuilder::new();
-        ctx.stdin(Box::new(ReadPipe::from("")))
+        ctx.stdin(Box::new(ReadPipe::from(input.to_vec())))
             .stdout(Box::new(stdout))
             .stderr(Box::new(stderr))
             .arg(&self.manifest.app_id())
@@ -187,11 +188,12 @@ pub fn installed_dir(data_dir: &Path, app_id: &str) -> PathBuf {
 /// crate (not the CLI) so it's testable and the binary's handler stays
 /// a thin guard + delegation.
 /// The logging run itself — `envs` are the guest's whole environment.
-fn run_logged_inner(
+pub(crate) fn run_logged_inner(
     data_dir: &Path,
     app_id: &str,
     args: &[String],
     envs: &[(String, String)],
+    input: &[u8],
 ) -> AppResult<RunOutput> {
     let reg = crate::AppRegistry::new(data_dir);
     let pkg = reg
@@ -212,7 +214,7 @@ fn run_logged_inner(
             .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
             .unwrap_or_default(),
     };
-    match pkg.run(&dir, args, RunLimits::default(), envs) {
+    match pkg.run(&dir, args, RunLimits::default(), envs, input) {
         Ok(out) => {
             crate::logs::record(data_dir, app_id, &entry(Ok(&out)));
             Ok(out)
@@ -232,7 +234,7 @@ fn run_logged_inner(
 /// access tokens for configured providers before the run.
 pub async fn run_logged(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<RunOutput> {
     let envs = crate::auth::resolve_envs(data_dir, app_id).await;
-    run_logged_inner(data_dir, app_id, args, &envs)
+    run_logged_inner(data_dir, app_id, args, &envs, &[])
 }
 
 fn encode_run(out: &RunOutput) -> Vec<u8> {
@@ -257,7 +259,22 @@ pub async fn app_run_op(data_dir: &Path, app_id: &str, args: &[String]) -> AppRe
 /// access tokens must not ride along. Everything else (sandbox,
 /// logging) is identical.
 pub fn app_run_op_guest(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<Vec<u8>> {
-    let out = run_logged_inner(data_dir, app_id, args, &[])?;
+    let out = run_logged_inner(data_dir, app_id, args, &[], &[])?;
+    Ok(encode_run(&out))
+}
+
+/// `app-serve` op (stable app URLs, V5j): `args[0]` is a JSON
+/// [`crate::serve::ServeRequest`]. Runs the app CGI-style — request
+/// metadata arrives as env vars, the body on stdin — and returns the
+/// same `encode_run` envelope; the caller parses stdout as a CGI
+/// response. No OAuth envs: the HTTP caller is not the owner.
+pub fn app_serve_op(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<Vec<u8>> {
+    let req_json = args
+        .first()
+        .ok_or_else(|| AppError::Layout("app-serve needs a ServeRequest JSON arg".into()))?;
+    let req: crate::serve::ServeRequest = serde_json::from_str(req_json)
+        .map_err(|e| AppError::Layout(format!("app-serve request: {e}")))?;
+    let out = crate::serve::run_request(data_dir, app_id, &req)?;
     Ok(encode_run(&out))
 }
 
@@ -374,7 +391,7 @@ mod tests {
     #[test]
     fn runs_trivial_module() {
         let (dir, pkg) = pkg_with("(module (func (export \"run\")))");
-        let out = pkg.run(&dir, &[], RunLimits::default(), &[]).unwrap();
+        let out = pkg.run(&dir, &[], RunLimits::default(), &[], &[]).unwrap();
         assert!(out.exit_code.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -387,7 +404,7 @@ mod tests {
                 (memory (export "memory") 1)
                 (func (export "_start") i32.const 7 call $exit))"#,
         );
-        let out = pkg.run(&dir, &[], RunLimits::default(), &[]).unwrap();
+        let out = pkg.run(&dir, &[], RunLimits::default(), &[], &[]).unwrap();
         assert_eq!(out.exit_code, Some(7));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -399,7 +416,7 @@ mod tests {
             fuel: 10_000,
             ..RunLimits::default()
         };
-        assert!(pkg.run(&dir, &[], limits, &[]).is_err());
+        assert!(pkg.run(&dir, &[], limits, &[], &[]).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -413,7 +430,7 @@ mod tests {
         )
         .unwrap();
         let pkg = AppPackage::load(&root).unwrap();
-        assert!(pkg.run(&root, &[], RunLimits::default(), &[]).is_err());
+        assert!(pkg.run(&root, &[], RunLimits::default(), &[], &[]).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -469,7 +486,7 @@ mod tests {
         let (dir, pkg) =
             pkg_with_perms(WRITE_THROUGH_PREOPEN, "[permissions]\nfiles = [\"files/\"]");
         std::fs::create_dir_all(dir.join("files")).unwrap();
-        let out = pkg.run(&dir, &[], RunLimits::default(), &[]).unwrap();
+        let out = pkg.run(&dir, &[], RunLimits::default(), &[], &[]).unwrap();
         assert_eq!(out.exit_code, Some(0));
         assert_eq!(
             std::fs::read(dir.join("files/hello.txt")).unwrap(),
@@ -484,7 +501,7 @@ mod tests {
         // preopen, so path_open fails with EBADF (errno 8). storage must
         // be "none": the sqlite default would preopen data/ at fd 3.
         let (dir, pkg) = pkg_with_perms(WRITE_THROUGH_PREOPEN, "[storage]\ntype = \"none\"");
-        let out = pkg.run(&dir, &[], RunLimits::default(), &[]).unwrap();
+        let out = pkg.run(&dir, &[], RunLimits::default(), &[], &[]).unwrap();
         assert_eq!(out.exit_code, Some(8));
         assert!(!dir.join("hello.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);

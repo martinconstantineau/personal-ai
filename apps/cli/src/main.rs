@@ -111,6 +111,23 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BrokerCmd,
     },
+    /// Stable app URLs (V5j): HTTP gateway — `GET /apps/<id>/<path>`
+    /// runs the app CGI-style and streams its response. Follows
+    /// `active_device`, so the same path works on every device.
+    Serve {
+        /// Listen address.
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        bind: String,
+        /// Shared-folder transport for forwarding to the app's device.
+        #[arg(long)]
+        dir: Option<String>,
+        /// Relay transport (mutually exclusive with --dir).
+        #[arg(long)]
+        relay: Option<String>,
+        /// Relay bearer token.
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Email connector (IMAP) — configure + direct ops.
     Email {
         #[command(subcommand)]
@@ -1788,6 +1805,21 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
                     .await
                     .map_err(|e| Error::Other(e.to_string()))
             }
+            // Stable app URLs: the gateway forwards the CGI request;
+            // the manifest's `serve` flag is re-checked here (the
+            // opt-in lives in the package, not the gateway).
+            "app-serve" => {
+                #[derive(serde::Deserialize)]
+                struct ServeArgs {
+                    id: String,
+                    #[serde(default)]
+                    args: Vec<String>,
+                }
+                let a: ServeArgs = serde_json::from_slice(payload)
+                    .map_err(|e| Error::InvalidInput(format!("app-serve payload JSON: {e}")))?;
+                pai_apps::app_serve_op(&self.data_dir, &a.id, &a.args)
+                    .map_err(|e| Error::Other(e.to_string()))
+            }
             "describe" => {
                 #[derive(serde::Deserialize)]
                 struct DescribeArgs {
@@ -3250,6 +3282,10 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     Box::new(move |op, app_id, args| match op {
                         "app-run" => pai_apps::app_run_op_guest(&guest_data, app_id, args)
                             .map_err(|e| Error::Other(e.to_string())),
+                        // Guests may hit the CGI surface too — the
+                        // request is theirs, and no owner tokens ride.
+                        "app-serve" => pai_apps::app_serve_op(&guest_data, app_id, args)
+                            .map_err(|e| Error::Other(e.to_string())),
                         "app-read" => pai_apps::app_read_op(&guest_data, app_id, args)
                             .map_err(|e| Error::Other(e.to_string())),
                         "app-write" => pai_apps::app_write_op(&guest_data, app_id, args)
@@ -3366,6 +3402,37 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 }
             }
         },
+        // Stable app URLs (V5j): every device running `pai serve` is
+        // an ingress for every serve-enabled app — the route follows
+        // `active_device`, so the URL survives migration. CGI-style:
+        // request → env vars + stdin; app prints a CGI response.
+        Cmd::Serve {
+            bind,
+            dir,
+            relay,
+            token,
+        } => {
+            let http = tiny_http::Server::http(bind)
+                .map_err(|e| Error::Other(format!("serve bind {bind}: {e}")))?;
+            println!("serving apps on http://{bind}/apps/<app-id>/<path> — ctrl-c to stop");
+            let cx = ServeCtx {
+                data_dir: cfg.data_dir.clone(),
+                store: store.clone(),
+                device: device.clone(),
+                dir: dir.clone(),
+                relay: relay.clone(),
+                token: token.clone(),
+            };
+            let rt = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                for mut req in http.incoming_requests() {
+                    let resp = serve_request(&cx, &rt, &mut req);
+                    let _ = req.respond(resp);
+                }
+            })
+            .await
+            .map_err(|e| Error::Other(format!("serve loop: {e}")))?;
+        }
         Cmd::Email { cmd } => run_email_cmds(cmd, &cfg).await?,
         Cmd::Describe { image, prompt } => {
             let path = std::path::Path::new(image);
@@ -4490,6 +4557,7 @@ async fn main() -> Result<()> {
             | Cmd::Deploy { .. }
             | Cmd::Apps { .. }
             | Cmd::Mesh { .. }
+            | Cmd::Serve { .. }
     ) {
         return run_sync_cmds(&cli).await;
     }
@@ -4937,9 +5005,208 @@ async fn main() -> Result<()> {
         | Cmd::Describe { .. }
         | Cmd::Deploy { .. }
         | Cmd::Apps { .. }
-        | Cmd::Mesh { .. } => {
+        | Cmd::Mesh { .. }
+        | Cmd::Serve { .. } => {
             unreachable!("handled before build")
         }
     }
     Ok(())
+}
+
+// --- V5j: stable app URLs — CGI-style HTTP gateway -------------------
+
+struct ServeCtx {
+    data_dir: std::path::PathBuf,
+    store: Arc<pai_storage::Store>,
+    device: Device,
+    dir: Option<String>,
+    relay: Option<String>,
+    token: Option<String>,
+}
+
+fn serve_response(
+    status: u16,
+    ct: &str,
+    body: Vec<u8>,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    tiny_http::Response::from_data(body)
+        .with_status_code(status)
+        .with_header(tiny_http::Header::from_bytes("Content-Type", ct).expect("valid header"))
+}
+
+/// One HTTP request → app run → HTTP response. Local apps run in
+/// process; apps placed elsewhere are forwarded over the broker
+/// `app-serve` op — either way the wire shape is the `encode_run`
+/// JSON envelope and stdout is parsed as a CGI response.
+fn serve_request(
+    cx: &ServeCtx,
+    rt: &tokio::runtime::Handle,
+    req: &mut tiny_http::Request,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    use base64::Engine as _;
+    use std::io::Read as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let url = req.url().to_string();
+    let (path, query) = match url.split_once('?') {
+        Some((a, b)) => (a.to_string(), b.to_string()),
+        None => (url, String::new()),
+    };
+    if path == "/" || path == "/apps" || path == "/apps/" {
+        // Index: apps that opted into serving.
+        let reg = pai_apps::AppRegistry::new(&cx.data_dir);
+        let mut lines = String::from("serve-enabled apps:\n");
+        for (id, m) in reg.list().unwrap_or_default() {
+            if m.app.serve {
+                lines.push_str(&format!("  /apps/{id}/\n"));
+            }
+        }
+        return serve_response(200, "text/plain", lines.into_bytes());
+    }
+    let Some(rest) = path.strip_prefix("/apps/") else {
+        return serve_response(404, "text/plain", b"not found\n".to_vec());
+    };
+    let (id, sub) = match rest.split_once('/') {
+        Some((a, b)) => (a.to_string(), format!("/{b}")),
+        None => (rest.to_string(), "/".to_string()),
+    };
+    if id.is_empty() {
+        return serve_response(404, "text/plain", b"not found\n".to_vec());
+    }
+    let mut body = Vec::new();
+    if req
+        .as_reader()
+        .take(pai_apps::serve::BODY_CAP as u64 + 1)
+        .read_to_end(&mut body)
+        .is_err()
+    {
+        return serve_response(400, "text/plain", b"bad request body\n".to_vec());
+    }
+    if body.len() > pai_apps::serve::BODY_CAP {
+        return serve_response(413, "text/plain", b"body too large\n".to_vec());
+    }
+    let sreq = pai_apps::serve::ServeRequest {
+        method: req.method().as_str().into(),
+        path: sub,
+        query,
+        headers: req
+            .headers()
+            .iter()
+            .map(|h| (h.field.as_str().to_string(), h.value.as_str().to_string()))
+            .collect(),
+        body_b64: b64.encode(&body),
+    };
+    let arg = sreq.to_json();
+    // Follow placement: an app active elsewhere is proxied over the
+    // broker so the URL is stable across migration.
+    let remote = pai_sync::backup::active_elsewhere(&cx.store, cx.device.id, &id)
+        .ok()
+        .flatten();
+    let envelope = if let Some(ref other) = remote {
+        let t = match sync_transport(&cx.dir, &cx.relay, &cx.token) {
+            Ok(t) => t,
+            Err(e) => {
+                return serve_response(
+                    502,
+                    "text/plain",
+                    format!("app {id} lives on {other} — transport needed: {e}\n").into_bytes(),
+                )
+            }
+        };
+        let vault = match pai_sync::crypto::vault_key(&cx.data_dir) {
+            Ok(Some(v)) => v,
+            _ => {
+                return serve_response(
+                    502,
+                    "text/plain",
+                    "no vault key — cannot reach the app's device\n"
+                        .as_bytes()
+                        .to_vec(),
+                )
+            }
+        };
+        let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, cx.device.id)
+            .with_weights(place_weights(&cx.store));
+        let payload = serde_json::json!({"id": id, "args": [arg]})
+            .to_string()
+            .into_bytes();
+        let to = match uuid::Uuid::parse_str(other) {
+            Ok(u) => DeviceId(u),
+            Err(e) => {
+                return serve_response(
+                    502,
+                    "text/plain",
+                    format!("bad active_device id '{other}': {e}\n").into_bytes(),
+                )
+            }
+        };
+        match rt.block_on(client.call(
+            to,
+            "app-serve",
+            &payload,
+            std::time::Duration::from_secs(120),
+        )) {
+            Ok(r) => r,
+            Err(e) => {
+                return serve_response(
+                    502,
+                    "text/plain",
+                    format!("remote serve: {e}\n").into_bytes(),
+                )
+            }
+        }
+    } else {
+        match pai_apps::app_serve_op(&cx.data_dir, &id, &[arg]) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = e.to_string();
+                let status = if msg.contains("does not serve") {
+                    403
+                } else if msg.contains("not installed") {
+                    404
+                } else {
+                    502
+                };
+                return serve_response(
+                    502.min(status).max(status),
+                    "text/plain",
+                    format!("{msg}\n").into_bytes(),
+                );
+            }
+        }
+    };
+    let v: serde_json::Value = serde_json::from_slice(&envelope).unwrap_or_default();
+    let stdout = v["stdout_b64"]
+        .as_str()
+        .and_then(|s| b64.decode(s).ok())
+        .unwrap_or_default();
+    let exit = v["exit_code"].as_i64().unwrap_or(-1);
+    let served = pai_apps::serve::parse_cgi(&stdout);
+    let mut ev = pai_audit::event(AuditKind::AppServed, AuditOutcome::Ok);
+    ev.device = Some(cx.device.id);
+    ev.detail = serde_json::json!({
+        "app_id": id,
+        "method": req.method().as_str(),
+        "status": served.status,
+        "remote": remote.is_some(),
+        "exit_code": exit,
+    });
+    let _ = pai_audit::AuditLog::new(cx.store.clone()).record(&ev);
+    if exit != 0 {
+        let err = v["stderr_b64"]
+            .as_str()
+            .and_then(|s| b64.decode(s).ok())
+            .unwrap_or_default();
+        return serve_response(
+            502,
+            "text/plain",
+            format!("app exited {exit}: {}\n", String::from_utf8_lossy(&err)).into_bytes(),
+        );
+    }
+    let mut resp = tiny_http::Response::from_data(served.body).with_status_code(served.status);
+    for (k, val) in served.headers {
+        if let Ok(h) = tiny_http::Header::from_bytes(k.as_str(), val.as_str()) {
+            resp.add_header(h);
+        }
+    }
+    resp
 }

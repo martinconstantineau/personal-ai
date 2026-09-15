@@ -41,3 +41,4 @@ hex.workspace = true
 base64.workspace = true
 rusqlite.workspace = true
 wasmi = { workspace = true, features = ["wat"] }
+tiny_http = "0.12"

@@ -172,7 +172,7 @@ fn env_injection_reaches_wasm() {
     let pkg = env_pkg(&dir);
     let envs = vec![("PAI_OAUTH_TEST".to_string(), "sekrit-token".to_string())];
     let out = pkg
-        .run(&dir, &[], pai_apps::RunLimits::default(), &envs)
+        .run(&dir, &[], pai_apps::RunLimits::default(), &envs, &[])
         .unwrap();
     assert_eq!(out.exit_code, Some(0));
     assert_eq!(
@@ -359,7 +359,7 @@ fn upgrade_preserves_auth_and_logs() {
         MANIFEST.replace("\"1.0.0\"", "\"1.0.1\""),
     )
     .unwrap();
-    std::fs::write(src2.join("app.wasm"), b" asm   ").unwrap();
+    std::fs::write(src2.join("app.wasm"), b"\0asm\x01\0\0\0").unwrap();
     let pkg = AppPackage::load(&src2).unwrap();
     pkg.sign(&d.ids, &d.device, &d.key_dir).unwrap();
     let devices = d.ids.list_devices(d.user.id).unwrap();
