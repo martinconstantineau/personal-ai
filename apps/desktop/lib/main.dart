@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'pai_bridge.dart';
@@ -1432,6 +1433,110 @@ class _AppsScreenState extends State<AppsScreen> {
     );
   }
 
+  /// Re-grant a narrower sub-token from a parent token this device
+  /// holds — the parent must carry `share` and be bound to us.
+  Future<void> _delegate() async {
+    var parentJson = '';
+    Map<String, dynamic>? parent;
+    final chosen = <String>{};
+    var days = 0;
+    var forKey = '';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          final parentActions =
+              (parent?['actions'] as List?)?.cast<String>() ?? const [];
+          return AlertDialog(
+            title: const Text('Re-grant a token'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                        labelText: 'Parent token JSON',
+                        hintText: 'paste the token file contents'),
+                    onChanged: (v) => setD(() {
+                      parentJson = v;
+                      try {
+                        parent =
+                            jsonDecode(v) as Map<String, dynamic>;
+                        chosen.removeWhere(
+                            (a) => !parentActions.contains(a));
+                      } catch (_) {
+                        parent = null;
+                      }
+                    }),
+                  ),
+                  if (parentJson.isNotEmpty && parent == null)
+                    const Text('not a token JSON',
+                        style: TextStyle(color: Colors.redAccent)),
+                  if (parent != null)
+                    Text('app ${parent!['app_id']} — may delegate '
+                        '${parentActions.join(",")}'),
+                  for (final a in parentActions)
+                    CheckboxListTile(
+                      dense: true,
+                      title: Text(a),
+                      value: chosen.contains(a),
+                      onChanged: (v) => setD(() =>
+                          v == true ? chosen.add(a) : chosen.remove(a)),
+                    ),
+                  TextFormField(
+                    decoration: const InputDecoration(
+                        labelText: 'Days valid (0 = parent expiry)'),
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) => days = int.tryParse(v) ?? 0,
+                  ),
+                  TextFormField(
+                    decoration: const InputDecoration(
+                        labelText: 'Bind to device (prefix or hex key, '
+                            'blank = bearer)'),
+                    onChanged: (v) => forKey = v.trim(),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel')),
+              FilledButton(
+                  onPressed: parent != null && chosen.isNotEmpty
+                      ? () => Navigator.pop(ctx, true)
+                      : null,
+                  child: const Text('Mint sub-token')),
+            ],
+          );
+        },
+      ),
+    );
+    if (ok != true || parent == null || chosen.isEmpty) return;
+    final r = await widget.bridge
+        .shareDelegate(parentJson, chosen.join(','), days, forKey);
+    if (!mounted) return;
+    final err = r['error'];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(err != null ? 'Delegate failed' : 'Sub-token'),
+        content: SingleChildScrollView(
+          child: SelectableText(err != null
+              ? '$err'
+              : "${r['token_json']}\n\nsaved to ${r['path']} — copy "
+                  'this JSON to the next device; it embeds the chain.'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Done')),
+        ],
+      ),
+    );
+  }
+
   /// Issued grants with revoke — the `pai apps grants` surface.
   Future<void> _grants() async {
     final r = await widget.bridge.shareList();
@@ -1440,24 +1545,37 @@ class _AppsScreenState extends State<AppsScreen> {
     await showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
-        child: list.isEmpty
-            ? const Padding(
-                padding: EdgeInsets.all(24),
-                child: Text('No grants issued — share an app first.'))
-            : ListView(
-                shrinkWrap: true,
-                children: [
-                  for (final g in list)
-                    ListTile(
-                      dense: true,
-                      title: Text('${g['app_id']} — '
-                          '${(g['actions'] as List).join(",")}'),
-                      subtitle: Text(
-                          '${'${g['token_id']}'.substring(0, 8)}… · '
-                          '${g['status']} · '
-                          '${g['bound'] == true ? "bound" : "bearer"}',
-                          style: const TextStyle(
-                              fontFamily: 'monospace', fontSize: 12)),
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Row(children: [
+                TextButton.icon(
+                    icon: const Icon(Icons.account_tree_outlined),
+                    label: const Text('Re-grant token…'),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _delegate();
+                    }),
+              ]),
+            ),
+            if (list.isEmpty)
+              const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text('No grants issued — share an app first.')),
+            for (final g in list)
+              ListTile(
+                dense: true,
+                title: Text('${g['app_id']} — '
+                    '${(g['actions'] as List).join(",")}'),
+                subtitle: Text(
+                    '${'${g['token_id']}'.substring(0, 8)}… · '
+                    '${g['status']} · '
+                    '${g['bound'] == true ? "bound" : "bearer"}'
+                    '${g['parent'] != null ? " · ↳ ${'${g['parent']}'.substring(0, 8)}…" : ""}',
+                    style: const TextStyle(
+                        fontFamily: 'monospace', fontSize: 12)),
                       trailing: g['status'] == 'active'
                           ? IconButton(
                               icon: const Icon(Icons.block),

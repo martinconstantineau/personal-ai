@@ -204,6 +204,19 @@ class PaiBridge {
             'for': forDevice,
           }))) as Map<String, dynamic>;
 
+  /// Re-grant a narrower sub-token from a held parent token JSON —
+  /// the parent must carry `share` and be bound to this device.
+  /// [forKey] is a paired-peer prefix or 64-hex pubkey ('' = bearer).
+  Future<Map<String, dynamic>> shareDelegate(
+          String parentJson, String actions, int days, String forKey) async =>
+      (await _call(_Op.shareDelegate,
+          arg: jsonEncode({
+            'parent': parentJson,
+            'actions': actions,
+            'days': days,
+            'for': forKey,
+          }))) as Map<String, dynamic>;
+
   Future<Map<String, dynamic>> shareList() async =>
       (await _call(_Op.shareList)) as Map<String, dynamic>;
 
@@ -363,6 +376,13 @@ class PaiBridge {
                 a['actions'] as String,
                 a['days'] as int,
                 a['for'] as String);
+          case _Op.shareDelegate:
+            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+            result = client.shareDelegate(
+                a['parent'] as String,
+                a['actions'] as String,
+                a['days'] as int,
+                a['for'] as String);
           case _Op.shareList:
             result = client.shareList();
           case _Op.shareRevoke:
@@ -425,6 +445,7 @@ enum _Op {
   appsMigrate,
   peersList,
   appsShareGrant,
+  shareDelegate,
   shareList,
   shareRevoke,
 }

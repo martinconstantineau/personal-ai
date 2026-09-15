@@ -116,6 +116,9 @@ class PaiClient {
   late final _shareGrant = _lib.lookupFunction<_ShareGrantNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, int,
           Pointer<Utf8>)>('pai_share_grant');
+  late final _shareDelegate = _lib.lookupFunction<_ShareGrantNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, int,
+          Pointer<Utf8>)>('pai_share_delegate');
   late final _shareList = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_share_list');
   late final _shareRevoke = _lib.lookupFunction<_SendNative,
@@ -333,6 +336,21 @@ class PaiClient {
     final pb = actions.toNativeUtf8();
     final pc = forDevice.toNativeUtf8();
     final out = _shareGrant(_handle, pa, pb, days, pc);
+    calloc.free(pa);
+    calloc.free(pb);
+    calloc.free(pc);
+    return _json(out) as Map<String, dynamic>;
+  }
+
+  /// Re-grant a narrower sub-token from a held parent token — the
+  /// parent must carry `share` and be bound to this device's key.
+  /// [forKey] is a paired-peer prefix or 64-hex pubkey ('' = bearer).
+  Map<String, dynamic> shareDelegate(
+      String parentJson, String actions, int days, String forKey) {
+    final pa = parentJson.toNativeUtf8();
+    final pb = actions.toNativeUtf8();
+    final pc = forKey.toNativeUtf8();
+    final out = _shareDelegate(_handle, pa, pb, days, pc);
     calloc.free(pa);
     calloc.free(pb);
     calloc.free(pc);

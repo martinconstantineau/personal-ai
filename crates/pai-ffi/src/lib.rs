@@ -1656,6 +1656,154 @@ pub unsafe extern "C" fn pai_share_grant(
     }))
 }
 
+/// Re-grant a narrower sub-token from a parent token this device
+/// holds — `parent_json` is a token file's contents (from `pai apps
+/// share` or `pai_share_grant`). The parent must carry `share` and be
+/// bound to this device's key. `actions_csv` narrows within the
+/// parent's set; `days` ≤ 0 keeps the parent's expiry. `for_key` is a
+/// paired-device prefix or a 64-hex Ed25519 pubkey (empty = bearer).
+/// Returns `{ok, token_id, token_json}` — the child embeds the chain.
+/// # Safety
+/// `handle` must come from `pai_init`; strings are NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn pai_share_delegate(
+    handle: *mut PaiRuntime,
+    parent_json: *const c_char,
+    actions_csv: *const c_char,
+    days: i64,
+    for_key: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let parent_json = match read_str(parent_json) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let actions_csv = match read_str(actions_csv) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let for_key = match read_str(for_key) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let parent_cap = match pai_share::Capability::from_json(&parent_json) {
+        Ok(c) => c,
+        Err(e) => {
+            return to_c(serde_json::json!({"error":
+                format!("bad parent token: {e}")}))
+        }
+    };
+    // The chain only verifies when this device's key is the key the
+    // parent was bound to — fail early with a readable message.
+    let my_key: Option<String> = rt
+        .store
+        .with_conn(|c| {
+            c.query_row(
+                "SELECT public_key FROM devices WHERE id=?1",
+                rusqlite::params![rt.device.to_string()],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+        })
+        .ok()
+        .map(hex::encode);
+    if parent_cap.grantee_key.as_deref() != my_key.as_deref() {
+        return to_c(serde_json::json!({"error":
+            "parent token isn't bound to this device's key"}));
+    }
+    let mut actions = Vec::new();
+    for a in actions_csv.split(',') {
+        actions.push(match a.trim() {
+            "exec" => pai_share::Action::Exec,
+            "read" => pai_share::Action::Read,
+            "write" => pai_share::Action::Write,
+            "share" => pai_share::Action::Share,
+            other => {
+                return to_c(serde_json::json!({"error":
+                    format!("unknown action '{other}'")}))
+            }
+        });
+    }
+    let grantee_key = if for_key.is_empty() {
+        None
+    } else if let Ok(raw) = hex::decode(&for_key) {
+        match <[u8; 32]>::try_from(raw.as_slice()) {
+            Ok(k) => Some(k),
+            Err(_) => {
+                return to_c(serde_json::json!({"error":
+                    "for_key hex must be 32 bytes (64 hex chars)"}))
+            }
+        }
+    } else {
+        let peers = match pai_sync::pair::list_peers(&rt.store) {
+            Ok(p) => p,
+            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+        };
+        let m: Vec<_> = peers
+            .iter()
+            .filter(|p| p.device_id.to_string().starts_with(&for_key))
+            .collect();
+        match m.len() {
+            1 => Some(m[0].ed_pubkey),
+            0 => {
+                return to_c(serde_json::json!({"error":
+                    format!("no paired device matching '{for_key}'")}))
+            }
+            n => {
+                return to_c(serde_json::json!({"error":
+                    format!("'{for_key}' matches {n} devices")}))
+            }
+        }
+    };
+    let mut spec = pai_share::GrantSpec::for_app(parent_cap.app_id.clone(), actions.clone());
+    spec.grantee_key = grantee_key;
+    spec.device = parent_cap.device;
+    spec.expires = if days > 0 {
+        Some(pai_core::now().timestamp() + days * 86_400)
+    } else {
+        parent_cap.expires
+    };
+    let shares = pai_share::ShareStore::new(std::path::Path::new(&rt.data_dir));
+    let ids = pai_identity::IdentityStore::new(rt.store.clone());
+    let key_dir = std::path::Path::new(&rt.data_dir).join("keys");
+    let cap = match shares.delegate(&ids, &key_dir, rt.device, &parent_cap, spec) {
+        Ok(c) => c,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let json = match cap.to_json() {
+        Ok(j) => j,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let path = std::path::Path::new(&rt.data_dir)
+        .join("share")
+        .join("tokens")
+        .join(format!("{}-{}.json", cap.app_id, cap.token_id));
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let _ = std::fs::write(&path, &json);
+    let mut ev = pai_audit::event(AuditKind::AppShared, AuditOutcome::Ok);
+    ev.device = Some(rt.device);
+    ev.detail = serde_json::json!({
+        "app_id": cap.app_id,
+        "token_id": cap.token_id,
+        "parent": parent_cap.token_id,
+        "delegated": true,
+        "actions": actions.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+        "bound": cap.grantee_key.is_some(),
+        "expires": cap.expires,
+    });
+    let _ = rt.audit.record(&ev);
+    to_c(serde_json::json!({
+        "ok": true,
+        "token_id": cap.token_id,
+        "token_json": json,
+        "path": path.display().to_string(),
+        "parent": parent_cap.token_id,
+        "expires": cap.expires,
+        "bound": cap.grantee_key.is_some(),
+    }))
+}
+
 /// List issued capability grants — `{grants: [{token_id, app_id,
 /// actions, status, expires, bound}]}` newest first.
 /// # Safety
@@ -1674,6 +1822,7 @@ pub unsafe extern "C" fn pai_share_list(handle: *mut PaiRuntime) -> *mut c_char 
                 "status": format!("{st:?}").to_lowercase(),
                 "expires": c.expires,
                 "bound": c.grantee_key.is_some(),
+                "parent": c.parent.as_ref().map(|p| p.token_id.clone()),
             })).collect::<Vec<_>>(),
         })),
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),

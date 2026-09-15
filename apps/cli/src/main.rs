@@ -2385,8 +2385,13 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                         .and_then(|e| chrono::DateTime::from_timestamp(e, 0))
                         .map(|d| d.to_rfc3339())
                         .unwrap_or_else(|| "never".into());
+                    let parent = cap
+                        .parent
+                        .as_ref()
+                        .map(|p| format!("  ↳ {:.8}", p.token_id))
+                        .unwrap_or_default();
                     println!(
-                        "{}  {:<24} {:<10} {:<8} exp {}  {}",
+                        "{}  {:<24} {:<10} {:<8} exp {}  {}{}",
                         cap.token_id,
                         cap.app_id,
                         actions,
@@ -2396,7 +2401,8 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                             "bound"
                         } else {
                             "bearer"
-                        }
+                        },
+                        parent,
                     );
                 }
             }

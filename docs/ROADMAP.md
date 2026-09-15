@@ -390,9 +390,16 @@ delegated an exec-only sub-token, an unpaired third device ran the
 app on the host through it, and revoking the parent refused the
 child.
 
-- Remaining: deeper mobile shell work; delegated grants aren't yet
-  shown in the grants UI (`list()` sees them — they're files in
-  `share/caps/` — but there's no chain display).
+**V4s done (2026-09-15):** delegation reaches the shell —
+`pai_share_delegate` FFI export (parent token JSON in, child JSON
+out; `--for` accepts a paired-peer prefix or a raw 64-hex pubkey,
+`days` ≤ 0 keeps the parent's expiry), Dart binding + bridge op, and
+a "Re-grant token…" entry in the Apps-screen grants sheet (paste the
+parent JSON, checkboxes offered only for the parent's actions). Grant
+listings show the chain: `pai apps grants` prints `↳ <parent>` on
+delegated tokens and `pai_share_list` gains a `parent` field.
+
+- Remaining: deeper mobile shell work.
 
 ## Known technical debt (tracked, not hidden)
 
