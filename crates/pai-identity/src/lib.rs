@@ -217,34 +217,165 @@ fn platform_from(s: &str) -> Platform {
 
 /// Best-effort local hardware probe for the compute broker.
 pub fn probe_capabilities() -> DeviceCapabilities {
-    let ram = std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|m| {
-            m.lines()
-                .find(|l| l.starts_with("MemTotal:"))
-                .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-                .map(|kb| kb * 1024)
-        })
-        .unwrap_or(0);
+    let (on_battery, thermal_throttled) = probe_power();
     DeviceCapabilities {
         cpu_cores: std::thread::available_parallelism()
             .map(|n| n.get() as u32)
             .unwrap_or(1),
-        ram_bytes: ram,
+        ram_bytes: probe_ram(),
         gpu_vram_bytes: None,
         gpu_name: None,
         npu_available: false,
-        on_battery: None,
-        thermal_throttled: None,
+        on_battery,
+        thermal_throttled,
         network: NetworkState::Unknown,
         available_models: vec![],
         supported_capabilities: vec![ModelCapability::TextGeneration],
     }
 }
 
+/// Total physical RAM, 0 if undetectable. `/proc/meminfo` on Linux,
+/// `GlobalMemoryStatusEx` on Windows.
+fn probe_ram() -> u64 {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut st: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        st.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if unsafe { GlobalMemoryStatusEx(&mut st) } != 0 {
+            st.ullTotalPhys
+        } else {
+            0
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|m| {
+                m.lines()
+                    .find(|l| l.starts_with("MemTotal:"))
+                    .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+                    .map(|kb| kb * 1024)
+            })
+            .unwrap_or(0)
+    }
+}
+
+/// Live power/thermal state — `(on_battery, thermal_throttled)`.
+/// Called at device registration AND re-sampled by the broker's load
+/// probe each announce, so `bcap` hints track the cord.
+///
+/// - **Windows**: `GetSystemPowerStatus` — `ACLineStatus` 0/1/255 maps
+///   to on-battery/AC/unknown.
+/// - **Linux**: `/sys/class/power_supply` — a `BAT*` reporting
+///   `Discharging` → on battery; an `AC*`/`ADP*`/`Mains*` `online=0`
+///   → on battery; supplies present but none discharging → AC.
+///   Thermal: any `cpu*/cpufreq` running <80% of `cpuinfo_max_freq`
+///   counts as throttled (best-effort).
+/// - **Other platforms**: `(None, None)` — callers treat `None` as
+///   neutral.
+pub fn probe_power() -> (Option<bool>, Option<bool>) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+        let mut st: SYSTEM_POWER_STATUS = unsafe { std::mem::zeroed() };
+        let on_battery = if unsafe { GetSystemPowerStatus(&mut st) } != 0 {
+            match st.ACLineStatus {
+                0 => Some(true),
+                1 => Some(false),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        // Thermal throttling needs WMI/perf counters — not worth a
+        // subprocess per announce; None = neutral.
+        (on_battery, None)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let ps = std::path::Path::new("/sys/class/power_supply");
+        let mut on_battery = None;
+        if let Ok(entries) = std::fs::read_dir(ps) {
+            let mut saw_supply = false;
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                let read = |f: &str| {
+                    std::fs::read_to_string(e.path().join(f))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                };
+                if name.starts_with("BAT") {
+                    saw_supply = true;
+                    if read("status").as_deref() == Some("Discharging") {
+                        on_battery = Some(true);
+                        break;
+                    }
+                } else if name.starts_with("AC")
+                    || name.starts_with("ADP")
+                    || name.starts_with("Mains")
+                {
+                    saw_supply = true;
+                    if read("online").as_deref() == Some("0") {
+                        on_battery = Some(true);
+                        break;
+                    }
+                }
+            }
+            if on_battery.is_none() && saw_supply {
+                on_battery = Some(false);
+            }
+        }
+        // Throttled if any core runs <80% of its max frequency.
+        let mut throttled = None;
+        let cpu = std::path::Path::new("/sys/devices/system/cpu");
+        if let Ok(entries) = std::fs::read_dir(cpu) {
+            for e in entries.flatten() {
+                let freq = e.path().join("cpufreq");
+                let (Ok(cur), Ok(max)) = (
+                    std::fs::read_to_string(freq.join("scaling_cur_freq")),
+                    std::fs::read_to_string(freq.join("cpuinfo_max_freq")),
+                ) else {
+                    continue;
+                };
+                if let (Ok(c), Ok(m)) = (cur.trim().parse::<u64>(), max.trim().parse::<u64>()) {
+                    if m > 0 && c * 5 < m * 4 {
+                        throttled = Some(true);
+                        break;
+                    }
+                    throttled.get_or_insert(false);
+                }
+            }
+        }
+        (on_battery, throttled)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        (None, None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn power_probe_returns_sane_options() {
+        // Exercises the real OS path (GetSystemPowerStatus here) —
+        // can't assert a value, but it must not panic and must agree
+        // with the capability probe.
+        let (bat, th) = probe_power();
+        let caps = probe_capabilities();
+        assert_eq!(caps.on_battery, bat);
+        assert_eq!(caps.thermal_throttled, th);
+        // RAM probe should find real memory on any dev host.
+        assert!(caps.ram_bytes > 0);
+        eprintln!(
+            "probe_power: on_battery={bat:?} thermal={th:?} ram={}",
+            caps.ram_bytes
+        );
+    }
 
     #[test]
     fn device_sign_verify_roundtrip() {

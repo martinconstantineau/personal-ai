@@ -2904,12 +2904,18 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                             pai_broker::rpc::BrokerServer::new(&*t, &vault, device.id, &ops)
                                 .with_ops(ops.ops())
                                 .with_guest_handler(guests, guest_handler)
-                                .with_load_probe(Box::new(move || pai_broker::rpc::DeviceLoad {
-                                    busy: busy.load(Ordering::Relaxed) as u32,
-                                    on_battery: caps.on_battery,
-                                    thermal_throttled: caps.thermal_throttled,
-                                    ram_bytes: caps.ram_bytes,
-                                    cpu_cores: caps.cpu_cores,
+                                .with_load_probe(Box::new(move || {
+                                    // Battery/thermal are re-sampled live
+                                    // each announce; hardware fields are
+                                    // registration-time.
+                                    let (bat, th) = pai_identity::probe_power();
+                                    pai_broker::rpc::DeviceLoad {
+                                        busy: busy.load(Ordering::Relaxed) as u32,
+                                        on_battery: bat.or(caps.on_battery),
+                                        thermal_throttled: th.or(caps.thermal_throttled),
+                                        ram_bytes: caps.ram_bytes,
+                                        cpu_cores: caps.cpu_cores,
+                                    }
                                 }));
                         println!(
                             "broker serving {} on {} — ops: {} (+ guest endpoint)",

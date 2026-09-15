@@ -432,12 +432,18 @@ guest read/write handles are all shipped and pushed.
   that device's score in `find_peer` — positive prefers, negative
   avoids, 0 clears. `broker devices` shows the weight. Client-side
   only; no wire change.
+- [x] **V5c — live power/thermal probing**: `probe_power()` samples
+  real power state (`GetSystemPowerStatus` on Windows, sysfs +
+  cpufreq on Linux) at registration AND per `bcap` announce — a
+  device that unplugs stops attracting work within ~60 s. Linux
+  cpufreq <80%-of-max reports `thermal_throttled`. Windows RAM probe
+  fixed (`GlobalMemoryStatusEx` — was 0). macOS/other OSes report
+  `None` (neutral).
 
 - Beyond V4 (PRD-level, future tracks): stable app URLs
   (`app.user.devices`), the App Operator agent flows
   (§6.8 — "give Sarah access" → scoped capability), rescue-mode whole-
-  cloud restore, an app's own CRDT-collaborative data layer, and live
-  battery/thermal re-probing.
+  cloud restore, and an app's own CRDT-collaborative data layer.
 
 ## Known technical debt (tracked, not hidden)
 

@@ -28,8 +28,12 @@ battery.
   (`BusyGuard` wraps `handle`/streaming `infer`) and a
   `BrokerServer::with_load_probe` closure samples it at each announce
   (60 s cadence, 300 s TTL — unchanged).
-- `on_battery`, `thermal_throttled`, `ram_bytes`, `cpu_cores` come
-  from the device's registered `DeviceCapabilities`.
+- `on_battery`/`thermal_throttled` are **live** too: the probe calls
+  `pai_identity::probe_power()` per announce — `GetSystemPowerStatus`
+  on Windows, `/sys/class/power_supply` + cpufreq heuristics on
+  Linux, `None` elsewhere (neutral). Registration also uses it, so
+  `DeviceCapabilities` rows now carry real power state.
+- `ram_bytes`, `cpu_cores` are registration-time hardware constants.
 
 `find_peer` scores each fresh candidate:
 
@@ -57,9 +61,9 @@ cadence are untouched.
   seal** — fine inside the trust domain (vault members); a malicious
   peer could inflate its score, same as it could already advertise
   any op.
-- Hardware fields are registration-time values. Live battery/thermal
-  re-probing (OS APIs per platform) is a follow-up; `busy` already
-  covers the dynamic part.
+- RAM/cores stay registration-time constants (they don't move);
+  power state went live with `probe_power` — a laptop that unplugs
+  stops attracting `--on any` work within one announce cycle (≤60 s).
 - User preference landed as `BrokerClient::with_weights` — a local
   `place_weight.<device>` meta value (`pai broker prefer <peer> <w>`,
   `broker devices` shows it) added client-side to each candidate's
