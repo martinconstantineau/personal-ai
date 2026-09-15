@@ -2108,6 +2108,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pai-share"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "pai-core",
+ "pai-identity",
+ "pai-storage",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "pai-storage"
 version = "0.1.0"
 dependencies = [

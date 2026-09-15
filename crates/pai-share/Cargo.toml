@@ -1,0 +1,19 @@
+[package]
+name = "pai-share"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Capability tokens for cross-device app sharing: signed, expiring, revocable grants."
+
+[dependencies]
+pai-core.workspace = true
+pai-identity.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+pai-storage.workspace = true
