@@ -334,6 +334,12 @@ pub struct BrokerServer<'a, T: SyncTransport + ?Sized, H: OpHandler> {
     served: std::collections::HashSet<String>,
     /// Ops this device advertises via `bcap` — set by `serve`.
     ops: Vec<String>,
+    /// Optional guest-request endpoint: token-authenticated `greq`
+    /// objects (non-vault requesters) verified + executed each pass.
+    guest: Option<(
+        pai_share::guest::GuestServer,
+        Box<pai_share::guest::GuestHandler<'static>>,
+    )>,
 }
 
 impl<'a, T: SyncTransport + ?Sized, H: OpHandler> BrokerServer<'a, T, H> {
@@ -345,12 +351,25 @@ impl<'a, T: SyncTransport + ?Sized, H: OpHandler> BrokerServer<'a, T, H> {
             handler,
             served: Default::default(),
             ops: vec![],
+            guest: None,
         }
     }
 
     /// Ops this server will advertise + answer to.
     pub fn with_ops(mut self, ops: Vec<String>) -> Self {
         self.ops = ops;
+        self
+    }
+
+    /// Also answer guest requests: `greq/<me>/` objects carrying a
+    /// [`pai_share::Capability`] are verified and run through `handler`
+    /// each serve pass; responses seal to the request's ephemeral key.
+    pub fn with_guest_handler(
+        mut self,
+        guests: pai_share::guest::GuestServer,
+        handler: Box<pai_share::guest::GuestHandler<'static>>,
+    ) -> Self {
+        self.guest = Some((guests, handler));
         self
     }
 
@@ -538,6 +557,16 @@ impl<'a, T: SyncTransport + ?Sized, H: OpHandler> BrokerServer<'a, T, H> {
             .await
     }
 
+    /// One pass over the guest endpoint (`greq/<me>/`). No-ops when no
+    /// guest handler is attached — exposed for guest-only serving and
+    /// tests.
+    pub async fn serve_guests_once(&self) -> Result<usize> {
+        match &self.guest {
+            Some((g, h)) => g.serve_once(self.transport, h.as_ref()).await,
+            None => Ok(0),
+        }
+    }
+
     /// Poll-and-serve forever — the `pai broker serve` loop. Announces
     /// capabilities up front and re-announces periodically.
     pub async fn serve(&mut self, poll: Duration) -> ! {
@@ -550,6 +579,9 @@ impl<'a, T: SyncTransport + ?Sized, H: OpHandler> BrokerServer<'a, T, H> {
         loop {
             if let Err(e) = self.serve_once().await {
                 tracing::warn!(error = %e, "broker serve pass failed");
+            }
+            if let Err(e) = self.serve_guests_once().await {
+                tracing::warn!(error = %e, "broker guest serve pass failed");
             }
             if !self.ops.is_empty() && last_announce.elapsed() >= CAP_REANNOUNCE {
                 if let Err(e) = self.announce().await {

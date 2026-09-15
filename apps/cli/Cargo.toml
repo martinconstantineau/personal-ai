@@ -29,6 +29,7 @@ pai-workflows.workspace = true
 pai-notify.workspace = true
 pai-audit.workspace = true
 pai-apps.workspace = true
+pai-share.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true

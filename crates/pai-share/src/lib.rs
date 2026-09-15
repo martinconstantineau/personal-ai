@@ -12,10 +12,13 @@
 //! needs only the issuer's public key, so it works for grantors whose
 //! device isn't in the local `devices` table.
 //!
-//! Enforcement note: nothing here yet *consumes* grants — vault sync
-//! already shares everything among the user's own devices. Tokens are
-//! the primitive a non-vault requester class (broker `app-run` from a
-//! guest, shared read handles) will check once that path exists.
+//! Enforcement: [`guest`] turns a token into a request channel over
+//! `SyncTransport` — `greq/` objects carry the capability, `gres/`
+//! replies seal to the request's ephemeral X25519 key. `pai apps run
+//! --cap <token>` presents it; `pai broker serve` verifies and runs it
+//! through the same sandboxed `app_run_op` vault members use.
+
+pub mod guest;
 
 use pai_core::{Device, DeviceId, Error as IdentityError};
 use pai_identity::IdentityStore;

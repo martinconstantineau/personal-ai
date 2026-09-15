@@ -117,6 +117,17 @@ Emergency/manual commits by maintainers follow the same rule — no
   `active_device` in the export itself — the Flutter shell can't
   accidentally run an app that lives on another device (UI is a
   convenience layer, not the trust boundary).
+- **Guest execution is capability-gated**: a device outside the vault
+  runs an app only by presenting a `pai apps share` token — an
+  Ed25519-signed grant checked for issuer signature, revocation
+  tombstone, expiry, and app/action binding before `app_run_op` ever
+  runs. `greq/` requests travel unsealed (they carry no vault data —
+  only the token, args, and an ephemeral X25519 key) while `gres/`
+  replies seal to that ephemeral key, so response bodies are private
+  even on a shared transport. Tokens bound with `--for` additionally
+  require the request to be signed by the grantee's device key.
+  Bearer tokens are exactly that — anyone holding the file may run
+  the app until expiry or `apps revoke`.
 - Android `RECORD_AUDIO` is declared for voice capture; the runtime
   grant is still required, and there is no in-app permission-request
   flow yet — voice capture simply fails until granted in system

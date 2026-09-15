@@ -333,8 +333,7 @@ sync → list → run, no shell needed.
 **V4m done (2026-09-15):** `pai-share` capability tokens — signed
 Ed25519 grants ({app_id, actions, grantee_key, device, expires}) with
 a file-backed ShareStore; verify() checks signature, revocation,
-expiry, action coverage. Primitive only so far — the non-vault
-requester class that consumes grants is V2 scope.
+expiry, action coverage. Consumed by V4o's guest path.
 
 **V4n done (2026-09-15):** mobile app polish — `pai_apps_list` FFI
 now carries `active_device` + own device id (the Apps screen badges
@@ -344,9 +343,20 @@ here), `pai_apps_run` enforces placement at the FFI boundary itself
 state), `pai_apps_migrate` + `pai_peers_list` exports drive a
 migrate-to-peer sheet, and runs accept an args field.
 
-- Remaining: grant consumption (a non-vault requester class for
-  `pai-share` tokens — guest app-run / shared reads), deeper mobile
-  shell work.
+**V4o done (2026-09-15):** capability-shared guest execution —
+`pai apps share <app>` mints a signed, expiring token (bearer, or
+bound to a peer's device key with `--for`), `apps grants`/`apps
+revoke` manage them (audit: AppShared/AppShareRevoked), and
+`pai apps run --cap <token> --on <device>` lets a NON-vault device
+execute: the `greq/` object carries the token + an ephemeral X25519
+key, `broker serve` verifies (signature, revocation, expiry, app
+binding, grantee signature when bound) and runs it through the same
+sandboxed `app_run_op`; the `gres/` reply seals to the ephemeral key.
+Serve also works vault-free — a host that only shares to guests
+needs no pairing. Covered by tests/tests/v4n_guest_run.rs.
+
+- Remaining: shared read/write handles on guest tokens (only `exec`
+  is consumed today), deeper mobile shell work.
 
 ## Known technical debt (tracked, not hidden)
 

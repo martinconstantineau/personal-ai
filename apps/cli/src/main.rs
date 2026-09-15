@@ -218,6 +218,11 @@ enum AppsCmd {
         /// Transport for --on: relay bearer token.
         #[arg(long)]
         token: Option<String>,
+        /// Run as a guest: path to a capability token JSON file issued
+        /// by `pai apps share` on the target device. The request is
+        /// signed with this device's key when the grant is bound to it.
+        #[arg(long)]
+        cap: Option<String>,
         /// Arguments passed to the app.
         args: Vec<String>,
     },
@@ -259,6 +264,35 @@ enum AppsCmd {
         /// Destination device — a paired device-id prefix.
         #[arg(long)]
         to: String,
+    },
+    /// Issue a capability token for an installed app — a signed,
+    /// expiring grant a guest device uses with `pai apps run --cap`.
+    Share {
+        /// Installed app id to share.
+        id: String,
+        /// Action granted: `exec`, `read`, or `write`.
+        #[arg(long, default_value = "exec")]
+        action: String,
+        /// Token lifetime in days.
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        /// Bind the grant to a paired device's id prefix — requests
+        /// must then be signed by that device's key. Omit for a
+        /// bearer token (anyone holding it may run the app).
+        #[arg(long, name = "for")]
+        for_device: Option<String>,
+        /// Write the token JSON here instead of share/<app>/<id>.json.
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// List capability grants this device has issued.
+    Grants,
+    /// Revoke a capability grant by token id.
+    Revoke {
+        /// Installed app id the grant belongs to.
+        id: String,
+        /// Token id (see `pai apps grants`).
+        token: String,
     },
 }
 
@@ -1756,30 +1790,73 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 dir,
                 relay,
                 token,
+                cap,
                 args,
             } if on.is_some() => {
                 let dev = on.as_deref().unwrap();
                 let t = sync_transport(dir, relay, token)?;
-                let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
-                    Error::Sync("no vault key — pair a device first (pai pair)".into())
-                })?;
-                let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id);
-                let to = if dev == "any" {
-                    client.find_peer("app-run").await?.ok_or_else(|| {
-                        Error::NotFound(
-                            "no paired device advertises app-run — `pai broker serve` running?"
-                                .into(),
-                        )
-                    })?
-                } else {
-                    resolve_peer(&store, dev)?
-                };
-                let payload = serde_json::json!({"id": id, "args": args})
-                    .to_string()
-                    .into_bytes();
-                let resp = client
-                    .call(to, "app-run", &payload, std::time::Duration::from_secs(120))
+                let (to, resp) = if let Some(cap_path) = cap {
+                    // Guest path: a capability token stands in for
+                    // vault membership — request goes out unsealed,
+                    // response seals to an ephemeral key in it.
+                    let json = std::fs::read_to_string(cap_path)
+                        .map_err(|e| Error::InvalidInput(format!("{cap_path}: {e}")))?;
+                    let capability = pai_share::Capability::from_json(&json)
+                        .map_err(|e| Error::InvalidInput(format!("bad token: {e}")))?;
+                    if capability.app_id != *id {
+                        return Err(Error::InvalidInput(format!(
+                            "token grants app {} not {id}",
+                            capability.app_id
+                        )));
+                    }
+                    // Guests can't read sealed bcap announcements — a
+                    // literal device id, a paired prefix, or the
+                    // token's issuer (`any`) name the target.
+                    let to = if dev == "any" {
+                        capability.issued_by
+                    } else {
+                        match uuid::Uuid::parse_str(dev) {
+                            Ok(u) => DeviceId(u),
+                            Err(_) => resolve_peer(&store, dev)?,
+                        }
+                    };
+                    let signer = |msg: &[u8]| {
+                        ids.sign(device.id, &key_dir, msg)
+                            .map_err(|e| pai_share::ShareError::InvalidInput(e.to_string()))
+                    };
+                    let resp = pai_share::guest::call_guest(
+                        &*t,
+                        to,
+                        capability,
+                        args,
+                        std::time::Duration::from_secs(120),
+                        Some(&signer),
+                    )
                     .await?;
+                    (to, resp)
+                } else {
+                    let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
+                        Error::Sync("no vault key — pair a device first (pai pair)".into())
+                    })?;
+                    let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id);
+                    let to = if dev == "any" {
+                        client.find_peer("app-run").await?.ok_or_else(|| {
+                            Error::NotFound(
+                                "no paired device advertises app-run — `pai broker serve` running?"
+                                    .into(),
+                            )
+                        })?
+                    } else {
+                        resolve_peer(&store, dev)?
+                    };
+                    let payload = serde_json::json!({"id": id, "args": args})
+                        .to_string()
+                        .into_bytes();
+                    let resp = client
+                        .call(to, "app-run", &payload, std::time::Duration::from_secs(120))
+                        .await?;
+                    (to, resp)
+                };
                 let v: serde_json::Value = serde_json::from_slice(&resp)
                     .map_err(|e| Error::Other(format!("bad app-run response: {e}")))?;
                 use base64::Engine as _;
@@ -1954,6 +2031,169 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                         .unwrap_or_else(|| "was empty".into())
                 );
                 println!("`pai sync push` ships it; the target restores on pull");
+            }
+            AppsCmd::Share {
+                id,
+                action,
+                days,
+                for_device,
+                out,
+            } => {
+                let reg = pai_apps::AppRegistry::new(&cfg.data_dir);
+                if reg
+                    .get(id)
+                    .map_err(|e| Error::InvalidInput(e.to_string()))?
+                    .is_none()
+                {
+                    return Err(Error::NotFound(format!(
+                        "app {id} — `pai apps deploy` it first"
+                    )));
+                }
+                let action = match action.as_str() {
+                    "exec" => pai_share::Action::Exec,
+                    "read" => pai_share::Action::Read,
+                    "write" => pai_share::Action::Write,
+                    "share" => pai_share::Action::Share,
+                    other => {
+                        return Err(Error::InvalidInput(format!(
+                            "unknown action '{other}' — exec|read|write|share"
+                        )))
+                    }
+                };
+                // --for binds the grant to a peer's device key: guest
+                // requests must then arrive signed by that key.
+                let grantee_key = match for_device {
+                    Some(prefix) => {
+                        let peers = pai_sync::pair::list_peers(&store)?;
+                        let m: Vec<_> = peers
+                            .iter()
+                            .filter(|p| p.device_id.to_string().starts_with(prefix.as_str()))
+                            .collect();
+                        match m.len() {
+                            0 => {
+                                return Err(Error::NotFound(format!(
+                                    "no paired device matching '{prefix}'"
+                                )))
+                            }
+                            1 => Some(m[0].ed_pubkey),
+                            n => {
+                                return Err(Error::InvalidInput(format!(
+                                    "'{prefix}' matches {n} devices — be more specific"
+                                )))
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                let shares = pai_share::ShareStore::new(&cfg.data_dir);
+                let mut spec = pai_share::GrantSpec::for_app(id.clone(), vec![action]);
+                spec.grantee_key = grantee_key;
+                spec.expires = Some((pai_core::now() + chrono::Duration::days(*days)).timestamp());
+                let cap = shares
+                    .grant(&ids, &key_dir, &device, spec)
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                let json = cap.to_json().map_err(|e| Error::Other(e.to_string()))?;
+                let path = match out {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => cfg
+                        .data_dir
+                        .join("share")
+                        .join("tokens")
+                        .join(format!("{}-{}.json", cap.app_id, cap.token_id)),
+                };
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                std::fs::write(&path, &json)
+                    .map_err(|e| Error::Storage(format!("{path:?}: {e}")))?;
+                let mut ev = pai_audit::event(AuditKind::AppShared, AuditOutcome::Ok);
+                ev.device = Some(device.id);
+                ev.detail = serde_json::json!({
+                    "app_id": id,
+                    "token_id": cap.token_id,
+                    "action": action.to_string(),
+                    "bound": cap.grantee_key.is_some(),
+                    "expires": cap.expires,
+                });
+                pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                println!("wrote {}", path.display());
+                println!(
+                    "token {} — {} on {}{} — expires {}",
+                    &cap.token_id[..8.min(cap.token_id.len())],
+                    action,
+                    cap.app_id,
+                    if cap.grantee_key.is_some() {
+                        " (bound to grantee)"
+                    } else {
+                        " (bearer — anyone holding it may run the app)"
+                    },
+                    chrono::DateTime::from_timestamp(cap.expires.unwrap_or(0), 0)
+                        .map(|d| d.to_rfc3339())
+                        .unwrap_or_else(|| "never".into())
+                );
+                println!(
+                    "guest runs it with: pai apps run {id} --on {} --cap <file>",
+                    device.id
+                );
+            }
+            AppsCmd::Grants => {
+                let shares = pai_share::ShareStore::new(&cfg.data_dir);
+                let list = shares.list().map_err(|e| Error::Other(e.to_string()))?;
+                if list.is_empty() {
+                    println!("no capability grants issued");
+                }
+                for (cap, status) in list {
+                    let actions = cap
+                        .actions
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let exp = cap
+                        .expires
+                        .and_then(|e| chrono::DateTime::from_timestamp(e, 0))
+                        .map(|d| d.to_rfc3339())
+                        .unwrap_or_else(|| "never".into());
+                    println!(
+                        "{}  {:<24} {:<10} {:<8} exp {}  {}",
+                        cap.token_id,
+                        cap.app_id,
+                        actions,
+                        format!("{status:?}").to_lowercase(),
+                        exp,
+                        if cap.grantee_key.is_some() {
+                            "bound"
+                        } else {
+                            "bearer"
+                        }
+                    );
+                }
+            }
+            AppsCmd::Revoke { id, token } => {
+                let shares = pai_share::ShareStore::new(&cfg.data_dir);
+                let list = shares.list().map_err(|e| Error::Other(e.to_string()))?;
+                match list.iter().find(|(c, _)| c.token_id == *token) {
+                    None => {
+                        return Err(Error::NotFound(format!(
+                            "no grant {token} — `pai apps grants`"
+                        )))
+                    }
+                    Some((c, _)) if c.app_id != *id => {
+                        return Err(Error::InvalidInput(format!(
+                            "token {token} grants app {} not {id}",
+                            c.app_id
+                        )))
+                    }
+                    _ => {}
+                }
+                shares
+                    .revoke(token)
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                let mut ev = pai_audit::event(AuditKind::AppShareRevoked, AuditOutcome::Ok);
+                ev.device = Some(device.id);
+                ev.detail = serde_json::json!({"app_id": id, "token_id": token});
+                pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                println!("revoked {token} — guests holding it are refused on next request");
             }
         },
         Cmd::Mesh { cmd } => match cmd {
@@ -2239,19 +2479,53 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 poll_secs,
             } => {
                 let t = sync_transport(dir, relay, token)?;
-                let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
-                    Error::Sync("no vault key — pair a device first (pai pair)".into())
-                })?;
-                let ops = broker_ops(&cfg, cli, store.clone(), device.id).await;
-                let mut srv = pai_broker::rpc::BrokerServer::new(&*t, &vault, device.id, &ops)
-                    .with_ops(ops.ops());
-                println!(
-                    "broker serving {} on {} — ops: {}",
-                    device.id,
-                    t.id(),
-                    ops.describe()
+                // Guest endpoint: greq/ requests carrying a capability
+                // token minted by `pai apps share` — verified, then run
+                // through the same sandboxed app_run_op. It does not
+                // need a vault: the token is the guest's auth.
+                let guest_data = cfg.data_dir.clone();
+                let guest_handler: Box<pai_share::guest::GuestHandler<'static>> =
+                    Box::new(move |op, app_id, args| match op {
+                        "app-run" => pai_apps::app_run_op(&guest_data, app_id, args)
+                            .map_err(|e| Error::Other(e.to_string())),
+                        other => Err(Error::InvalidInput(format!("unknown guest op '{other}'"))),
+                    });
+                let guests = pai_share::guest::GuestServer::new(
+                    device.clone(),
+                    store.clone(),
+                    &cfg.data_dir,
                 );
-                srv.serve(std::time::Duration::from_secs(*poll_secs)).await;
+                match crypto::vault_key(&cfg.data_dir)? {
+                    Some(vault) => {
+                        let ops = broker_ops(&cfg, cli, store.clone(), device.id).await;
+                        let mut srv =
+                            pai_broker::rpc::BrokerServer::new(&*t, &vault, device.id, &ops)
+                                .with_ops(ops.ops())
+                                .with_guest_handler(guests, guest_handler);
+                        println!(
+                            "broker serving {} on {} — ops: {} (+ guest endpoint)",
+                            device.id,
+                            t.id(),
+                            ops.describe()
+                        );
+                        srv.serve(std::time::Duration::from_secs(*poll_secs)).await;
+                    }
+                    None => {
+                        // No vault — this device shares to guests only.
+                        let poll = std::time::Duration::from_secs(*poll_secs);
+                        println!(
+                            "no vault key — serving {} guest endpoint only on {}",
+                            device.id,
+                            t.id()
+                        );
+                        loop {
+                            if let Err(e) = guests.serve_once(&*t, &guest_handler).await {
+                                eprintln!("guest serve pass failed: {e}");
+                            }
+                            tokio::time::sleep(poll).await;
+                        }
+                    }
+                }
             }
             BrokerCmd::Call {
                 device: dev,

@@ -1742,6 +1742,7 @@ dependencies = [
  "pai-models",
  "pai-notify",
  "pai-permissions",
+ "pai-share",
  "pai-storage",
  "pai-sync",
  "pai-tasks",
@@ -1828,6 +1829,7 @@ dependencies = [
  "chrono",
  "pai-config",
  "pai-core",
+ "pai-share",
  "pai-storage",
  "pai-sync",
  "serde",
@@ -1993,6 +1995,7 @@ dependencies = [
  "pai-mesh",
  "pai-notify",
  "pai-permissions",
+ "pai-share",
  "pai-storage",
  "pai-sync",
  "pai-tasks",
@@ -2112,15 +2115,23 @@ dependencies = [
 name = "pai-share"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
+ "ed25519-dalek",
  "hex",
  "pai-core",
  "pai-identity",
  "pai-storage",
+ "pai-sync",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
+ "tokio",
+ "tracing",
  "uuid",
+ "x25519-dalek",
 ]
 
 [[package]]
