@@ -20,7 +20,7 @@
 
 pub mod guest;
 
-use pai_core::{Device, DeviceId, Error as IdentityError};
+use pai_core::{DeviceId, Error as IdentityError};
 use pai_identity::IdentityStore;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -197,13 +197,13 @@ impl ShareStore {
         self.revoked_dir().join(token_id)
     }
 
-    /// Mint, sign, and persist a capability. `issuer` signs with its
-    /// device key (`key_dir` is the `<data_dir>/keys` fallback dir).
+    /// Mint, sign, and persist a capability. `issuer` is the device
+    /// whose key signs (`key_dir` is the `<data_dir>/keys` fallback).
     pub fn grant(
         &self,
         ids: &IdentityStore,
         key_dir: &Path,
-        issuer: &Device,
+        issuer: DeviceId,
         spec: GrantSpec,
     ) -> ShareResult<Capability> {
         if spec.app_id.trim().is_empty() {
@@ -226,11 +226,11 @@ impl ShareStore {
             grantee_key: spec.grantee_key.map(hex::encode),
             device: spec.device,
             expires: spec.expires,
-            issued_by: issuer.id,
+            issued_by: issuer,
             issued_at: pai_core::now().timestamp(),
             signature: String::new(),
         };
-        let sig = ids.sign(issuer.id, key_dir, &cap.signing_payload())?;
+        let sig = ids.sign(issuer, key_dir, &cap.signing_payload())?;
         cap.signature = hex::encode(sig);
         std::fs::create_dir_all(self.caps_dir())?;
         std::fs::write(
@@ -317,7 +317,7 @@ impl ShareStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pai_core::{DeviceCapabilities, NetworkState, Platform};
+    use pai_core::{Device, DeviceCapabilities, NetworkState, Platform};
     use pai_storage::Store;
     use std::sync::Arc;
 
@@ -367,7 +367,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("my-app", vec![Action::Exec]),
             )
             .unwrap();
@@ -388,7 +388,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec {
                     expires: Some(pai_core::now().timestamp() + 3600),
                     ..GrantSpec::for_app("a", vec![Action::Read, Action::Exec, Action::Share])
@@ -413,7 +413,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("a", vec![Action::Read]),
             )
             .unwrap();
@@ -433,7 +433,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("a", vec![Action::Exec]),
             )
             .unwrap();
@@ -459,7 +459,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("a", vec![Action::Exec]),
             )
             .unwrap();
@@ -482,7 +482,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("a", vec![Action::Exec]),
             )
             .unwrap();
@@ -500,13 +500,13 @@ mod tests {
         let (ids, dev, key_dir) = setup(&root);
         let store = ShareStore::new(&root);
         assert!(store
-            .grant(&ids, &key_dir, &dev, GrantSpec::for_app("a", vec![]))
+            .grant(&ids, &key_dir, dev.id, GrantSpec::for_app("a", vec![]))
             .is_err());
         assert!(store
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec {
                     expires: Some(1),
                     ..GrantSpec::for_app("a", vec![Action::Exec])

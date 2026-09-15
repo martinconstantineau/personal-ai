@@ -21,6 +21,7 @@ pai-connector-email.workspace = true
 pai-vision.workspace = true
 pai-notify.workspace = true
 pai-apps.workspace = true
+pai-share.workspace = true
 pai-sync.workspace = true
 pai-voice.workspace = true
 pai-audit.workspace = true

@@ -2192,7 +2192,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 spec.grantee_key = grantee_key;
                 spec.expires = Some((pai_core::now() + chrono::Duration::days(*days)).timestamp());
                 let cap = shares
-                    .grant(&ids, &key_dir, &device, spec)
+                    .grant(&ids, &key_dir, device.id, spec)
                     .map_err(|e| Error::Other(e.to_string()))?;
                 let json = cap.to_json().map_err(|e| Error::Other(e.to_string()))?;
                 let path = match out {

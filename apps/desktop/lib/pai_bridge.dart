@@ -192,6 +192,24 @@ class PaiBridge {
   Future<Map<String, dynamic>> peersList() async =>
       (await _call(_Op.peersList)) as Map<String, dynamic>;
 
+  /// Mint a capability token for [id]: [actions] like `exec,read`,
+  /// [forDevice] a paired-peer prefix ('' = bearer).
+  Future<Map<String, dynamic>> appsShareGrant(
+          String id, String actions, int days, String forDevice) async =>
+      (await _call(_Op.appsShareGrant,
+          arg: jsonEncode({
+            'id': id,
+            'actions': actions,
+            'days': days,
+            'for': forDevice,
+          }))) as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> shareList() async =>
+      (await _call(_Op.shareList)) as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> shareRevoke(String tokenId) async =>
+      (await _call(_Op.shareRevoke, arg: tokenId)) as Map<String, dynamic>;
+
   Future<Map<String, dynamic>> voiceStatus() async =>
       (await _call(_Op.voiceStatus)) as Map<String, dynamic>;
   Future<Map<String, dynamic>> voiceListen({int maxSecs = 30}) async =>
@@ -338,6 +356,17 @@ class PaiBridge {
                 client.appsMigrate(a['id'] as String, a['to'] as String);
           case _Op.peersList:
             result = client.peersList();
+          case _Op.appsShareGrant:
+            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+            result = client.shareGrant(
+                a['id'] as String,
+                a['actions'] as String,
+                a['days'] as int,
+                a['for'] as String);
+          case _Op.shareList:
+            result = client.shareList();
+          case _Op.shareRevoke:
+            result = client.shareRevoke(req.arg!);
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -395,6 +424,9 @@ enum _Op {
   appsRun,
   appsMigrate,
   peersList,
+  appsShareGrant,
+  shareList,
+  shareRevoke,
 }
 
 class _InitError {

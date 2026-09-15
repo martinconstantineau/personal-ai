@@ -1539,6 +1539,177 @@ pub unsafe extern "C" fn pai_apps_migrate(
     to_c(serde_json::json!({"ok": true, "pak": pak.display().to_string()}))
 }
 
+/// Mint a capability token for an installed app — the `pai apps
+/// share` op. `actions_csv` is a comma list of exec/read/write/share;
+/// `for_device` optionally binds the grant to a paired peer's device
+/// key (empty string = bearer token anyone holding it may use).
+/// `days` bounds validity. Returns `{ok, token_id, token_json}` —
+/// `token_json` is the file the guest holds; it also lands under
+/// `<data_dir>/share/tokens/`.
+/// # Safety
+/// `handle` must come from `pai_init`; strings are NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn pai_share_grant(
+    handle: *mut PaiRuntime,
+    app_id: *const c_char,
+    actions_csv: *const c_char,
+    days: i64,
+    for_device: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let app_id = match read_str(app_id) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let actions_csv = match read_str(actions_csv) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let for_device = match read_str(for_device) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let reg = pai_apps::AppRegistry::new(std::path::Path::new(&rt.data_dir));
+    match reg.get(&app_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return to_c(serde_json::json!({"error":
+                format!("app {app_id} not installed")}))
+        }
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    }
+    let mut actions = Vec::new();
+    for a in actions_csv.split(',') {
+        actions.push(match a.trim() {
+            "exec" => pai_share::Action::Exec,
+            "read" => pai_share::Action::Read,
+            "write" => pai_share::Action::Write,
+            "share" => pai_share::Action::Share,
+            other => {
+                return to_c(serde_json::json!({"error":
+                    format!("unknown action '{other}'")}))
+            }
+        });
+    }
+    let grantee_key = if for_device.is_empty() {
+        None
+    } else {
+        let peers = match pai_sync::pair::list_peers(&rt.store) {
+            Ok(p) => p,
+            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+        };
+        let m: Vec<_> = peers
+            .iter()
+            .filter(|p| p.device_id.to_string().starts_with(&for_device))
+            .collect();
+        match m.len() {
+            1 => Some(m[0].ed_pubkey),
+            0 => {
+                return to_c(serde_json::json!({"error":
+                    format!("no paired device matching '{for_device}'")}))
+            }
+            n => {
+                return to_c(serde_json::json!({"error":
+                    format!("'{for_device}' matches {n} devices")}))
+            }
+        }
+    };
+    let mut spec = pai_share::GrantSpec::for_app(app_id.clone(), actions.clone());
+    spec.grantee_key = grantee_key;
+    spec.expires = Some(pai_core::now().timestamp() + days.max(1) * 86_400);
+    let shares = pai_share::ShareStore::new(std::path::Path::new(&rt.data_dir));
+    let ids = pai_identity::IdentityStore::new(rt.store.clone());
+    let key_dir = std::path::Path::new(&rt.data_dir).join("keys");
+    let cap = match shares.grant(&ids, &key_dir, rt.device, spec) {
+        Ok(c) => c,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let json = match cap.to_json() {
+        Ok(j) => j,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let path = std::path::Path::new(&rt.data_dir)
+        .join("share")
+        .join("tokens")
+        .join(format!("{}-{}.json", cap.app_id, cap.token_id));
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, &json);
+    let mut ev = pai_audit::event(AuditKind::AppShared, AuditOutcome::Ok);
+    ev.device = Some(rt.device);
+    ev.detail = serde_json::json!({
+        "app_id": app_id,
+        "token_id": cap.token_id,
+        "actions": actions.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+        "bound": cap.grantee_key.is_some(),
+        "expires": cap.expires,
+    });
+    let _ = rt.audit.record(&ev);
+    to_c(serde_json::json!({
+        "ok": true,
+        "token_id": cap.token_id,
+        "token_json": json,
+        "path": path.display().to_string(),
+        "expires": cap.expires,
+        "bound": cap.grantee_key.is_some(),
+    }))
+}
+
+/// List issued capability grants — `{grants: [{token_id, app_id,
+/// actions, status, expires, bound}]}` newest first.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_share_list(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    let shares = pai_share::ShareStore::new(std::path::Path::new(&rt.data_dir));
+    match shares.list() {
+        Ok(list) => to_c(serde_json::json!({
+            "grants": list.iter().map(|(c, st)| serde_json::json!({
+                "token_id": c.token_id,
+                "app_id": c.app_id,
+                "actions": c.actions.iter().map(|a| a.to_string())
+                    .collect::<Vec<_>>(),
+                "status": format!("{st:?}").to_lowercase(),
+                "expires": c.expires,
+                "bound": c.grantee_key.is_some(),
+            })).collect::<Vec<_>>(),
+        })),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Revoke a capability grant — the token is refused from the next
+/// guest request. Returns `{ok: true}` or `{error}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `token_id` is NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn pai_share_revoke(
+    handle: *mut PaiRuntime,
+    token_id: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let token_id = match read_str(token_id) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let shares = pai_share::ShareStore::new(std::path::Path::new(&rt.data_dir));
+    match shares.revoke(&token_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            return to_c(serde_json::json!({"error":
+                format!("no grant {token_id}")}))
+        }
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    }
+    let mut ev = pai_audit::event(AuditKind::AppShareRevoked, AuditOutcome::Ok);
+    ev.device = Some(rt.device);
+    ev.detail = serde_json::json!({"token_id": token_id});
+    let _ = rt.audit.record(&ev);
+    to_c(serde_json::json!({"ok": true}))
+}
+
 /// # Safety
 /// `s` must be a pointer previously returned by this library.
 #[no_mangle]

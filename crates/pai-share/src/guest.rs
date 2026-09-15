@@ -464,7 +464,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("echo-app", vec![Action::Exec]),
             )
             .unwrap();
@@ -503,7 +503,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec {
                     grantee_key: Some(grantee_pub),
                     ..GrantSpec::for_app("echo-app", vec![Action::Exec])
@@ -561,7 +561,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("a", vec![Action::Exec]),
             )
             .unwrap();
@@ -598,7 +598,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("echo-app", vec![Action::Exec]),
             )
             .unwrap();
@@ -626,7 +626,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("echo-app", vec![Action::Read]),
             )
             .unwrap();
@@ -669,7 +669,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec::for_app("a", vec![Action::Exec]),
             )
             .unwrap();
@@ -680,7 +680,7 @@ mod tests {
             .grant(
                 &ids,
                 &key_dir,
-                &dev,
+                dev.id,
                 GrantSpec {
                     grantee_key: Some(grantee_key.verifying_key().to_bytes()),
                     ..GrantSpec::for_app("a", vec![Action::Exec])

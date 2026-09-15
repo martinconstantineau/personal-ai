@@ -26,6 +26,8 @@ typedef _VoiceListenNative = Pointer<Utf8> Function(Pointer<Void>, Uint32);
 typedef _NotifyListNative = Pointer<Utf8> Function(Pointer<Void>, Uint8);
 typedef _ThreeStrNative = Pointer<Utf8> Function(
     Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _ShareGrantNative = Pointer<Utf8> Function(
+    Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Int64, Pointer<Utf8>);
 typedef _CancelNative = Void Function(Pointer<Void>);
 typedef _DetectNative = Pointer<Utf8> Function();
 
@@ -111,6 +113,14 @@ class PaiClient {
       'pai_apps_migrate');
   late final _peersList = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_peers_list');
+  late final _shareGrant = _lib.lookupFunction<_ShareGrantNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, int,
+          Pointer<Utf8>)>('pai_share_grant');
+  late final _shareList = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_share_list');
+  late final _shareRevoke = _lib.lookupFunction<_SendNative,
+          Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
+      'pai_share_revoke');
   late final _voiceSay = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_voice_say');
   late final _setPolicy = _lib.lookupFunction<_ThreeStrNative,
@@ -313,6 +323,27 @@ class PaiClient {
   /// Paired peer devices: {peers: [{id, name, platform}]}.
   Map<String, dynamic> peersList() =>
       _json(_peersList(_handle)) as Map<String, dynamic>;
+
+  /// Mint a capability token for [id] — the guest's credential.
+  /// [actions] like `exec,read`; [forDevice] (a paired-peer prefix or
+  /// empty) binds the grant to that peer's key.
+  Map<String, dynamic> shareGrant(
+      String id, String actions, int days, String forDevice) {
+    final pa = id.toNativeUtf8();
+    final pb = actions.toNativeUtf8();
+    final pc = forDevice.toNativeUtf8();
+    final out = _shareGrant(_handle, pa, pb, days, pc);
+    calloc.free(pa);
+    calloc.free(pb);
+    calloc.free(pc);
+    return _json(out) as Map<String, dynamic>;
+  }
+
+  Map<String, dynamic> shareList() =>
+      _json(_shareList(_handle)) as Map<String, dynamic>;
+
+  Map<String, dynamic> shareRevoke(String tokenId) =>
+      _call1(_shareRevoke, tokenId);
 
   /// Voice capability probe: {stt, tts, mic, speaker, whisper_url}.
   Map<String, dynamic> voiceStatus() =>

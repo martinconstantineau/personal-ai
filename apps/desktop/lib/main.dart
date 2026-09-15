@@ -1346,10 +1346,155 @@ class _AppsScreenState extends State<AppsScreen> {
     _load();
   }
 
+  /// Mint a capability token for this app — the file the guest holds.
+  Future<void> _share(Map<String, dynamic> app) async {
+    final id = '${app['id']}';
+    final peers = await widget.bridge.peersList();
+    if (!mounted) return;
+    final peerList = (peers['peers'] as List?) ?? const [];
+    final actions = <String>{'exec'};
+    var days = 30;
+    String forDevice = '';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('Share ${app['name']}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final a in const ['exec', 'read', 'write'])
+                CheckboxListTile(
+                  dense: true,
+                  title: Text(a),
+                  value: actions.contains(a),
+                  onChanged: (v) => setD(() =>
+                      v == true ? actions.add(a) : actions.remove(a)),
+                ),
+              TextFormField(
+                initialValue: '$days',
+                decoration: const InputDecoration(labelText: 'Days valid'),
+                keyboardType: TextInputType.number,
+                onChanged: (v) => days = int.tryParse(v) ?? days,
+              ),
+              DropdownButtonFormField<String>(
+                initialValue: forDevice,
+                decoration: const InputDecoration(
+                    labelText: 'Bind to device (optional)'),
+                items: [
+                  const DropdownMenuItem(
+                      value: '', child: Text('Bearer token')),
+                  for (final p in peerList)
+                    DropdownMenuItem(
+                        value: '${p['id']}',
+                        child: Text('${p['name']}')),
+                ],
+                onChanged: (v) => forDevice = v ?? '',
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Mint token')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || actions.isEmpty) return;
+    final r = await widget.bridge
+        .appsShareGrant(id, actions.join(','), days, forDevice);
+    if (!mounted) return;
+    final err = r['error'];
+    if (err != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('share failed: $err')));
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Capability token'),
+        content: SingleChildScrollView(
+          child: SelectableText(
+              "${r['token_json']}\n\nsaved to ${r['path']} — copy this "
+              'JSON to the guest device; it is the whole credential.'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Done')),
+        ],
+      ),
+    );
+  }
+
+  /// Issued grants with revoke — the `pai apps grants` surface.
+  Future<void> _grants() async {
+    final r = await widget.bridge.shareList();
+    if (!mounted) return;
+    final list = (r['grants'] as List?) ?? const [];
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: list.isEmpty
+            ? const Padding(
+                padding: EdgeInsets.all(24),
+                child: Text('No grants issued — share an app first.'))
+            : ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final g in list)
+                    ListTile(
+                      dense: true,
+                      title: Text('${g['app_id']} — '
+                          '${(g['actions'] as List).join(",")}'),
+                      subtitle: Text(
+                          '${'${g['token_id']}'.substring(0, 8)}… · '
+                          '${g['status']} · '
+                          '${g['bound'] == true ? "bound" : "bearer"}',
+                          style: const TextStyle(
+                              fontFamily: 'monospace', fontSize: 12)),
+                      trailing: g['status'] == 'active'
+                          ? IconButton(
+                              icon: const Icon(Icons.block),
+                              tooltip: 'Revoke',
+                              onPressed: () async {
+                                final rr = await widget.bridge
+                                    .shareRevoke('${g['token_id']}');
+                                if (ctx.mounted) {
+                                  if (rr['error'] != null) {
+                                    ScaffoldMessenger.of(ctx).showSnackBar(
+                                        SnackBar(
+                                            content: Text(
+                                                'revoke failed: ${rr['error']}')));
+                                  } else {
+                                    Navigator.pop(ctx);
+                                    _grants();
+                                  }
+                                }
+                              },
+                            )
+                          : null,
+                    ),
+                ],
+              ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Apps')),
+      appBar: AppBar(title: const Text('Apps'), actions: [
+        IconButton(
+            icon: const Icon(Icons.key_outlined),
+            tooltip: 'Issued grants',
+            onPressed: _grants),
+      ]),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _apps.isEmpty
@@ -1390,6 +1535,7 @@ class _AppsScreenState extends State<AppsScreen> {
                                 onSelected: (v) => switch (v) {
                                   'args' => _runWithArgs(a),
                                   'migrate' => _migrate(a),
+                                  'share' => _share(a),
                                   _ => null,
                                 },
                                 itemBuilder: (_) => [
@@ -1400,6 +1546,9 @@ class _AppsScreenState extends State<AppsScreen> {
                                   const PopupMenuItem(
                                       value: 'migrate',
                                       child: Text('Migrate to…')),
+                                  const PopupMenuItem(
+                                      value: 'share',
+                                      child: Text('Share…')),
                                 ],
                               ),
                             ]),
