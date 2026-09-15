@@ -331,3 +331,91 @@ async fn broker_objects_stay_out_of_sync_surface() {
     assert_eq!(out.pulled, 0);
     assert!(out.skipped >= 1);
 }
+
+/// V5a: `find_peer` scores announced `DeviceLoad` — a wall-powered
+/// modest device beats a beefy one on battery; busy loses to idle at
+/// equal hardware; identical scores keep the lowest-id tiebreak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_peer_scores_device_load() {
+    use pai_broker::rpc::DeviceLoad;
+    let a = dev("score-a");
+    let b = dev("score-b");
+    let c = dev("score-c");
+    // Acceptor's vault is authoritative — A accepts both offers so
+    // all three devices share A's vault.
+    pair_devices(&b, &a);
+    pair_devices(&c, &a);
+    let shared = tmpdir("score-shared");
+    let transport = FolderTransport::new(shared).unwrap();
+    let (va, vb, vc) = (vault(&a), vault(&b), vault(&c));
+    assert_eq!(va, vb);
+    assert_eq!(va, vc);
+
+    let handler = Echo;
+    // B: beefy but on battery. C: modest, wall-powered, idle.
+    let srv_b = pai_broker::rpc::BrokerServer::new(&transport, &vb, b.device.id, &handler)
+        .with_ops(vec!["echo".into()])
+        .with_load_probe(Box::new(|| DeviceLoad {
+            busy: 0,
+            on_battery: Some(true),
+            thermal_throttled: None,
+            ram_bytes: 64 << 30,
+            cpu_cores: 16,
+        }));
+    let srv_c = pai_broker::rpc::BrokerServer::new(&transport, &vc, c.device.id, &handler)
+        .with_ops(vec!["echo".into()])
+        .with_load_probe(Box::new(|| DeviceLoad {
+            busy: 0,
+            on_battery: Some(false),
+            thermal_throttled: Some(false),
+            ram_bytes: 8 << 30,
+            cpu_cores: 4,
+        }));
+    srv_b.announce().await.unwrap();
+    srv_c.announce().await.unwrap();
+
+    let client = pai_broker::rpc::BrokerClient::new(&transport, &va, a.device.id);
+    // Battery penalty outweighs B's hardware advantage.
+    assert_eq!(client.find_peer("echo").await.unwrap(), Some(c.device.id));
+
+    // B off the charger with its hardware advantage — wins now.
+    let srv_b2 = pai_broker::rpc::BrokerServer::new(&transport, &vb, b.device.id, &handler)
+        .with_ops(vec!["echo".into()])
+        .with_load_probe(Box::new(|| DeviceLoad {
+            busy: 0,
+            on_battery: Some(false),
+            thermal_throttled: Some(false),
+            ram_bytes: 64 << 30,
+            cpu_cores: 16,
+        }));
+    srv_b2.announce().await.unwrap();
+    assert_eq!(client.find_peer("echo").await.unwrap(), Some(b.device.id));
+
+    // Same hardware as C but running 3 ops — the busy penalty flips
+    // placement back to idle C.
+    let srv_b3 = pai_broker::rpc::BrokerServer::new(&transport, &vb, b.device.id, &handler)
+        .with_ops(vec!["echo".into()])
+        .with_load_probe(Box::new(|| DeviceLoad {
+            busy: 3,
+            on_battery: Some(false),
+            thermal_throttled: Some(false),
+            ram_bytes: 8 << 30,
+            cpu_cores: 4,
+        }));
+    srv_b3.announce().await.unwrap();
+    assert_eq!(client.find_peer("echo").await.unwrap(), Some(c.device.id));
+
+    // Identical load on both — deterministic lowest-id tiebreak.
+    let srv_b4 = pai_broker::rpc::BrokerServer::new(&transport, &vb, b.device.id, &handler)
+        .with_ops(vec!["echo".into()])
+        .with_load_probe(Box::new(|| DeviceLoad {
+            busy: 0,
+            on_battery: Some(false),
+            thermal_throttled: Some(false),
+            ram_bytes: 8 << 30,
+            cpu_cores: 4,
+        }));
+    srv_b4.announce().await.unwrap();
+    let want = if b.device.id.0 < c.device.id.0 { b.device.id } else { c.device.id };
+    assert_eq!(client.find_peer("echo").await.unwrap(), Some(want));
+}

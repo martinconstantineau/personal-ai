@@ -85,6 +85,37 @@ struct BrokerChunk {
     payload_b64: String,
 }
 
+/// Self-reported placement hint inside `bcap` — registered device
+/// capabilities plus the live in-flight op count. Absent on pre-V5
+/// announcements; `Option` fields deserialize as `None` so the wire
+/// stays compatible.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceLoad {
+    /// Ops currently executing on the device.
+    pub busy: u32,
+    pub on_battery: Option<bool>,
+    pub thermal_throttled: Option<bool>,
+    pub ram_bytes: u64,
+    pub cpu_cores: u32,
+}
+
+impl DeviceLoad {
+    /// Higher = better placement candidate. Battery and thermal state
+    /// dominate — an idle low-RAM wall-powered device beats a beefy
+    /// one that's unplugged or throttled. `None` fields are neutral.
+    fn score(&self) -> i64 {
+        let mut s = (self.ram_bytes / (1 << 30)) as i64 + self.cpu_cores as i64 * 2;
+        s -= self.busy as i64 * 10;
+        if self.on_battery == Some(true) {
+            s -= 1000;
+        }
+        if self.thermal_throttled == Some(true) {
+            s -= 500;
+        }
+        s
+    }
+}
+
 /// Capability announcement — `bcap/<device>`, sealed like everything
 /// else. `ts` is the announcer's clock; stale announcements are ignored.
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +124,7 @@ struct BrokerCaps {
     device: String,
     ops: Vec<String>,
     ts: String,
+    load: Option<DeviceLoad>,
 }
 
 /// Executes one op on the serving device. Return value is opaque to the
@@ -142,10 +174,12 @@ impl<'a, T: SyncTransport + ?Sized> BrokerClient<'a, T> {
         }
     }
 
-    /// Find a device that recently announced it can run `op` — picks the
-    /// lowest device id among fresh announcers so callers agree.
+    /// Find the best device that recently announced it can run `op`.
+    /// Scores on the announcer's [`DeviceLoad`] — battery/thermal
+    /// dominate, then in-flight ops, then RAM/cores — with the lowest
+    /// device id as the deterministic tiebreak so callers agree.
     pub async fn find_peer(&self, op: &str) -> Result<Option<DeviceId>> {
-        let mut best: Option<DeviceId> = None;
+        let mut best: Option<(i64, DeviceId)> = None;
         for meta in self.transport.list().await? {
             if !meta.key.starts_with(CAP_PREFIX) || meta.tombstone {
                 continue;
@@ -170,11 +204,16 @@ impl<'a, T: SyncTransport + ?Sized> BrokerClient<'a, T> {
             let Ok(dev) = uuid::Uuid::parse_str(&caps.device).map(DeviceId) else {
                 continue;
             };
-            if best.map(|b| dev.0 < b.0).unwrap_or(true) {
-                best = Some(dev);
+            let score = caps.load.unwrap_or_default().score();
+            let better = match best {
+                None => true,
+                Some((bs, bd)) => score > bs || (score == bs && dev.0 < bd.0),
+            };
+            if better {
+                best = Some((score, dev));
             }
         }
-        Ok(best)
+        Ok(best.map(|(_, d)| d))
     }
 
     async fn push_request(
@@ -340,6 +379,8 @@ pub struct BrokerServer<'a, T: SyncTransport + ?Sized, H: OpHandler> {
         pai_share::guest::GuestServer,
         Box<pai_share::guest::GuestHandler<'static>>,
     )>,
+    /// Sampled at each announce — feeds the `load` placement hint.
+    load_probe: Option<Box<dyn Fn() -> DeviceLoad + Send + Sync + 'a>>,
 }
 
 impl<'a, T: SyncTransport + ?Sized, H: OpHandler> BrokerServer<'a, T, H> {
@@ -352,7 +393,18 @@ impl<'a, T: SyncTransport + ?Sized, H: OpHandler> BrokerServer<'a, T, H> {
             served: Default::default(),
             ops: vec![],
             guest: None,
+            load_probe: None,
         }
+    }
+
+    /// Sample device load/capabilities at each `bcap` announce — feeds
+    /// the placement hint `find_peer` scores on.
+    pub fn with_load_probe(
+        mut self,
+        probe: Box<dyn Fn() -> DeviceLoad + Send + Sync + 'a>,
+    ) -> Self {
+        self.load_probe = Some(probe);
+        self
     }
 
     /// Ops this server will advertise + answer to.
@@ -380,6 +432,7 @@ impl<'a, T: SyncTransport + ?Sized, H: OpHandler> BrokerServer<'a, T, H> {
             device: self.device.to_string(),
             ops: self.ops.clone(),
             ts: pai_storage::ts(&now()),
+            load: self.load_probe.as_ref().map(|p| p()),
         };
         let key = format!("{CAP_PREFIX}{}", self.device);
         let raw = serde_json::to_vec(&caps).map_err(|e| Error::Sync(e.to_string()))?;

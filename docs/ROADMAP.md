@@ -418,11 +418,21 @@ authoring loop, placement + migration, remote execution (broker +
 capability-shared guest), mobile runtime + share/delegate UI, and
 guest read/write handles are all shipped and pushed.
 
-- Beyond V4 (PRD-level, future tracks): scoring-based placement
-  engine (`pai-broker` currently routes by advertised ops, not load),
-  stable app URLs (`app.user.devices`), the App Operator agent flows
+### V5 — mesh intelligence (in progress)
+
+- [x] **V5a — placement scoring** (`pai-broker`): `bcap` announcements
+  carry a `DeviceLoad` hint — live in-flight op count plus registered
+  battery/thermal/RAM/cores — and `find_peer` scores candidates
+  (battery/thermal dominate, then busy, then hardware; lowest device
+  id still breaks ties). Wire-compatible: pre-V5 announcements lack
+  `load` and score neutrally. `pai broker serve` reports the live
+  busy count via a probe wrapping `handle`. (ADR-0021)
+
+- Beyond V4 (PRD-level, future tracks): stable app URLs
+  (`app.user.devices`), the App Operator agent flows
   (§6.8 — "give Sarah access" → scoped capability), rescue-mode whole-
-  cloud restore, and an app's own CRDT-collaborative data layer.
+  cloud restore, an app's own CRDT-collaborative data layer, live
+  battery/thermal re-probing, and user-pinned placement weights.
 
 ## Known technical debt (tracked, not hidden)
 

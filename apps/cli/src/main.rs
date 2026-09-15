@@ -13,7 +13,7 @@ use pai_permissions::{all_permissions, Permission, PolicyEngine, PolicyTable};
 use pai_storage::Store;
 use pai_tools::Tool;
 use std::io::Write;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -1592,6 +1592,19 @@ struct BrokerOps {
     data_dir: std::path::PathBuf,
     store: Arc<Store>,
     device: DeviceId,
+    /// Ops currently executing — announced as `DeviceLoad.busy` so
+    /// peers can place work on the least-loaded device.
+    busy: Arc<AtomicUsize>,
+}
+
+/// Decrements the busy counter when the op finishes — covers early
+/// returns without restructuring `handle`'s match.
+struct BusyGuard<'a>(&'a AtomicUsize);
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl BrokerOps {
@@ -1625,6 +1638,8 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
             ImageUnderstandingProvider, InferenceProvider, SpeechToTextProvider,
             TextToSpeechProvider,
         };
+        self.busy.fetch_add(1, Ordering::Relaxed);
+        let _busy = BusyGuard(&self.busy);
         match op {
             "stt" => {
                 let stt = self
@@ -1719,6 +1734,8 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
             let _ = tx.send(out).await;
             return Ok(());
         }
+        self.busy.fetch_add(1, Ordering::Relaxed);
+        let _busy = BusyGuard(&self.busy);
         let prompt = String::from_utf8(payload.to_vec())
             .map_err(|_| Error::InvalidInput("infer payload must be UTF-8".into()))?;
         let p = LlamaServerProvider::new(&self.server_url, self.model.clone());
@@ -1779,6 +1796,7 @@ async fn broker_ops(
         data_dir: cfg.data_dir.clone(),
         store,
         device,
+        busy: Default::default(),
     }
 }
 
@@ -2837,10 +2855,19 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 match crypto::vault_key(&cfg.data_dir)? {
                     Some(vault) => {
                         let ops = broker_ops(&cfg, cli, store.clone(), device.id).await;
+                        let busy = ops.busy.clone();
+                        let caps = device.capabilities.clone();
                         let mut srv =
                             pai_broker::rpc::BrokerServer::new(&*t, &vault, device.id, &ops)
                                 .with_ops(ops.ops())
-                                .with_guest_handler(guests, guest_handler);
+                                .with_guest_handler(guests, guest_handler)
+                                .with_load_probe(Box::new(move || pai_broker::rpc::DeviceLoad {
+                                    busy: busy.load(Ordering::Relaxed) as u32,
+                                    on_battery: caps.on_battery,
+                                    thermal_throttled: caps.thermal_throttled,
+                                    ram_bytes: caps.ram_bytes,
+                                    cpu_cores: caps.cpu_cores,
+                                }));
                         println!(
                             "broker serving {} on {} — ops: {} (+ guest endpoint)",
                             device.id,
