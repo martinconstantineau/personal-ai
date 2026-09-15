@@ -427,12 +427,17 @@ guest read/write handles are all shipped and pushed.
   id still breaks ties). Wire-compatible: pre-V5 announcements lack
   `load` and score neutrally. `pai broker serve` reports the live
   busy count via a probe wrapping `handle`. (ADR-0021)
+- [x] **V5b — placement preference weights**: `pai broker prefer
+  <peer> <w>` stores a local `place_weight.<id>` meta value added to
+  that device's score in `find_peer` — positive prefers, negative
+  avoids, 0 clears. `broker devices` shows the weight. Client-side
+  only; no wire change.
 
 - Beyond V4 (PRD-level, future tracks): stable app URLs
   (`app.user.devices`), the App Operator agent flows
   (§6.8 — "give Sarah access" → scoped capability), rescue-mode whole-
-  cloud restore, an app's own CRDT-collaborative data layer, live
-  battery/thermal re-probing, and user-pinned placement weights.
+  cloud restore, an app's own CRDT-collaborative data layer, and live
+  battery/thermal re-probing.
 
 ## Known technical debt (tracked, not hidden)
 

@@ -147,11 +147,16 @@ pub trait OpHandler: Send + Sync {
     }
 }
 
+/// Per-device placement weight — added to the announced load score.
+/// Missing devices map to 0. Local-only: never on the wire.
+pub type DeviceWeight<'a> = Box<dyn Fn(&DeviceId) -> i64 + Send + Sync + 'a>;
+
 /// Client side: send one request to a peer and wait for its response.
 pub struct BrokerClient<'a, T: SyncTransport + ?Sized> {
     transport: &'a T,
     vault: &'a [u8; 32],
     device: DeviceId,
+    weight: Option<DeviceWeight<'a>>,
 }
 
 fn seal_obj(vault: &[u8; 32], writer: DeviceId, key: &str, raw: &[u8]) -> Result<SyncObject> {
@@ -171,7 +176,16 @@ impl<'a, T: SyncTransport + ?Sized> BrokerClient<'a, T> {
             transport,
             vault,
             device,
+            weight: None,
         }
+    }
+
+    /// Local per-device preference added to each candidate's load
+    /// score — "prefer my desktop" needs no wire change. A missing
+    /// device maps to 0.
+    pub fn with_weights(mut self, weight: DeviceWeight<'a>) -> Self {
+        self.weight = Some(weight);
+        self
     }
 
     /// Find the best device that recently announced it can run `op`.
@@ -204,7 +218,10 @@ impl<'a, T: SyncTransport + ?Sized> BrokerClient<'a, T> {
             let Ok(dev) = uuid::Uuid::parse_str(&caps.device).map(DeviceId) else {
                 continue;
             };
-            let score = caps.load.unwrap_or_default().score();
+            let mut score = caps.load.unwrap_or_default().score();
+            if let Some(w) = &self.weight {
+                score += w(&dev);
+            }
             let better = match best {
                 None => true,
                 Some((bs, bd)) => score > bs || (score == bs && dev.0 < bd.0),

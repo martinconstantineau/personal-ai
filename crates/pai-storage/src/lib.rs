@@ -495,6 +495,28 @@ impl Store {
         f(&conn).map_err(store_err)
     }
 
+    /// Local-only key/value (`meta` table — never synced). Used for
+    /// device-local settings like placement preferences.
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        self.with_conn(|c| {
+            Ok(
+                c.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
+                    .ok(),
+            )
+        })
+    }
+
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+        self.with_conn(|c| {
+            c.execute(
+                "INSERT INTO meta(key, value) VALUES(?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                rusqlite::params![key, value],
+            )
+        })?;
+        Ok(())
+    }
+
     // -- Blobs ------------------------------------------------------------
 
     /// Write bytes; returns the content-addressed blob id (hex sha256).

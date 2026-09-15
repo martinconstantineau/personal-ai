@@ -60,6 +60,8 @@ cadence are untouched.
 - Hardware fields are registration-time values. Live battery/thermal
   re-probing (OS APIs per platform) is a follow-up; `busy` already
   covers the dynamic part.
-- User preference/pinning (PRD's "prefer my desktop") has no field
-  yet — natural extension is a locally-configured per-device weight
-  applied client-side at scoring time, which needs no wire change.
+- User preference landed as `BrokerClient::with_weights` — a local
+  `place_weight.<device>` meta value (`pai broker prefer <peer> <w>`,
+  `broker devices` shows it) added client-side to each candidate's
+  score. Local-only by design: preferences are *this* user's routing
+  choice, not the announcer's claim, and nothing crosses the wire.

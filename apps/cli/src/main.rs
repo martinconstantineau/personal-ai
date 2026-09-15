@@ -766,6 +766,15 @@ enum SyncCmd {
 enum BrokerCmd {
     /// List paired peer devices (potential trusted executors).
     Devices,
+    /// Prefer (or deprioritize) a device when `--on any` routes a call:
+    /// the weight adds to the device's announced load score. Positive
+    /// prefers, negative avoids, 0 clears. Local-only — never announced.
+    Prefer {
+        /// Peer device id or unambiguous prefix (see `broker devices`).
+        peer: String,
+        /// Signed weight — e.g. 500 strongly prefers, -500 avoids.
+        weight: i64,
+    },
     /// Answer broker requests addressed to this device, forever.
     /// Ops are served by this device's providers: stt (whisper-server),
     /// tts (piper), infer/describe (llama-server).
@@ -1497,6 +1506,19 @@ fn lan_transport(
 }
 
 /// Match a device-id prefix against paired peers.
+/// Per-device placement weight for `find_peer` — the `place_weight.<id>`
+/// meta keys set by `pai broker prefer`. Missing/unparseable = 0.
+fn place_weights(store: &Arc<Store>) -> Box<dyn Fn(&DeviceId) -> i64 + Send + Sync + 'static> {
+    let st = store.clone();
+    Box::new(move |id| {
+        st.meta_get(&format!("place_weight.{id}"))
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
 fn resolve_peer(store: &Store, prefix: &str) -> Result<DeviceId> {
     use pai_sync::pair;
     let peers = pair::list_peers(store)?;
@@ -1972,7 +1994,8 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
                         Error::Sync("no vault key — pair a device first (pai pair)".into())
                     })?;
-                    let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id);
+                    let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id)
+                        .with_weights(place_weights(&store));
                     let to = if dev == "any" {
                         client.find_peer("app-run").await?.ok_or_else(|| {
                             Error::NotFound(
@@ -2816,14 +2839,34 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     println!("(no paired devices — `pai pair` first)");
                 }
                 for p in peers {
+                    let w = store
+                        .meta_get(&format!("place_weight.{}", p.device_id))?
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let pref = if w != 0 {
+                        format!("  weight={w:+}")
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "  {}  {:<20} {:<10} paired {}",
+                        "  {}  {:<20} {:<10} paired {}{}",
                         p.device_id,
                         p.name,
                         p.platform,
-                        p.paired_at.format("%Y-%m-%d")
+                        p.paired_at.format("%Y-%m-%d"),
+                        pref
                     );
                 }
+            }
+            BrokerCmd::Prefer { peer, weight } => {
+                let id = resolve_peer(&store, peer)?;
+                store.meta_set(&format!("place_weight.{id}"), &weight.to_string())?;
+                let how = match weight.signum() {
+                    1 => "preferred",
+                    -1 => "deprioritized",
+                    _ => "cleared",
+                };
+                println!("{id} {how} — placement weight {weight:+} (local only)");
             }
             BrokerCmd::Serve {
                 dir,
@@ -2909,7 +2952,8 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
                     Error::Sync("no vault key — pair a device first (pai pair)".into())
                 })?;
-                let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id);
+                let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id)
+                    .with_weights(place_weights(&store));
                 let to = if dev == "any" {
                     client.find_peer(op).await?.ok_or_else(|| {
                         Error::NotFound(format!(

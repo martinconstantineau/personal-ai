@@ -422,4 +422,23 @@ async fn find_peer_scores_device_load() {
         c.device.id
     };
     assert_eq!(client.find_peer("echo").await.unwrap(), Some(want));
+
+    // V5b: user preference is a local weight, not announced. Beefy B
+    // wins on a level field, but a -5000 weight on B flips placement
+    // to C — "never run on that device".
+    let srv_b5 = pai_broker::rpc::BrokerServer::new(&transport, &vb, b.device.id, &handler)
+        .with_ops(vec!["echo".into()])
+        .with_load_probe(Box::new(|| DeviceLoad {
+            busy: 0,
+            on_battery: Some(false),
+            thermal_throttled: Some(false),
+            ram_bytes: 64 << 30,
+            cpu_cores: 16,
+        }));
+    srv_b5.announce().await.unwrap();
+    assert_eq!(client.find_peer("echo").await.unwrap(), Some(b.device.id));
+    let weighted = pai_broker::rpc::BrokerClient::new(&transport, &va, a.device.id).with_weights(
+        Box::new(move |id| if *id == b.device.id { -5000 } else { 0 }),
+    );
+    assert_eq!(weighted.find_peer("echo").await.unwrap(), Some(c.device.id));
 }
