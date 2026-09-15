@@ -366,8 +366,15 @@ op→required-action (`app-run`→exec, `app-read`→read,
 `app-write`→write), so an exec-only token can't read. Bound-token
 request signatures cover the op, so the action is tamper-proof too.
 
-- Remaining: deeper mobile shell work (share/grants UI), `share`
-  re-grant (a bound grantee issuing narrower sub-tokens).
+**V4q done (2026-09-15):** share management on-device —
+`pai_share_grant`/`pai_share_list`/`pai_share_revoke` FFI exports,
+Dart bindings, and an Apps-screen share dialog (action checkboxes,
+days, optional bind-to-peer) plus a grants sheet with revoke.
+`ShareStore::grant` now takes `DeviceId` (it only ever used
+`issuer.id`) so the FFI can mint without fetching the full Device.
+
+- Remaining: `share` re-grant (a bound grantee issuing narrower
+  sub-tokens), deeper mobile shell work.
 
 ## Known technical debt (tracked, not hidden)
 
