@@ -64,3 +64,18 @@ Pull applies the pair in rank order — `app/` (8) before `bkp/` (9):
 - A migration where the target's inline restore fails still leaves
   the pak stored — `apps restore` on the target (which is now the
   active device, so the guard passes) completes the move manually.
+
+## Amendment (V5d): rescue — takeover when the home device can't migrate
+
+`migrate` needs the source alive to snapshot-and-park. A dead/lost
+device can't, so `pai-sync::backup::rescue` claims `active_device`
+locally and restores the newest backup — `pai apps rescue <id>` for
+one app, `pai apps rescue --all --from <dev>` for everything placed
+on that device.
+
+The claim is an ordinary `apps.active_device` update: it propagates
+via the `app/` object on next push, and if the old device returns,
+its pull takes the same park-stale-`data/` path migration uses — the
+fork window is bounded by "old device runs the app before its next
+pull", identical to migration. Unplaced apps aren't touched by bulk
+rescue (they were never "on" the dead device); rescue them by id.

@@ -440,10 +440,18 @@ guest read/write handles are all shipped and pushed.
   fixed (`GlobalMemoryStatusEx` — was 0). macOS/other OSes report
   `None` (neutral).
 
+- [x] **V5d — rescue-mode restore**: `pai apps rescue <id>` claims
+  `active_device` and restores the newest backup when an app's home
+  device is dead/lost (migration needs the source alive; rescue is
+  the takeover). `pai apps rescue --all --from <dead>` sweeps every
+  app placed on that device. The claim propagates via `app/`; a
+  resurrected device parks its stale `data/` on pull — same healing
+  as migration (ADR-0019 amendment). `app_rescued` audit events.
+
 - Beyond V4 (PRD-level, future tracks): stable app URLs
   (`app.user.devices`), the App Operator agent flows
-  (§6.8 — "give Sarah access" → scoped capability), rescue-mode whole-
-  cloud restore, and an app's own CRDT-collaborative data layer.
+  (§6.8 — "give Sarah access" → scoped capability), and an app's own
+  CRDT-collaborative data layer.
 
 ## Known technical debt (tracked, not hidden)
 

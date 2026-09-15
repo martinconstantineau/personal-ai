@@ -265,6 +265,21 @@ enum AppsCmd {
         #[arg(long)]
         to: String,
     },
+    /// Rescue an app whose home device is dead/lost: claim
+    /// active_device here and restore the newest backup's data.
+    /// `--all --from <dev>` rescues every app that lived on that
+    /// device. The claim ships on next `pai sync push`; if the old
+    /// device returns, its pull parks its stale data.
+    Rescue {
+        /// Installed app id — or use --all --from.
+        id: Option<String>,
+        /// Rescue every app whose active_device is --from's device.
+        #[arg(long)]
+        all: bool,
+        /// The dead device's id or prefix (required with --all).
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// Issue a capability token for an installed app — a signed,
     /// expiring grant a guest device uses with `pai apps run --cap`.
     Share {
@@ -2188,6 +2203,69 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                         .unwrap_or_else(|| "was empty".into())
                 );
                 println!("`pai sync push` ships it; the target restores on pull");
+            }
+            AppsCmd::Rescue { id, all, from } => {
+                let audit = |app_id: &str, outcome: &pai_sync::backup::RescueOutcome| {
+                    let mut ev = pai_audit::event(AuditKind::AppRescued, AuditOutcome::Ok);
+                    ev.device = Some(device.id);
+                    ev.detail = serde_json::json!({
+                        "app_id": app_id,
+                        "outcome": format!("{outcome:?}"),
+                    });
+                    let _ = pai_audit::AuditLog::new(store.clone()).record(&ev);
+                };
+                if *all {
+                    let from_id = resolve_peer(
+                        &store,
+                        from.as_deref().ok_or_else(|| {
+                            Error::InvalidInput("--all needs --from <device>".into())
+                        })?,
+                    )?;
+                    let results =
+                        pai_sync::backup::rescue_from(&store, &cfg.data_dir, device.id, from_id)?;
+                    if results.is_empty() {
+                        println!("(no apps were active on {from_id})");
+                    }
+                    for (app_id, outcome) in &results {
+                        audit(app_id, outcome);
+                        match outcome {
+                            pai_sync::backup::RescueOutcome::Restored { writer, created_at } => {
+                                println!(
+                                    "  {app_id}: claimed + restored from {:.8} ({created_at})",
+                                    writer
+                                )
+                            }
+                            pai_sync::backup::RescueOutcome::ClaimedNoBackup => {
+                                println!("  {app_id}: claimed — no backup; fresh install only")
+                            }
+                            pai_sync::backup::RescueOutcome::ClaimedRestoreFailed(e) => {
+                                println!("  {app_id}: claimed — restore failed: {e}")
+                            }
+                        }
+                    }
+                } else {
+                    let id = id.as_deref().ok_or_else(|| {
+                        Error::InvalidInput("pass an app id, or --all --from <device>".into())
+                    })?;
+                    let outcome = pai_sync::backup::rescue(&store, &cfg.data_dir, device.id, id)?;
+                    audit(id, &outcome);
+                    match outcome {
+                        pai_sync::backup::RescueOutcome::Restored {
+                            writer,
+                            created_at,
+                        } => println!(
+                            "rescued {id}: placement claimed, data restored from {:.8} ({created_at})",
+                            writer
+                        ),
+                        pai_sync::backup::RescueOutcome::ClaimedNoBackup => println!(
+                            "rescued {id}: placement claimed — no backup found; fresh install only"
+                        ),
+                        pai_sync::backup::RescueOutcome::ClaimedRestoreFailed(e) => {
+                            println!("rescued {id}: placement claimed — restore failed: {e}")
+                        }
+                    }
+                }
+                println!("claim ships on next `pai sync push`");
             }
             AppsCmd::Share {
                 id,

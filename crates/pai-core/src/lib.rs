@@ -537,6 +537,7 @@ pub enum AuditKind {
     AppBackedUp,
     AppRestored,
     AppMigrated,
+    AppRescued,
     AppShared,
     AppShareRevoked,
 }

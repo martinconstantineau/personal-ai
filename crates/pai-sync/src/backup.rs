@@ -402,6 +402,84 @@ pub(crate) fn apply_tombstone(
 /// `Some(other)` when the apps row names a different active device —
 /// the signal that backing up / restoring / running on this device
 /// would fork live state. `None` = legacy (unplaced) or active-here.
+/// What happened to one app during a rescue.
+#[derive(Debug)]
+pub enum RescueOutcome {
+    /// Placement claimed + the newest backup's data restored.
+    Restored { writer: String, created_at: String },
+    /// Placement claimed; no backup existed — the app is a fresh
+    /// install here (its data died with the old device).
+    ClaimedNoBackup,
+    /// Placement claimed but the backup restore failed — the claim
+    /// stands; retry data with `apps restore`.
+    ClaimedRestoreFailed(String),
+}
+
+/// Rescue an app whose home device is dead/lost: claim `active_device`
+/// here, then restore the newest backup's data. Migration can't help —
+/// the old device isn't running to snapshot-and-hand-off — so the user
+/// asserts takeover. The claim propagates via the `app/` object on next
+/// push; if the old device returns, its pull parks its stale `data/`
+/// (ADR-0019), bounding the fork window.
+pub fn rescue(
+    store: &Arc<Store>,
+    data_dir: &Path,
+    device: DeviceId,
+    app_id: &str,
+) -> Result<RescueOutcome> {
+    claim_active(store, device, app_id)?;
+    match restore(store, data_dir, device, app_id, None) {
+        Ok(p) => Ok(RescueOutcome::Restored {
+            writer: p.writer,
+            created_at: p.created_at,
+        }),
+        Err(Error::NotFound(_)) => Ok(RescueOutcome::ClaimedNoBackup),
+        Err(e) => Ok(RescueOutcome::ClaimedRestoreFailed(e.to_string())),
+    }
+}
+
+/// Bulk rescue: every app whose `active_device` names `from` — the
+/// dead/lost device — is claimed here and restored where a backup
+/// exists. Apps with no placement (active_device NULL) aren't "on"
+/// that device and are skipped; rescue them individually.
+pub fn rescue_from(
+    store: &Arc<Store>,
+    data_dir: &Path,
+    device: DeviceId,
+    from: DeviceId,
+) -> Result<Vec<(String, RescueOutcome)>> {
+    if from == device {
+        return Err(Error::InvalidInput(
+            "rescue --from must name a different device".into(),
+        ));
+    }
+    let apps: Vec<String> = store.with_conn(|c| {
+        let mut st =
+            c.prepare("SELECT id FROM apps WHERE deleted=0 AND active_device=?1 ORDER BY id")?;
+        let rows = st
+            .query_map(params![from.to_string()], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })?;
+    apps.iter()
+        .map(|id| rescue(store, data_dir, device, id).map(|o| (id.clone(), o)))
+        .collect()
+}
+
+/// Point `active_device` at this device — the claim side of rescue.
+fn claim_active(store: &Arc<Store>, device: DeviceId, app_id: &str) -> Result<()> {
+    let n = store.with_conn(|c| {
+        c.execute(
+            "UPDATE apps SET active_device=?2, updated_at=?3 WHERE id=?1 AND deleted=0",
+            params![app_id, device.to_string(), ts(&now())],
+        )
+    })?;
+    if n == 0 {
+        return Err(Error::NotFound(format!("app {app_id} not installed")));
+    }
+    Ok(())
+}
+
 pub fn active_elsewhere(
     store: &Arc<Store>,
     device: DeviceId,
