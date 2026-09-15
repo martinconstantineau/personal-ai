@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 14;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -373,6 +373,25 @@ CREATE TABLE app_crdt_view (
     value_json TEXT NOT NULL,
     t_ms INTEGER NOT NULL,
     PRIMARY KEY (app_id, doc, field)
+);
+"#,
+    r#"
+-- V14: media jobs — generated-media bookkeeping (audio today; image/
+-- video share it when those providers land). A requester logs intent
+-- on submit; the worker logs execution; results are content-addressed
+-- blobs. Local-only: rows never sync.
+CREATE TABLE media_jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    params_json TEXT,
+    state TEXT NOT NULL,
+    requester TEXT,
+    worker TEXT,
+    result_blob TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 "#,
 ];

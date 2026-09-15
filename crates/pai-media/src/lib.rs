@@ -15,6 +15,7 @@
 use pai_core::*;
 use serde::{Deserialize, Serialize};
 
+pub mod jobs;
 pub mod providers;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

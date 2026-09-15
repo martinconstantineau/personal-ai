@@ -69,7 +69,7 @@ fn schema_v3_columns_exist() {
                 |r| r.get::<_, String>(0),
             )
         })
-        .map(|v| assert_eq!(v, "13"))
+        .map(|v| assert_eq!(v, "14"))
         .unwrap();
 }
 

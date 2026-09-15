@@ -1031,7 +1031,19 @@ enum AudioCmd {
         /// Output path; default <data_dir>/media/audio-<ts>.wav
         #[arg(long)]
         out: Option<String>,
+        /// Run on a paired device (id prefix or "any" = best advertised
+        /// media-run peer). Needs --dir or --relay for the transport.
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
     },
+    /// List recent media jobs (local + executed-for-peers rows).
+    Jobs,
 }
 
 struct Ctx {
@@ -1728,6 +1740,9 @@ async fn guest_call(
 struct BrokerOps {
     stt: Option<pai_voice::WhisperServerStt>,
     tts: Option<pai_voice::PiperTts>,
+    /// Audio-generation provider — when Some, the device advertises
+    /// `media-run` and executes generation jobs for vault members.
+    audio_gen: Option<pai_media::providers::HttpAudioGen>,
     server_url: String,
     model: String,
     data_dir: std::path::PathBuf,
@@ -1762,6 +1777,9 @@ impl BrokerOps {
         }
         if self.tts.is_some() {
             v.push("tts".into());
+        }
+        if self.audio_gen.is_some() {
+            v.push("media-run".into());
         }
         v
     }
@@ -1855,6 +1873,14 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
                 pai_apps::app_serve_op(&self.data_dir, &a.id, &a.args)
                     .map_err(|e| Error::Other(e.to_string()))
             }
+            // Broker-routed media generation: the requester picks this
+            // device via find_peer("media-run"); execution + job record
+            // live in pai_media::jobs::media_run_op.
+            "media-run" => {
+                pai_media::jobs::media_run_op(&self.data_dir, &self.store, self.device, payload)
+                    .await
+                    .map_err(|e| Error::Other(e.to_string()))
+            }
             "describe" => {
                 #[derive(serde::Deserialize)]
                 struct DescribeArgs {
@@ -1941,6 +1967,8 @@ async fn broker_ops(
         .await
         .map(|v| (v.stt, v.tts))
         .unwrap_or((None, None));
+    let audio_gen =
+        pai_media::providers::detect(&cfg.data_dir, std::time::Duration::from_secs(2)).await;
     let model = cli
         .model
         .clone()
@@ -1948,6 +1976,7 @@ async fn broker_ops(
     BrokerOps {
         stt,
         tts,
+        audio_gen,
         server_url: cfg.inference.local_server_url.clone(),
         model,
         data_dir: cfg.data_dir.clone(),
@@ -2019,7 +2048,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             println!("signed by device {:.8}", signer.to_string());
             println!("run it: `pai apps run {}`", pkg.manifest.app_id());
         }
-        Cmd::Audio { cmd } => run_audio_cmds(cmd, &cfg).await?,
+        Cmd::Audio { cmd } => run_audio_cmds(cmd, &cfg, &store, &device).await?,
         Cmd::Apps { cmd } => match cmd {
             AppsCmd::Init { name, dir } => {
                 let base = match dir {
@@ -3701,7 +3730,12 @@ async fn run_voice_cmds(cmd: &VoiceCmd, ctx: &Ctx, cfg: &pai_config::Config) -> 
 /// `pai audio …` — audio-generation provider config + generation.
 /// Needs only config + the provider endpoint (no inference stack), so it
 /// lives on the light command path.
-async fn run_audio_cmds(cmd: &AudioCmd, cfg: &pai_config::Config) -> Result<()> {
+async fn run_audio_cmds(
+    cmd: &AudioCmd,
+    cfg: &pai_config::Config,
+    store: &Arc<Store>,
+    device: &Device,
+) -> Result<()> {
     use pai_inference::AudioGenerationProvider;
     match cmd {
         AudioCmd::Status => {
@@ -3735,29 +3769,154 @@ async fn run_audio_cmds(cmd: &AudioCmd, cfg: &pai_config::Config) -> Result<()> 
             prompt,
             seconds,
             out,
+            device: on,
+            dir,
+            relay,
+            token,
         } => {
-            let gen =
-                pai_media::providers::detect(&cfg.data_dir, std::time::Duration::from_secs(2))
-                    .await
-                    .ok_or_else(|| {
-                        Error::Provider(
-                            "audio-gen server unreachable — `pai audio status` for diagnostics"
-                                .into(),
-                        )
-                    })?;
             let secs = (*seconds).clamp(1, 300);
-            println!("generating {secs}s — this can take a while…");
-            let bytes = gen.generate_audio(prompt, secs).await?;
-            let path = match out {
-                Some(o) => std::path::PathBuf::from(o),
+            let out_path = |data_dir: &std::path::Path| match out {
+                Some(o) => Ok(std::path::PathBuf::from(o)),
                 None => {
-                    let dir = cfg.data_dir.join("media");
+                    let dir = data_dir.join("media");
                     std::fs::create_dir_all(&dir).map_err(|e| Error::Storage(e.to_string()))?;
-                    dir.join(format!("audio-{}.wav", pai_core::now().timestamp_millis()))
+                    Ok(dir.join(format!("audio-{}.wav", pai_core::now().timestamp_millis())))
                 }
             };
-            std::fs::write(&path, &bytes).map_err(|e| Error::Storage(e.to_string()))?;
-            println!("{} → {} bytes", path.display(), bytes.len());
+            let mut job = pai_media::jobs::new_job(pai_media::MediaJobKind::TextToAudio, prompt);
+            let params = serde_json::json!({"duration_seconds": secs}).to_string();
+            pai_media::jobs::record(store, &job, Some(&params), Some(device.id), None)?;
+
+            if let Some(dev) = on {
+                // Remote: dispatch media-run to a paired device.
+                let result = async {
+                    let t = sync_transport(dir, relay, token)?;
+                    let vault = pai_sync::crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
+                        Error::Sync("no vault key — pair a device first (pai pair)".into())
+                    })?;
+                    let client = pai_broker::rpc::BrokerClient::new(&*t, &vault, device.id)
+                        .with_weights(place_weights(store));
+                    let to = if dev == "any" {
+                        client.find_peer("media-run").await?.ok_or_else(|| {
+                            Error::NotFound(
+                                "no paired device advertises media-run — \
+                                 `pai broker serve` running on the worker?"
+                                    .into(),
+                            )
+                        })?
+                    } else {
+                        resolve_peer(store, dev)?
+                    };
+                    job.state = pai_media::JobState::Running;
+                    job.placement_device = Some(to);
+                    pai_media::jobs::record(store, &job, Some(&params), Some(device.id), None)?;
+                    let payload = serde_json::json!({
+                        "prompt": prompt,
+                        "duration_seconds": secs,
+                    })
+                    .to_string()
+                    .into_bytes();
+                    println!("generating {secs}s on {to} — this can take a while…");
+                    client
+                        .call(
+                            to,
+                            "media-run",
+                            &payload,
+                            std::time::Duration::from_secs(660),
+                        )
+                        .await
+                }
+                .await;
+
+                match result {
+                    Ok(resp) => {
+                        use base64::Engine as _;
+                        let v: serde_json::Value = serde_json::from_slice(&resp)
+                            .map_err(|e| Error::Other(format!("bad media-run reply: {e}")))?;
+                        let bytes = v["audio_b64"]
+                            .as_str()
+                            .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+                            .ok_or_else(|| {
+                                Error::Other("media-run reply missing audio_b64".into())
+                            })?;
+                        job.state = pai_media::JobState::Done;
+                        job.result_blob = Some(store.put_blob(&bytes)?);
+                        pai_media::jobs::record(store, &job, Some(&params), Some(device.id), None)?;
+                        let path = out_path(&cfg.data_dir)?;
+                        std::fs::write(&path, &bytes).map_err(|e| Error::Storage(e.to_string()))?;
+                        println!(
+                            "{} → {} bytes (job {} on {})",
+                            path.display(),
+                            bytes.len(),
+                            job.id,
+                            job.placement_device.unwrap()
+                        );
+                    }
+                    Err(e) => {
+                        job.state = pai_media::JobState::Failed;
+                        pai_media::jobs::record(
+                            store,
+                            &job,
+                            Some(&params),
+                            Some(device.id),
+                            Some(&e.to_string()),
+                        )?;
+                        return Err(e);
+                    }
+                }
+            } else {
+                let gen =
+                    pai_media::providers::detect(&cfg.data_dir, std::time::Duration::from_secs(2))
+                        .await
+                        .ok_or_else(|| {
+                            Error::Provider(
+                                "audio-gen server unreachable — `pai audio status` for diagnostics"
+                                    .into(),
+                            )
+                        })?;
+                job.state = pai_media::JobState::Running;
+                job.placement_device = Some(device.id);
+                println!("generating {secs}s — this can take a while…");
+                match gen.generate_audio(prompt, secs).await {
+                    Ok(bytes) => {
+                        job.state = pai_media::JobState::Done;
+                        job.result_blob = Some(store.put_blob(&bytes)?);
+                        pai_media::jobs::record(store, &job, Some(&params), Some(device.id), None)?;
+                        let path = out_path(&cfg.data_dir)?;
+                        std::fs::write(&path, &bytes).map_err(|e| Error::Storage(e.to_string()))?;
+                        println!("{} → {} bytes", path.display(), bytes.len());
+                    }
+                    Err(e) => {
+                        job.state = pai_media::JobState::Failed;
+                        pai_media::jobs::record(
+                            store,
+                            &job,
+                            Some(&params),
+                            Some(device.id),
+                            Some(&e.to_string()),
+                        )?;
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        AudioCmd::Jobs => {
+            for j in pai_media::jobs::list(store, 20)? {
+                println!(
+                    "{} {} [{}] {} {}",
+                    j["id"].as_str().unwrap_or("?"),
+                    j["kind"].as_str().unwrap_or("?"),
+                    j["prompt"].as_str().unwrap_or("?"),
+                    j["state"].as_str().unwrap_or("?"),
+                    j["worker"]
+                        .as_str()
+                        .map(|w| format!("on {:.8}", w))
+                        .unwrap_or_default(),
+                );
+                if let Some(e) = j["error"].as_str() {
+                    println!("    error: {e}");
+                }
+            }
         }
     }
     Ok(())

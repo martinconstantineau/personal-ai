@@ -2035,10 +2035,13 @@ name = "pai-media"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "pai-core",
  "pai-inference",
+ "pai-storage",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

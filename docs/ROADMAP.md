@@ -569,6 +569,20 @@ guest read/write handles are all shipped and pushed.
   jobs aren't yet broker-routed (that's the declared MediaJob queue
   track, shared with image/video).
 
+- [x] **V5m — broker-routed media jobs**: `media-run` op executes
+  generation on whichever paired device serves it — a phone can ask the
+  home GPU box. `BrokerOps` advertises `media-run` only when an audio
+  provider is detected; `find_peer("media-run")` picks the least-loaded
+  advertiser (placement weights apply). Worker side runs
+  `pai_media::jobs::media_run_op`: provider call → result blob +
+  `media_jobs` row (migration V14: kind/prompt/params/state/requester/
+  worker/result_blob/error — local-only bookkeeping). Requester side
+  (`pai audio gen --device <peer>|any`) records the same job lifecycle
+  — queued → running → done/failed — stores the returned bytes as a
+  blob, writes the WAV. `pai audio jobs` lists recent jobs. Vault-member
+  op only (guests can't burn your GPU). Image/video jobs share the
+  table + op when those providers land.
+
 ## Known technical debt (tracked, not hidden)
 
 | Item | Why it's deferred | Exit |
