@@ -286,9 +286,32 @@ enum AppsCmd {
         #[arg(long)]
         out: Option<String>,
     },
+    /// Re-grant a narrower sub-token from a capability this device
+    /// holds — the parent token must carry `share` and be bound to
+    /// this device's key. The child embeds the parent chain.
+    Delegate {
+        /// Parent capability token JSON (from `pai apps share`).
+        #[arg(long)]
+        parent: String,
+        /// Action(s) for the sub-token — must be a subset of the
+        /// parent's (`--action read,exec`).
+        #[arg(long, default_value = "exec", value_delimiter = ',')]
+        action: Vec<String>,
+        /// Sub-token lifetime in days — may not outlive the parent.
+        #[arg(long)]
+        days: Option<i64>,
+        /// Bind the sub-token: a paired device-id prefix or a raw
+        /// 64-hex Ed25519 pubkey. Omit for a bearer sub-token.
+        #[arg(long, name = "for")]
+        for_device: Option<String>,
+        /// Write the sub-token JSON here (default: share/tokens/).
+        #[arg(long)]
+        out: Option<String>,
+    },
     /// List capability grants this device has issued.
     Grants,
-    /// Revoke a capability grant by token id.
+    /// Revoke a capability grant by token id — revoking a parent
+    /// also kills every sub-token delegated from it.
     Revoke {
         /// Installed app id the grant belongs to.
         id: String,
@@ -2240,6 +2263,108 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 println!(
                     "guest runs it with: pai apps run {id} --on {} --cap <file>",
                     device.id
+                );
+            }
+            AppsCmd::Delegate {
+                parent,
+                action,
+                days,
+                for_device,
+                out,
+            } => {
+                let raw = std::fs::read_to_string(parent)
+                    .map_err(|e| Error::InvalidInput(format!("{parent}: {e}")))?;
+                let parent_cap = pai_share::Capability::from_json(&raw)
+                    .map_err(|e| Error::InvalidInput(format!("bad parent token: {e}")))?;
+                let mut actions = Vec::new();
+                for a in action {
+                    actions.push(match a.as_str() {
+                        "exec" => pai_share::Action::Exec,
+                        "read" => pai_share::Action::Read,
+                        "write" => pai_share::Action::Write,
+                        "share" => pai_share::Action::Share,
+                        other => {
+                            return Err(Error::InvalidInput(format!(
+                                "unknown action '{other}' — exec|read|write|share"
+                            )))
+                        }
+                    });
+                }
+                // The chain only verifies when this device's key is the
+                // key the parent was bound to — fail early otherwise.
+                let my_key = hex::encode(&device.public_key);
+                if parent_cap.grantee_key.as_deref() != Some(my_key.as_str()) {
+                    return Err(Error::InvalidInput(
+                        "parent token isn't bound to this device's key".into(),
+                    ));
+                }
+                let grantee_key = match for_device {
+                    Some(target) => match hex::decode(target) {
+                        Ok(v) if v.len() == 32 => Some(<[u8; 32]>::try_from(v.as_slice()).unwrap()),
+                        Ok(_) => {
+                            return Err(Error::InvalidInput(
+                                "--for hex key must be 32 bytes (64 hex chars)".into(),
+                            ))
+                        }
+                        Err(_) => Some(
+                            pai_sync::pair::list_peers(&store)?
+                                .iter()
+                                .find(|p| p.device_id.to_string().starts_with(target.as_str()))
+                                .map(|p| p.ed_pubkey)
+                                .ok_or_else(|| {
+                                    Error::NotFound(format!("no paired device matching '{target}'"))
+                                })?,
+                        ),
+                    },
+                    None => None,
+                };
+                let shares = pai_share::ShareStore::new(&cfg.data_dir);
+                let mut spec =
+                    pai_share::GrantSpec::for_app(parent_cap.app_id.clone(), actions.clone());
+                spec.grantee_key = grantee_key;
+                spec.device = parent_cap.device;
+                spec.expires =
+                    days.map(|d| (pai_core::now() + chrono::Duration::days(d)).timestamp());
+                let cap = shares
+                    .delegate(&ids, &key_dir, device.id, &parent_cap, spec)
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                let json = cap.to_json().map_err(|e| Error::Other(e.to_string()))?;
+                let path = match out {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => cfg
+                        .data_dir
+                        .join("share")
+                        .join("tokens")
+                        .join(format!("{}-{}.json", cap.app_id, cap.token_id)),
+                };
+                if let Some(p) = path.parent() {
+                    std::fs::create_dir_all(p).ok();
+                }
+                std::fs::write(&path, &json)
+                    .map_err(|e| Error::Storage(format!("{path:?}: {e}")))?;
+                let mut ev = pai_audit::event(AuditKind::AppShared, AuditOutcome::Ok);
+                ev.device = Some(device.id);
+                ev.detail = serde_json::json!({
+                    "app_id": cap.app_id,
+                    "token_id": cap.token_id,
+                    "parent": parent_cap.token_id,
+                    "delegated": true,
+                    "actions": actions.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                    "bound": cap.grantee_key.is_some(),
+                    "expires": cap.expires,
+                });
+                pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                println!("wrote {}", path.display());
+                println!(
+                    "sub-token {} — {} on {} — delegated from {}",
+                    &cap.token_id[..8.min(cap.token_id.len())],
+                    actions
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    cap.app_id,
+                    &parent_cap.token_id[..8.min(parent_cap.token_id.len())],
                 );
             }
             AppsCmd::Grants => {

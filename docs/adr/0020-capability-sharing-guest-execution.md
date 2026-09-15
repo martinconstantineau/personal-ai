@@ -31,6 +31,20 @@ holding the file may run the app. The ShareStore is plain files under
 `<data_dir>/share/` (no schema changes, nothing synced — grants live
 and die on the issuer).
 
+**Delegation** (`share` action): a bound grantee may mint a narrower
+sub-token signed by its own key. The child embeds its `parent` inside
+the token JSON and commits the parent's `token_id` in its signed
+payload (tokens without a parent keep the original 8-line payload —
+wire-compatible). `verify_chain` walks the chain recursively: each
+child verifies against the parent's `grantee_key`, must narrow
+(actions ⊆, expiry ≤, same `app_id`, device restriction preserved),
+and the parent must carry `share`; only the root resolves `issued_by`
+through the issuer table. A bearer parent can't delegate — there is
+no bound key to verify a child against. Revocation composes:
+tombstoning a parent id refuses every descendant on next request;
+a child minted elsewhere can't be tombstoned on the host — revoking
+its parent is the kill switch.
+
 **Guest channel** (`pai-share::guest`): requests ride `greq/<to>/<id>`
 sync objects carrying the token, args, and an ephemeral X25519 public
 key — plaintext, since they contain no vault data and the token is
@@ -57,9 +71,9 @@ targets the token's `issued_by` since guests can't read sealed
 - Revocation is a tombstone check on the serving device — offline
   for the guest is offline; a revoked token is refused the moment
   the tombstone exists.
-- `exec`, `read`, and `write` are all consumed (`app-run` /
-  `app-read` / `app-write` ops); `share` verifies but sub-delegation
-  (a bound grantee minting narrower tokens) is future work.
+- `exec`, `read`, `write`, and `share` are all consumed (`app-run` /
+  `app-read` / `app-write` ops plus `pai apps delegate`); delegation
+  chains nest — a sub-token carrying `share` may delegate further.
 - Bearer tokens are replayable by anyone holding the file — bound
   tokens (`--for`) exist for the stronger case.
 - `greq/` payloads are visible on the transport — they reveal which

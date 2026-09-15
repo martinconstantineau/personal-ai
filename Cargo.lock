@@ -1727,6 +1727,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "hex",
  "pai-agent",
  "pai-apps",
  "pai-audit",

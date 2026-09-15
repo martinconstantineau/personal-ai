@@ -90,6 +90,12 @@ pub struct Capability {
     pub issued_at: i64,
     /// Hex Ed25519 signature over `signing_payload`.
     pub signature: String,
+    /// Delegation chain: when set, this token was minted by the
+    /// parent's `grantee_key` holder (the parent's `share` action
+    /// permits it). Serialized inside the token so a guest presents
+    /// the whole chain in one file.
+    #[serde(default)]
+    pub parent: Option<Box<Capability>>,
 }
 
 /// Outcome of a successful [`ShareStore::verify`].
@@ -146,7 +152,7 @@ impl Capability {
             .map(|a| a.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        format!(
+        let mut base = format!(
             "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             self.token_id,
             self.app_id,
@@ -160,8 +166,12 @@ impl Capability {
                 .unwrap_or_else(|| "-".into()),
             self.issued_by,
             self.issued_at,
-        )
-        .into_bytes()
+        );
+        if let Some(p) = &self.parent {
+            base.push('\n');
+            base.push_str(&p.token_id);
+        }
+        base.into_bytes()
     }
 
     /// The token's wire form — what a grantee holds and presents.
@@ -229,6 +239,7 @@ impl ShareStore {
             issued_by: issuer,
             issued_at: pai_core::now().timestamp(),
             signature: String::new(),
+            parent: None,
         };
         let sig = ids.sign(issuer, key_dir, &cap.signing_payload())?;
         cap.signature = hex::encode(sig);
@@ -238,6 +249,156 @@ impl ShareStore {
             cap.to_json()?,
         )?;
         Ok(cap)
+    }
+
+    /// Mint a sub-token under an existing capability the caller holds.
+    /// The parent must carry `share`; the child's actions must be a
+    /// subset of the parent's (excluding nothing else — `share` may
+    /// chain further) and its expiry may not outlive the parent's.
+    /// The child is signed by `issuer` — in practice the device whose
+    /// key the parent was bound to — and embeds the parent so the
+    /// chain travels in one file.
+    pub fn delegate(
+        &self,
+        ids: &IdentityStore,
+        key_dir: &Path,
+        issuer: DeviceId,
+        parent: &Capability,
+        spec: GrantSpec,
+    ) -> ShareResult<Capability> {
+        if !parent.actions.contains(&Action::Share) {
+            return Err(ShareError::ActionNotGranted(
+                "share — parent token doesn't allow delegation".into(),
+            ));
+        }
+        if parent.grantee_key.is_none() {
+            return Err(ShareError::InvalidInput(
+                "bearer parent can't delegate — no grantee key".into(),
+            ));
+        }
+        if spec.app_id != parent.app_id {
+            return Err(ShareError::InvalidInput(
+                "sub-token must cover the same app_id".into(),
+            ));
+        }
+        for a in &spec.actions {
+            if !parent.actions.contains(a) {
+                return Err(ShareError::InvalidInput(format!(
+                    "action {a} not in parent grant"
+                )));
+            }
+        }
+        if spec.actions.is_empty() {
+            return Err(ShareError::InvalidInput("at least one action".into()));
+        }
+        match (parent.expires, spec.expires) {
+            (Some(pe), Some(ce)) if ce > pe => {
+                return Err(ShareError::InvalidInput(
+                    "sub-token can't outlive its parent".into(),
+                ))
+            }
+            (Some(pe), None) => {
+                return Err(ShareError::InvalidInput(format!(
+                    "parent expires {pe} — sub-token needs an expiry"
+                )))
+            }
+            _ => {}
+        }
+        if parent.device.is_some() && parent.device != spec.device {
+            return Err(ShareError::InvalidInput(
+                "device restriction must match parent's".into(),
+            ));
+        }
+        let mut cap = Capability {
+            token_id: uuid::Uuid::new_v4().to_string(),
+            app_id: spec.app_id,
+            actions: spec.actions,
+            grantee_key: spec.grantee_key.map(hex::encode),
+            device: spec.device,
+            expires: spec.expires,
+            issued_by: issuer,
+            issued_at: pai_core::now().timestamp(),
+            signature: String::new(),
+            parent: Some(Box::new(parent.clone())),
+        };
+        let sig = ids.sign(issuer, key_dir, &cap.signing_payload())?;
+        cap.signature = hex::encode(sig);
+        std::fs::create_dir_all(self.caps_dir())?;
+        std::fs::write(
+            self.caps_dir().join(format!("{}.json", cap.token_id)),
+            cap.to_json()?,
+        )?;
+        Ok(cap)
+    }
+
+    /// Verify a (possibly delegated) token end-to-end. `resolve` maps a
+    /// root `issued_by` device to its pubkey — own device or a paired
+    /// peer. Each delegation hop verifies the child signature against
+    /// the parent's `grantee_key` and enforces the narrowing rules; the
+    /// root verifies against `resolve`. Revocation tombstones are
+    /// checked for every level whose file lives in this store (a
+    /// sub-token minted elsewhere can't be tombstoned here — revoking
+    /// its parent is the kill switch).
+    pub fn verify_chain(
+        &self,
+        ids: &IdentityStore,
+        cap: &Capability,
+        resolve: &dyn Fn(DeviceId) -> Option<[u8; 32]>,
+        action: Action,
+    ) -> ShareResult<Grant> {
+        match &cap.parent {
+            None => {
+                let pk = resolve(cap.issued_by).ok_or_else(|| {
+                    ShareError::InvalidInput(format!("unknown issuer {}", cap.issued_by))
+                })?;
+                self.verify(ids, cap, &pk, action)
+            }
+            Some(parent) => {
+                if !parent.actions.contains(&Action::Share) {
+                    return Err(ShareError::InvalidInput(
+                        "parent token doesn't allow delegation".into(),
+                    ));
+                }
+                if cap.app_id != parent.app_id {
+                    return Err(ShareError::InvalidInput(
+                        "sub-token app_id differs from parent".into(),
+                    ));
+                }
+                for a in &cap.actions {
+                    if !parent.actions.contains(a) {
+                        return Err(ShareError::ActionNotGranted(format!(
+                            "{a} widened beyond parent"
+                        )));
+                    }
+                }
+                if let (Some(pe), Some(ce)) = (parent.expires, cap.expires) {
+                    if ce > pe {
+                        return Err(ShareError::Expired(cap.token_id.clone()));
+                    }
+                } else if parent.expires.is_some() && cap.expires.is_none() {
+                    return Err(ShareError::InvalidInput(
+                        "sub-token must expire within its parent".into(),
+                    ));
+                }
+                if parent.device.is_some() && parent.device != cap.device {
+                    return Err(ShareError::InvalidInput(
+                        "device restriction widened beyond parent".into(),
+                    ));
+                }
+                let gk_hex = parent.grantee_key.as_deref().ok_or_else(|| {
+                    ShareError::InvalidInput("bearer parent can't delegate (no grantee key)".into())
+                })?;
+                let gk = hex::decode(gk_hex)
+                    .map_err(|e| ShareError::InvalidInput(format!("grantee_key: {e}")))?;
+                let gk: [u8; 32] = gk
+                    .try_into()
+                    .map_err(|_| ShareError::InvalidInput("grantee_key not 32 bytes".into()))?;
+                // Child signature under the parent's bound key, then
+                // recurse: the parent must itself verify.
+                self.verify(ids, cap, &gk, action)?;
+                self.verify_chain(ids, parent, resolve, action)
+            }
+        }
     }
 
     /// Tombstone a token by id. Returns false when no such token exists.
@@ -513,6 +674,258 @@ mod tests {
                 },
             )
             .is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two-device rig: `ids`/`dev` is the token issuer, `ids2`/`dev2`
+    /// the bound grantee who delegates. `resolve` answers only the
+    /// issuer's key — like a host that knows its own device + peers.
+    fn rig(
+        root: &Path,
+    ) -> (
+        IdentityStore,
+        Device,
+        PathBuf,
+        IdentityStore,
+        Device,
+        PathBuf,
+    ) {
+        let (ids, dev, key_dir) = setup(&root.join("host"));
+        let (ids2, dev2, key_dir2) = setup(&root.join("grantee"));
+        (ids, dev, key_dir, ids2, dev2, key_dir2)
+    }
+
+    #[test]
+    fn delegate_narrows_and_verifies_chain() {
+        let root = tmp();
+        let (ids, dev, key_dir, ids2, dev2, key_dir2) = rig(&root);
+        let store = ShareStore::new(&root);
+        let parent = store
+            .grant(
+                &ids,
+                &key_dir,
+                dev.id,
+                GrantSpec {
+                    grantee_key: Some(pubkey(&dev2)),
+                    expires: Some(pai_core::now().timestamp() + 3600),
+                    ..GrantSpec::for_app("a", vec![Action::Exec, Action::Read, Action::Share])
+                },
+            )
+            .unwrap();
+        let child = store
+            .delegate(
+                &ids2,
+                &key_dir2,
+                dev2.id,
+                &parent,
+                GrantSpec {
+                    expires: Some(pai_core::now().timestamp() + 1800),
+                    ..GrantSpec::for_app("a", vec![Action::Exec])
+                },
+            )
+            .unwrap();
+        assert_eq!(child.parent.as_ref().unwrap().token_id, parent.token_id);
+        let resolve = |id: DeviceId| (id == dev.id).then(|| pubkey(&dev));
+        let g = store
+            .verify_chain(&ids, &child, &resolve, Action::Exec)
+            .unwrap();
+        assert_eq!(g.app_id, "a");
+        // Nested: child carries no `share`, so it can't delegate further.
+        assert!(store
+            .delegate(
+                &ids,
+                &key_dir,
+                dev.id,
+                &child,
+                GrantSpec::for_app("a", vec![Action::Exec])
+            )
+            .is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delegate_requires_share_and_subset() {
+        let root = tmp();
+        let (ids, dev, key_dir, ids2, dev2, key_dir2) = rig(&root);
+        let store = ShareStore::new(&root);
+        // Parent without `share` — delegation refused.
+        let no_share = store
+            .grant(
+                &ids,
+                &key_dir,
+                dev.id,
+                GrantSpec {
+                    grantee_key: Some(pubkey(&dev2)),
+                    ..GrantSpec::for_app("a", vec![Action::Exec])
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            store.delegate(
+                &ids2,
+                &key_dir2,
+                dev2.id,
+                &no_share,
+                GrantSpec::for_app("a", vec![Action::Exec])
+            ),
+            Err(ShareError::ActionNotGranted(_))
+        ));
+        // Parent with share — but child asks for an un-granted action.
+        let parent = store
+            .grant(
+                &ids,
+                &key_dir,
+                dev.id,
+                GrantSpec {
+                    grantee_key: Some(pubkey(&dev2)),
+                    ..GrantSpec::for_app("a", vec![Action::Exec, Action::Share])
+                },
+            )
+            .unwrap();
+        assert!(store
+            .delegate(
+                &ids2,
+                &key_dir2,
+                dev2.id,
+                &parent,
+                GrantSpec::for_app("a", vec![Action::Exec, Action::Read]),
+            )
+            .is_err());
+        // Or a different app entirely.
+        assert!(store
+            .delegate(
+                &ids2,
+                &key_dir2,
+                dev2.id,
+                &parent,
+                GrantSpec::for_app("other", vec![Action::Exec]),
+            )
+            .is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delegate_expiry_and_forgery_rejected() {
+        let root = tmp();
+        let (ids, dev, key_dir, ids2, dev2, key_dir2) = rig(&root);
+        let store = ShareStore::new(&root);
+        let parent = store
+            .grant(
+                &ids,
+                &key_dir,
+                dev.id,
+                GrantSpec {
+                    grantee_key: Some(pubkey(&dev2)),
+                    expires: Some(pai_core::now().timestamp() + 3600),
+                    ..GrantSpec::for_app("a", vec![Action::Exec, Action::Share])
+                },
+            )
+            .unwrap();
+        // Child outliving the parent — refused at mint and at verify.
+        assert!(store
+            .delegate(
+                &ids2,
+                &key_dir2,
+                dev2.id,
+                &parent,
+                GrantSpec {
+                    expires: Some(pai_core::now().timestamp() + 7200),
+                    ..GrantSpec::for_app("a", vec![Action::Exec])
+                },
+            )
+            .is_err());
+        // Forge one anyway: valid grantee sig over an out-of-range expiry.
+        let mut forged = store
+            .delegate(
+                &ids2,
+                &key_dir2,
+                dev2.id,
+                &parent,
+                GrantSpec {
+                    expires: Some(pai_core::now().timestamp() + 1800),
+                    ..GrantSpec::for_app("a", vec![Action::Exec])
+                },
+            )
+            .unwrap();
+        forged.expires = Some(pai_core::now().timestamp() + 7200);
+        let sig = ids2
+            .sign(dev2.id, &key_dir2, &forged.signing_payload())
+            .unwrap();
+        forged.signature = hex::encode(sig);
+        let resolve = |id: DeviceId| (id == dev.id).then(|| pubkey(&dev));
+        assert!(matches!(
+            store.verify_chain(&ids, &forged, &resolve, Action::Exec),
+            Err(ShareError::Expired(_))
+        ));
+        // Child signed by the wrong key — the issuer's, not the grantee's.
+        let mut wrong_key = forged.clone();
+        wrong_key.expires = Some(pai_core::now().timestamp() + 1800);
+        let sig = ids
+            .sign(dev.id, &key_dir, &wrong_key.signing_payload())
+            .unwrap();
+        wrong_key.signature = hex::encode(sig);
+        assert!(matches!(
+            store.verify_chain(&ids, &wrong_key, &resolve, Action::Exec),
+            Err(ShareError::BadSignature(_))
+        ));
+        // Bearer parent can't delegate — no grantee key to verify against.
+        let bearer = store
+            .grant(
+                &ids,
+                &key_dir,
+                dev.id,
+                GrantSpec::for_app("a", vec![Action::Exec, Action::Share]),
+            )
+            .unwrap();
+        assert!(store
+            .delegate(
+                &ids2,
+                &key_dir2,
+                dev2.id,
+                &bearer,
+                GrantSpec {
+                    expires: Some(pai_core::now().timestamp() + 60),
+                    ..GrantSpec::for_app("a", vec![Action::Exec])
+                },
+            )
+            .is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn revoking_parent_kills_subtoken() {
+        let root = tmp();
+        let (ids, dev, key_dir, ids2, dev2, key_dir2) = rig(&root);
+        let store = ShareStore::new(&root);
+        let parent = store
+            .grant(
+                &ids,
+                &key_dir,
+                dev.id,
+                GrantSpec {
+                    grantee_key: Some(pubkey(&dev2)),
+                    ..GrantSpec::for_app("a", vec![Action::Exec, Action::Share])
+                },
+            )
+            .unwrap();
+        let child = store
+            .delegate(
+                &ids2,
+                &key_dir2,
+                dev2.id,
+                &parent,
+                GrantSpec::for_app("a", vec![Action::Exec]),
+            )
+            .unwrap();
+        let resolve = |id: DeviceId| (id == dev.id).then(|| pubkey(&dev));
+        store
+            .verify_chain(&ids, &child, &resolve, Action::Exec)
+            .unwrap();
+        assert!(store.revoke(&parent.token_id).unwrap());
+        assert!(matches!(
+            store.verify_chain(&ids, &child, &resolve, Action::Exec),
+            Err(ShareError::Revoked(_))
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -373,8 +373,26 @@ days, optional bind-to-peer) plus a grants sheet with revoke.
 `ShareStore::grant` now takes `DeviceId` (it only ever used
 `issuer.id`) so the FFI can mint without fetching the full Device.
 
-- Remaining: `share` re-grant (a bound grantee issuing narrower
-  sub-tokens), deeper mobile shell work.
+**V4r done (2026-09-15):** share re-grant — a bound grantee mints
+narrower sub-tokens under its own device key. `Capability` gains an
+optional `parent` chain embedded in the token JSON, committed into
+the child's signed payload (parent `token_id` appended — absent keeps
+the legacy 8-line payload, so pre-V4r tokens still verify).
+`ShareStore::delegate` refuses: parent without `share`, bearer
+parent, widened actions, `app_id` change, expiry beyond the parent's,
+or a mismatched device restriction. `verify_chain` verifies
+recursively — each hop's signature checks against the parent's bound
+`grantee_key`; the root still resolves `issued_by` to own device or a
+paired peer. Revoking a parent tombstone kills every descendant.
+CLI: `pai apps delegate --parent <token.json> --action … [--for
+<peer|64-hex-key>] [--days N]`. Verified live: paired grantee
+delegated an exec-only sub-token, an unpaired third device ran the
+app on the host through it, and revoking the parent refused the
+child.
+
+- Remaining: deeper mobile shell work; delegated grants aren't yet
+  shown in the grants UI (`list()` sees them — they're files in
+  `share/caps/` — but there's no chain display).
 
 ## Known technical debt (tracked, not hidden)
 

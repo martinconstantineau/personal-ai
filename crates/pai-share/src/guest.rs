@@ -278,9 +278,9 @@ impl GuestServer {
                 "token app_id does not match request".into(),
             ));
         }
-        let issuer = self
-            .issuer_pubkey(cap.issued_by)
-            .ok_or_else(|| ShareError::InvalidInput(format!("unknown issuer {}", cap.issued_by)))?;
+        // Root issuer resolution is folded into verify_chain; a
+        // delegated token's root `issued_by` must still resolve to own
+        // device or a paired peer.
         if let Some(grantee_hex) = &cap.grantee_key {
             let sig_hex = req
                 .sig
@@ -303,7 +303,8 @@ impl GuestServer {
                 )));
             }
         }
-        self.shares.verify(&self.ids, cap, &issuer, action)?;
+        self.shares
+            .verify_chain(&self.ids, cap, &|id| self.issuer_pubkey(id), action)?;
         Ok(())
     }
 

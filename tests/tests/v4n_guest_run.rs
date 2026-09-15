@@ -139,7 +139,7 @@ async fn guest_run_roundtrip_and_revocation() {
         .grant(
             &host.ids,
             &host.key_dir,
-            &host.device,
+            host.device.id,
             GrantSpec::for_app("guest-app", vec![Action::Exec]),
         )
         .unwrap();
@@ -212,7 +212,7 @@ async fn guest_run_grantee_bound_needs_signature() {
     let mut spec = GrantSpec::for_app("guest-app", vec![Action::Exec]);
     spec.grantee_key = Some(guest.device.public_key.as_slice().try_into().unwrap());
     let cap = shares
-        .grant(&host.ids, &host.key_dir, &host.device, spec)
+        .grant(&host.ids, &host.key_dir, host.device.id, spec)
         .unwrap();
 
     let server = guest_broker(&transport, &host);
@@ -282,7 +282,7 @@ async fn guest_read_write_roundtrip() {
         .grant(
             &host.ids,
             &host.key_dir,
-            &host.device,
+            host.device.id,
             GrantSpec::for_app("guest-app", vec![Action::Read, Action::Write]),
         )
         .unwrap();
@@ -386,5 +386,101 @@ async fn guest_read_write_roundtrip() {
 
     let _ = std::fs::remove_dir_all(&host.dir);
     let _ = std::fs::remove_dir_all(&guest.dir);
+    let _ = std::fs::remove_dir_all(&shared);
+}
+
+#[tokio::test]
+async fn guest_run_delegated_token_roundtrip() {
+    let host = dev("host4");
+    let mid = dev("mid4"); // bound grantee who re-grants
+    let sub = dev("sub4"); // end guest — paired with nobody
+    install_app(&host);
+
+    let shared = tmpdir("bus4");
+    let transport = FolderTransport::new(shared.clone()).unwrap();
+
+    // Host grants mid exec+share, bound to mid's device key.
+    let shares = ShareStore::new(&host.dir);
+    let mut pspec = GrantSpec::for_app("guest-app", vec![Action::Exec, Action::Share]);
+    pspec.grantee_key = Some(mid.device.public_key.as_slice().try_into().unwrap());
+    let parent = shares
+        .grant(&host.ids, &host.key_dir, host.device.id, pspec)
+        .unwrap();
+
+    // Mid delegates an exec-only sub-token bound to sub's key. The
+    // child is minted on mid's store — it embeds the parent chain.
+    let mid_shares = ShareStore::new(&mid.dir);
+    let mut cspec = GrantSpec::for_app("guest-app", vec![Action::Exec]);
+    cspec.grantee_key = Some(sub.device.public_key.as_slice().try_into().unwrap());
+    let child = mid_shares
+        .delegate(&mid.ids, &mid.key_dir, mid.device.id, &parent, cspec)
+        .unwrap();
+    eprintln!("delegated {}", child.token_id);
+
+    let server = guest_broker(&transport, &host);
+
+    // Sub presents the child: bound, so the request needs sub's sig.
+    let ids = IdentityStore::new(sub.store.clone());
+    let kd = sub.key_dir.clone();
+    let sid = sub.device.id;
+    let signer = move |msg: &[u8]| {
+        ids.sign(sid, &kd, msg)
+            .map_err(|e| pai_share::ShareError::InvalidInput(e.to_string()))
+    };
+    let work = async {
+        let resp = call_guest(
+            &transport,
+            host.device.id,
+            child.clone(),
+            "app-run",
+            &[],
+            Duration::from_secs(15),
+            Some(&signer),
+        )
+        .await
+        .unwrap();
+        use base64::Engine;
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let stdout = base64::engine::general_purpose::STANDARD
+            .decode(v["stdout_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello guest\n");
+    };
+    let serve = async {
+        loop {
+            if server.serve_guests_once().await.unwrap() > 0 {
+                break;
+            }
+        }
+    };
+    // Poll `work` first — the serve loop never yields Pending on an
+    // empty bus, so it must find the request already pushed.
+    tokio::join!(work, serve);
+
+    // Revoking the parent on the host kills the delegated child.
+    assert!(shares.revoke(&parent.token_id).unwrap());
+    let call = call_guest(
+        &transport,
+        host.device.id,
+        child,
+        "app-run",
+        &[],
+        Duration::from_secs(15),
+        Some(&signer),
+    );
+    let serve = async {
+        loop {
+            if server.serve_guests_once().await.unwrap() > 0 {
+                break;
+            }
+        }
+    };
+    let (res, _) = tokio::join!(call, serve);
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("revoked"), "unexpected error: {err}");
+
+    let _ = std::fs::remove_dir_all(&host.dir);
+    let _ = std::fs::remove_dir_all(&mid.dir);
+    let _ = std::fs::remove_dir_all(&sub.dir);
     let _ = std::fs::remove_dir_all(&shared);
 }
