@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -304,6 +304,22 @@ CREATE TABLE circles (
     name TEXT PRIMARY KEY,
     created_by TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0
+);
+"#,
+    r#"
+-- V10: installed app packages — the Personal App Cloud registry row.
+-- Package bytes stay on the filesystem under <data_dir>/apps/<id>/;
+-- this row is the sync surface: `app/<id>` sealed objects carry the
+-- whole package (LWW on updated_at), and deleted=1 ships as a tombstone
+-- so `apps remove` propagates to every paired device.
+CREATE TABLE apps (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    runtime TEXT NOT NULL DEFAULT 'wasm',
+    installed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     deleted INTEGER NOT NULL DEFAULT 0
 );
 "#,

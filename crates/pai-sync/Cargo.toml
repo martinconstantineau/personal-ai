@@ -8,6 +8,7 @@ license.workspace = true
 pai-core.workspace = true
 pai-storage.workspace = true
 pai-identity.workspace = true
+pai-apps.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

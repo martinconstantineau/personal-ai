@@ -271,9 +271,13 @@ the default when no `oauth` block exists.
 - ~~Per-app storage provisioning~~ — shipped: `data/` + `data.db` created
   on install; `schema.sql` applied when `migration.auto_migrate`;
   upgrades preserve live `data/` (merged back over package seeds).
+- ~~App package sync~~ — shipped: installed apps roam as sealed `app/<id>`
+  objects carrying the whole package + signature; the receiver re-verifies
+  against `sync_peers.ed_pubkey`/own device keys before `install_trusted`,
+  removals ship tombstones, and live `data/` never syncs.
 - `pai_apps_list` FFI + Dart `appsList` for the dashboard.
-- Remaining: app state sync (`app/` objects so deploys roam devices),
-  `pai-mesh` LAN discovery, capability sharing (`pai-share`), backups.
+- Remaining: `pai-mesh` LAN discovery, capability sharing (`pai-share`),
+  backups, multi-device app placement.
 
 ## Known technical debt (tracked, not hidden)
 

@@ -122,7 +122,16 @@ auto_migrate = true
   `data/` preopen covers it; install provisions `data/data.db` and applies
   `schema.sql` when `migration.auto_migrate` is set
 - [x] A signed package is rejected if the signature is invalid
-- [ ] An app package can be moved to a second device and run without changes
+- [x] An app package can be moved to a second device and run without
+  changes — `pai sync` ships installed apps as sealed `app/<id>` objects
+  carrying the whole package + `signature.bin`; the receiver re-verifies
+  the signature against its own devices and `sync_peers.ed_pubkey`
+  (paired devices) before `AppRegistry::install_trusted` — unverifiable
+  packages are skipped, never installed. `apps remove` ships a tombstone
+  so deletion propagates. Live `data/` (runtime state) is reserved and
+  never travels; the recipient provisions it fresh and upgrades preserve
+  it. `schema.sql` is re-applied per provision, so its DDL must be
+  idempotent (`create table if not exists …`).
 
 ---
 

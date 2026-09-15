@@ -313,6 +313,11 @@ pub struct AppPackage {
 }
 
 impl AppPackage {
+    /// Directories that are runtime state, not package content — excluded
+    /// from the file list and content digest so signatures stay stable
+    /// across install/run cycles.
+    pub const RESERVED_DIRS: &'static [&'static str] = &["data"];
+
     /// Load + validate a package directory. Does NOT verify the signature.
     pub fn load(dir: &Path) -> AppResult<Self> {
         let manifest_path = dir.join("manifest.toml");
@@ -334,7 +339,12 @@ impl AppPackage {
 
         let mut files = Vec::new();
         collect_files(dir, dir, &mut files)?;
-        files.retain(|f| f != Path::new("signature.bin"));
+        files.retain(|f| {
+            f != Path::new("signature.bin")
+                && f.components().next().is_none_or(|c| {
+                    !Self::RESERVED_DIRS.contains(&c.as_os_str().to_str().unwrap_or_default())
+                })
+        });
         files.sort();
         let content_digest = digest_files(dir, &files)?;
 
@@ -407,6 +417,31 @@ impl AppPackage {
         )))
     }
 
+    /// Like `verify_any`, but candidates are raw `(DeviceId, ed25519
+    /// pubkey)` pairs — used by sync apply, where a package may have been
+    /// signed by a *peer* device (whose key lives in `sync_peers`, not
+    /// the local `devices` table).
+    pub fn verify_any_key(
+        &self,
+        ids: &pai_identity::IdentityStore,
+        candidates: &[(DeviceId, [u8; 32])],
+    ) -> AppResult<DeviceId> {
+        if !self.dir.join("signature.bin").is_file() {
+            return Err(AppError::NotSigned);
+        }
+        let sig = std::fs::read(self.dir.join("signature.bin"))?;
+        let payload = self.signing_payload();
+        for (id, key) in candidates {
+            if ids.verify_with_key(key, &payload, &sig)? {
+                return Ok(*id);
+            }
+        }
+        Err(AppError::BadSignature(format!(
+            "no candidate (of {}) produced this signature",
+            candidates.len()
+        )))
+    }
+
     /// Copy the package into `dest` (e.g. `data_dir/apps/<app-id>`).
     /// `dest` must not exist yet.
     pub fn install_to(&self, dest: &Path) -> AppResult<()> {
@@ -433,8 +468,9 @@ impl AppPackage {
     }
 }
 
-/// Reject absolute paths, `..`, and Windows drive prefixes.
-fn check_rel_path(p: &str) -> AppResult<()> {
+/// Reject absolute paths, `..`, and Windows drive prefixes. Public so
+/// sync apply can stage package files with the same safety rule.
+pub fn check_rel_path(p: &str) -> AppResult<()> {
     let path = Path::new(p);
     if path.is_absolute() {
         return Err(AppError::Layout(format!("absolute path {p:?}")));
@@ -507,6 +543,10 @@ fn provision_storage(app_dir: &Path, manifest: &AppManifest) -> AppResult<()> {
             let db = data.join("data.db");
             let conn = rusqlite::Connection::open(&db)
                 .map_err(|e| AppError::Storage(format!("open {db:?}: {e}")))?;
+            // schema.sql is re-applied on every install/upgrade — it is
+            // the app's migration runner, so its DDL must be idempotent
+            // (`create table if not exists …`). A preserved data.db keeps
+            // its rows; new statements add what v2 needs.
             if manifest.migration.auto_migrate {
                 if let Some(schema) = &manifest.storage.path {
                     let sql = std::fs::read_to_string(app_dir.join(schema))?;
@@ -546,6 +586,21 @@ impl AppRegistry {
         upgrade: bool,
     ) -> AppResult<PathBuf> {
         pkg.verify(ids, device)?;
+        self.place(pkg, upgrade)
+    }
+
+    /// Install a package whose signature was already verified by the
+    /// caller (e.g. sync apply via `verify_any_key`). Same layout +
+    /// provisioning as `install`, minus the signature check — the name
+    /// is deliberate: never call this on an unverified package.
+    pub fn install_trusted(&self, pkg: &AppPackage, upgrade: bool) -> AppResult<PathBuf> {
+        self.place(pkg, upgrade)
+    }
+
+    /// Write the package into the registry and provision storage. On
+    /// upgrade the live `data/` directory is preserved and merged back
+    /// over any package-shipped seeds.
+    fn place(&self, pkg: &AppPackage, upgrade: bool) -> AppResult<PathBuf> {
         let dest = self.root.join(pkg.manifest.app_id());
         if dest.exists() {
             if !upgrade {

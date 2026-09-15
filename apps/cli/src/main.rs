@@ -1396,6 +1396,27 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             let dest = pai_apps::AppRegistry::new(&cfg.data_dir)
                 .install(&pkg, &ids, signer_dev, *upgrade)
                 .map_err(|e| Error::Storage(e.to_string()))?;
+            // Registry row: `app/<id>` sync objects are built from this
+            // table — deployed packages roam to every paired device.
+            let now_s = pai_storage::ts(&now());
+            store.with_conn(|c| {
+                c.execute(
+                    "INSERT INTO apps(id, name, version, runtime, installed_at,
+                        updated_at, deleted) VALUES(?1,?2,?3,?4,?5,?6,0)
+                     ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+                        version=excluded.version, runtime=excluded.runtime,
+                        updated_at=excluded.updated_at, deleted=0",
+                    rusqlite::params![
+                        pkg.manifest.app_id(),
+                        pkg.manifest.app.name,
+                        pkg.manifest.app.version,
+                        format!("{:?}", pkg.manifest.app.runtime).to_lowercase(),
+                        now_s,
+                        now_s,
+                    ],
+                )?;
+                Ok(())
+            })?;
             let mut ev = pai_audit::event(AuditKind::AppDeployed, AuditOutcome::Ok);
             ev.device = Some(device.id);
             ev.detail = serde_json::json!({
@@ -1487,6 +1508,15 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     .remove(id)
                     .map_err(|e| Error::InvalidInput(e.to_string()))?
                 {
+                    // Tombstone the row — the next push ships `app/<id>`
+                    // as a deletion so peers remove it too.
+                    store.with_conn(|c| {
+                        c.execute(
+                            "UPDATE apps SET deleted=1, updated_at=?2 WHERE id=?1",
+                            rusqlite::params![id, pai_storage::ts(&now())],
+                        )?;
+                        Ok(())
+                    })?;
                     let mut ev = pai_audit::event(AuditKind::AppRemoved, AuditOutcome::Ok);
                     ev.device = Some(device.id);
                     ev.detail = serde_json::json!({"app_id": id});

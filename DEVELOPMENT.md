@@ -97,6 +97,15 @@ pai apps sign|verify|list|run|remove             # app package signing, registry
 pai deploy <dir> [--upgrade]                     # verify + install a signed app package
 ```
 
+`pai deploy` also upserts the `apps` registry row — the next `pai sync
+push` ships the package as a sealed `app/<id>` object and every paired
+device installs it (signature re-verified against `sync_peers` before
+`install_trusted`; tampered/foreign-signed packages are skipped, not
+installed). `pai apps remove` tombstones the row so deletion propagates.
+Live `data/` never syncs — recipients provision it fresh and upgrades
+preserve it. Coverage: `cargo test -p pai-integration-tests --test
+v4d_app_sync`.
+
 Model sources: `pai models install` accepts a catalog **slug** or an
 `hf://<owner>/<repo>/<file.gguf>[@revision]` reference — resolved against
 the Hugging Face hub (size + sha256 from `x-linked-*` headers, verified on

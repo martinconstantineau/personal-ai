@@ -10,6 +10,9 @@
 //!   fields included so only one device runs a due task
 //! - `wf/<id>`   — workflow definitions (runs stay device-local)
 //! - `memory/<id>` — memories with `sync_scope='synchronized'` (the default)
+//! - `app/<id>`  — installed app packages: manifest + files + signature,
+//!   verified against a known device/peer key on apply (live `data/`
+//!   state does not sync — only the package)
 //!
 //! Objects are sealed under the vault key with the object key as AAD;
 //! soft-deleted rows ship as empty-payload tombstones.
@@ -25,7 +28,7 @@ use crate::crypto;
 use crate::SyncTransport;
 use base64::Engine as _;
 use pai_core::*;
-use pai_storage::{parse_ts, ts, Store};
+use pai_storage::{parse_ts, store_err, ts, Store};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -38,6 +41,7 @@ const WF_PREFIX: &str = "wf/";
 const NTF_PREFIX: &str = "ntf/";
 const MEMORY_PREFIX: &str = "memory/";
 const CKG_PREFIX: &str = "ckg/";
+const APP_PREFIX: &str = "app/";
 
 /// Apply order on pull: conversations before their messages (FK), then
 /// documents, then tasks and memories (which may reference conversations).
@@ -51,6 +55,7 @@ fn kind_rank(key: &str) -> Option<u8> {
         Some("wf") => Some(5),
         Some("memory") => Some(6),
         Some("ntf") => Some(7),
+        Some("app") => Some(8),
         _ => None,
     }
 }
@@ -174,6 +179,29 @@ struct NotificationPayload {
     created_at: String,
     read_at: Option<String>,
     updated_at: String,
+}
+
+/// One file inside a synced app package.
+#[derive(Debug, Serialize, Deserialize)]
+struct AppFileEntry {
+    path: String,
+    b64: String,
+}
+
+/// Versioned plaintext of one synced app package — the whole installable
+/// payload: manifest + all package files + the Ed25519 signature. The
+/// receiver re-verifies against a known device or peer key before
+/// installing; `data/` (live app state) never travels.
+#[derive(Debug, Serialize, Deserialize)]
+struct AppPayload {
+    v: u8,
+    id: String,
+    name: String,
+    version: String,
+    runtime: String,
+    updated_at: String,
+    signature_b64: String,
+    files: Vec<AppFileEntry>,
 }
 
 pub struct SyncOutcome {
@@ -327,6 +355,7 @@ impl<T: SyncTransport> SyncEngine<T> {
         self.push_tasks(&mut out).await?;
         self.push_workflows(&mut out).await?;
         self.push_notifications(&mut out).await?;
+        self.push_apps(&mut out).await?;
         Ok(out)
     }
 
@@ -691,6 +720,102 @@ impl<T: SyncTransport> SyncEngine<T> {
         Ok(())
     }
 
+    /// Installed app packages — the `apps` row is the bookkeeping; the
+    /// bytes are read from `<data_dir>/apps/<id>/` at push time. `data/`
+    /// (live app state) and the registry's `.bak` backups never travel;
+    /// deleted rows ship as tombstones so removal propagates.
+    async fn push_apps(&self, out: &mut SyncOutcome) -> Result<()> {
+        let rows = self.store.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, name, version, runtime, updated_at, deleted
+                 FROM apps",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        for (id, name, version, runtime, updated, deleted) in rows {
+            let updated_at = parse_ts(&updated);
+            let key = format!("{APP_PREFIX}{id}");
+            let tombstone = deleted != 0;
+            let raw = if tombstone {
+                Vec::new()
+            } else {
+                let dir = self.data_dir.join("apps").join(&id);
+                if !dir.is_dir() {
+                    tracing::warn!(app = %id, "apps row without package dir — skipped");
+                    out.skipped += 1;
+                    continue;
+                }
+                let payload = self.app_payload(&dir, &id, &name, &version, &runtime, &updated)?;
+                serde_json::to_vec(&payload).map_err(|e| Error::Sync(e.to_string()))?
+            };
+            self.push_sealed(key, &raw, version_of(&updated), updated_at, tombstone, out)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Read an installed app dir into a sync payload: every package file
+    /// base64'd except `signature.bin` (carried separately) and the
+    /// reserved `data/` dir (runtime state, never package content).
+    fn app_payload(
+        &self,
+        dir: &std::path::Path,
+        id: &str,
+        name: &str,
+        version: &str,
+        runtime: &str,
+        updated: &str,
+    ) -> Result<AppPayload> {
+        let mut files = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).map_err(store_err)? {
+                let p = e.map_err(store_err)?.path();
+                let rel = p.strip_prefix(dir).map_err(store_err)?.to_path_buf();
+                if p.is_dir() {
+                    if rel.components().count() == 1
+                        && pai_apps::AppPackage::RESERVED_DIRS
+                            .contains(&rel.to_str().unwrap_or_default())
+                    {
+                        continue; // live app state stays device-local
+                    }
+                    stack.push(p);
+                } else if rel == std::path::Path::new("signature.bin") {
+                    continue; // carried as signature_b64 below
+                } else if p.is_file() {
+                    files.push(AppFileEntry {
+                        path: rel.to_string_lossy().replace('\\', "/"),
+                        b64: base64::engine::general_purpose::STANDARD
+                            .encode(std::fs::read(&p).map_err(store_err)?),
+                    });
+                }
+            }
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        let signature_b64 = base64::engine::general_purpose::STANDARD
+            .encode(std::fs::read(dir.join("signature.bin")).unwrap_or_default());
+        Ok(AppPayload {
+            v: 1,
+            id: id.into(),
+            name: name.into(),
+            version: version.into(),
+            runtime: runtime.into(),
+            updated_at: updated.into(),
+            signature_b64,
+            files,
+        })
+    }
+
     /// Pull remote objects newer than our mirror and apply them, in
     /// `kind_rank` order (conversations land before their messages — the
     /// FK chain requires it).
@@ -903,6 +1028,14 @@ impl<T: SyncTransport> SyncEngine<T> {
                 .map_err(|e| Error::Sync(format!("bad notification payload: {e}")))?;
             return self.apply_notification(&p);
         }
+        if let Some(id) = key.strip_prefix(APP_PREFIX) {
+            if obj.tombstone {
+                return self.apply_app_tombstone(id, obj.updated_at);
+            }
+            let p: AppPayload = serde_json::from_slice(raw)
+                .map_err(|e| Error::Sync(format!("bad app payload: {e}")))?;
+            return self.apply_app(&p);
+        }
         if key.starts_with(MSG_PREFIX) {
             if obj.tombstone {
                 return Ok(()); // messages carry no tombstones
@@ -911,6 +1044,118 @@ impl<T: SyncTransport> SyncEngine<T> {
                 .map_err(|e| Error::Sync(format!("bad message payload: {e}")))?;
             return self.apply_message(&p);
         }
+        Ok(())
+    }
+
+    /// Apply a synced app package: stage files, verify the signature
+    /// against every known signer (own devices + paired peers), install
+    /// via `install_trusted`, and upsert the `apps` bookkeeping row.
+    /// Unverifiable packages are skipped — never installed, never run.
+    fn apply_app(&self, p: &AppPayload) -> Result<()> {
+        if p.v != 1 {
+            return Err(Error::Sync(format!("unsupported app payload v{}", p.v)));
+        }
+        let stage = self
+            .data_dir
+            .join("apps")
+            .join(format!(".staging-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&stage).map_err(store_err)?;
+        let staged = (|| -> Result<()> {
+            std::fs::write(
+                stage.join("signature.bin"),
+                base64::engine::general_purpose::STANDARD
+                    .decode(&p.signature_b64)
+                    .map_err(|e| Error::Sync(format!("bad app signature b64: {e}")))?,
+            )
+            .map_err(store_err)?;
+            for f in &p.files {
+                pai_apps::check_rel_path(&f.path)
+                    .map_err(|e| Error::Sync(format!("app file path: {e}")))?;
+                let to = stage.join(&f.path);
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent).map_err(store_err)?;
+                }
+                std::fs::write(
+                    &to,
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&f.b64)
+                        .map_err(|e| Error::Sync(format!("bad app file b64: {e}")))?,
+                )
+                .map_err(store_err)?;
+            }
+            Ok(())
+        })();
+        let result = staged.and_then(|_| -> Result<bool> {
+            let pkg = pai_apps::AppPackage::load(&stage)
+                .map_err(|e| Error::Sync(format!("bad synced package: {e}")))?;
+            if pkg.manifest.app_id() != p.id {
+                return Err(Error::Sync(format!(
+                    "app id mismatch: key says {}, manifest says {}",
+                    p.id,
+                    pkg.manifest.app_id()
+                )));
+            }
+            // Signer candidates: every local device key + every paired
+            // peer's ed_pubkey.
+            let ids = pai_identity::IdentityStore::new(self.store.clone());
+            let mut cands: Vec<(DeviceId, [u8; 32])> = self.store.with_conn(|c| {
+                let mut v = Vec::new();
+                let mut s = c.prepare("SELECT id, public_key FROM devices")?;
+                for r in s.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })? {
+                    let (id, key) = r?;
+                    if let Ok(k) = <[u8; 32]>::try_from(key.as_slice()) {
+                        let u = uuid::Uuid::parse_str(&id).unwrap_or_else(|_| uuid::Uuid::nil());
+                        v.push((DeviceId(u), k));
+                    }
+                }
+                Ok(v)
+            })?;
+            for peer in crate::pair::list_peers(&self.store)? {
+                cands.push((peer.device_id, peer.ed_pubkey));
+            }
+            // An unverifiable signature is permanent — warn + skip the
+            // object (pull continues; it never installs, never retries)
+            // rather than poisoning the whole pull batch.
+            let signer = match pkg.verify_any_key(&ids, &cands) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(app = %p.id, "rejected synced app: {e}");
+                    return Ok(false);
+                }
+            };
+            pai_apps::AppRegistry::new(&self.data_dir)
+                .install_trusted(&pkg, true)
+                .map_err(|e| Error::Sync(format!("app install: {e}")))?;
+            self.store.with_conn(|c| {
+                c.execute(
+                    "INSERT INTO apps(id, name, version, runtime, installed_at,
+                        updated_at, deleted) VALUES(?1,?2,?3,?4,?5,?6,0)
+                     ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+                        version=excluded.version, runtime=excluded.runtime,
+                        updated_at=excluded.updated_at, deleted=0",
+                    params![p.id, p.name, p.version, p.runtime, ts(&now()), p.updated_at],
+                )?;
+                Ok(())
+            })?;
+            tracing::info!(app = %p.id, signer = %signer, "installed synced app");
+            Ok(true)
+        });
+        let _ = std::fs::remove_dir_all(&stage);
+        result.map(|_| ())
+    }
+
+    /// App tombstone: mark the row deleted and remove the package dir.
+    fn apply_app_tombstone(&self, id: &str, updated_at: Timestamp) -> Result<()> {
+        self.store.with_conn(|c| {
+            c.execute(
+                "UPDATE apps SET deleted=1, updated_at=?2 WHERE id=?1",
+                params![id, ts(&updated_at)],
+            )?;
+            Ok(())
+        })?;
+        let _ = pai_apps::AppRegistry::new(&self.data_dir).remove(id);
         Ok(())
     }
 

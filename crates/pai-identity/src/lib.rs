@@ -174,7 +174,14 @@ impl IdentityStore {
             .as_slice()
             .try_into()
             .map_err(|_| Error::InvalidInput("bad public key length".into()))?;
-        let key = VerifyingKey::from_bytes(&key_bytes)
+        self.verify_with_key(&key_bytes, msg, sig)
+    }
+
+    /// Verify a signature against a raw Ed25519 public key — for signers
+    /// known only by key (e.g. `sync_peers.ed_pubkey` when applying a
+    /// synced app package from a paired device).
+    pub fn verify_with_key(&self, key_bytes: &[u8; 32], msg: &[u8], sig: &[u8]) -> Result<bool> {
+        let key = VerifyingKey::from_bytes(key_bytes)
             .map_err(|_| Error::InvalidInput("bad public key".into()))?;
         let sig =
             Signature::from_slice(sig).map_err(|_| Error::InvalidInput("bad signature".into()))?;
