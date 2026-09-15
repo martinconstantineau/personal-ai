@@ -484,11 +484,28 @@ guest read/write handles are all shipped and pushed.
   audit outcome. `run_logged` in pai-apps is the single funnel, so all
   callers (CLI arm, `app_run_op`, guest ops) record identically;
   trapped runs log the error text before propagating.
+- [x] **V5h — app CRDT documents**: `data/crdt/<doc>.json` under an
+  installed app is a shared-mutable JSON document. Each writing device
+  publishes its field-set as `acrdt/<app>/<doc>/<writer>` sealed
+  objects; peers merge **field-wise** (LWW-map: max `t_ms`, writer-asc
+  tiebreak) instead of whole-file LWW, so concurrent edits to different
+  fields survive on every device. Plain-JSON apps get collaboration for
+  free; `{"v":…,"t":…}` / `{"d":true,"t":…}` cells give per-field
+  timestamps + deletes. `app_crdt_cells`/`app_crdt_view` (migration
+  V13) hold merge state + provenance so unchanged docs don't re-push
+  (FAT32-coarse mtimes can't fake edits) and merged fields re-ship at
+  their observed ts — writers can't dominate by echoing fresh mtimes.
+  Anti-forgery mirrors backups: key/object/payload writer triple must
+  agree and the writer must be paired. Cells that arrive before the
+  package materialize on install (`apply_app` hook); crdt/ docs are
+  multi-master by design and exempt from `active_device` parking —
+  placement governs where an app *runs*, shared docs converge
+  everywhere. Deleting the file withdraws that writer's field-set;
+  fields other copies still hold survive (observed-delete semantics).
 
 - Beyond V4 (PRD-level, future tracks): stable app URLs
-  (`app.user.devices`), App Operator OAuth config
-  (§6.8 — "add Google login"), and an app's own
-  CRDT-collaborative data layer.
+  (`app.user.devices`) and App Operator OAuth config
+  (§6.8 — "add Google login").
 
 ## Known technical debt (tracked, not hidden)
 

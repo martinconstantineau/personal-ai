@@ -45,6 +45,7 @@ const MEMORY_PREFIX: &str = "memory/";
 const CKG_PREFIX: &str = "ckg/";
 const APP_PREFIX: &str = "app/";
 const BKP_PREFIX: &str = "bkp/";
+const ACRDT_PREFIX: &str = "acrdt/";
 
 /// Apply order on pull: conversations before their messages (FK), then
 /// documents, then tasks and memories (which may reference conversations).
@@ -60,6 +61,7 @@ fn kind_rank(key: &str) -> Option<u8> {
         Some("ntf") => Some(7),
         Some("app") => Some(8),
         Some("bkp") => Some(9),
+        Some("acrdt") => Some(10), // after app/ — the package must land first
         _ => None,
     }
 }
@@ -373,6 +375,7 @@ impl<T: SyncTransport> SyncEngine<T> {
         self.push_notifications(&mut out).await?;
         self.push_apps(&mut out).await?;
         self.push_backups(&mut out).await?;
+        self.push_app_crdts(&mut out).await?;
         Ok(out)
     }
 
@@ -842,6 +845,19 @@ impl<T: SyncTransport> SyncEngine<T> {
         Ok(())
     }
 
+    /// App CRDT docs — `acrdt/<app>/<doc>/<writer>`. `collect` already
+    /// skipped unchanged docs and mirrored our cells; here we only need
+    /// to seal + ship with a version that strictly beats the mirror so
+    /// coarse-mticked edits (FAT32 2s granularity) can't collide.
+    async fn push_app_crdts(&self, out: &mut SyncOutcome) -> Result<()> {
+        for (key, raw, hint_ms) in crate::crdt::collect(&self.store, &self.data_dir, self.device)? {
+            let version = (hint_ms as u64).max(self.mirror_version(&key)? + 1);
+            self.push_sealed(key, &raw, version, now(), false, out)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Pull remote objects newer than our mirror and apply them, in
     /// `kind_rank` order (conversations land before their messages — the
     /// FK chain requires it).
@@ -1083,6 +1099,16 @@ impl<T: SyncTransport> SyncEngine<T> {
                 &p,
             );
         }
+        if let Some(rest) = key.strip_prefix(ACRDT_PREFIX) {
+            // acrdt/<app>/<doc>/<writer> — exactly three segments.
+            let segs: Vec<&str> = rest.split('/').collect();
+            if segs.len() != 3 {
+                tracing::warn!(key = %obj.key, "malformed crdt key — skipped");
+                return Ok(());
+            }
+            let (app_id, doc, writer) = (segs[0], segs[1], segs[2]);
+            return crate::crdt::apply(&self.store, &self.data_dir, app_id, doc, writer, obj, raw);
+        }
         if key.starts_with(MSG_PREFIX) {
             if obj.tombstone {
                 return Ok(()); // messages carry no tombstones
@@ -1138,6 +1164,11 @@ impl<T: SyncTransport> SyncEngine<T> {
                             Err(e) => tracing::warn!(app = %p.id, "deactivate data: {e}"),
                         }
                     }
+                }
+                // CRDT docs that arrived before the package land now —
+                // cells sat in app_crdt_cells waiting for the install.
+                if let Err(e) = crate::crdt::materialize_all(&self.store, &self.data_dir, &p.id) {
+                    tracing::warn!(app = %p.id, "crdt materialize on install: {e}");
                 }
                 tracing::info!(app = %p.id, signer = %signer, "installed synced app");
             }

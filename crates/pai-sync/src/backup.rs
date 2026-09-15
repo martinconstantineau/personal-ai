@@ -497,7 +497,7 @@ pub fn active_elsewhere(
     Ok(active.filter(|a| *a != device.to_string()))
 }
 
-fn is_paired(store: &Arc<Store>, writer: &str) -> Result<bool> {
+pub(crate) fn is_paired(store: &Arc<Store>, writer: &str) -> Result<bool> {
     Ok(pair::list_peers(store)?
         .iter()
         .any(|p| p.device_id.to_string() == writer))

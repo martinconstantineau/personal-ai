@@ -40,7 +40,8 @@ fn schema_v3_columns_exist() {
         .with_conn(|c| {
             // devices.key_storage + document_sections.embedding added by v3;
             // sync_peers by v4; conversation/document sync metadata by v5;
-            // task claim/lease + payload columns by v6.
+            // task claim/lease + payload columns by v6; app placement by
+            // v12; app_crdt_cells/app_crdt_view by v13.
             c.execute_batch("SELECT key_storage FROM devices LIMIT 0")?;
             c.execute_batch("SELECT embedding FROM document_sections LIMIT 0")?;
             c.execute_batch("SELECT agree_pubkey FROM sync_peers LIMIT 0")?;
@@ -68,7 +69,7 @@ fn schema_v3_columns_exist() {
                 |r| r.get::<_, String>(0),
             )
         })
-        .map(|v| assert_eq!(v, "12"))
+        .map(|v| assert_eq!(v, "13"))
         .unwrap();
 }
 

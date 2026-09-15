@@ -348,6 +348,33 @@ CREATE TABLE app_backups (
 -- package but holds no live state.
 ALTER TABLE apps ADD COLUMN active_device TEXT;
 "#,
+    r#"
+-- V13: app CRDT documents — `data/crdt/<doc>.json` syncs as
+-- `acrdt/<app>/<doc>/<writer>` objects. `app_crdt_cells` holds every
+-- writer's per-field cells (value + ms timestamp + tombstone);
+-- `app_crdt_view` holds the last materialized winners (the on-disk
+-- state), which lets a push keep a field's proven timestamp when the
+-- app's rewrite didn't change its value. Both are local merge state —
+-- never serialized into objects.
+CREATE TABLE app_crdt_cells (
+    app_id TEXT NOT NULL,
+    doc TEXT NOT NULL,
+    writer TEXT NOT NULL,
+    field TEXT NOT NULL,
+    value_json TEXT,
+    t_ms INTEGER NOT NULL,
+    tombstone INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (app_id, doc, writer, field)
+);
+CREATE TABLE app_crdt_view (
+    app_id TEXT NOT NULL,
+    doc TEXT NOT NULL,
+    field TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    t_ms INTEGER NOT NULL,
+    PRIMARY KEY (app_id, doc, field)
+);
+"#,
 ];
 
 /// A 32-byte SQLCipher raw key, sourced from the OS keystore (or a 0600

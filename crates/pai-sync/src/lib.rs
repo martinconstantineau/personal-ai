@@ -8,13 +8,16 @@
 //!
 //! Implemented now: folder transport (push/pull/list, last-writer-wins),
 //! X25519 pairing + XChaCha20-Poly1305 sealed objects (`crypto`, `pair`),
-//! a memory-sync engine (`engine`), and an HTTP relay transport
-//! (`relay`) — ciphertext-only objects over the network, no shared
-//! folder needed. Documented-not-built: CRDT merge for richer types,
-//! NAT traversal, vault rotation / unpairing.
+//! a sync engine (`engine`) spanning conversations/docs/apps/backups,
+//! app CRDT documents (`crdt`) — field-wise LWW-map merge over sealed
+//! `acrdt/` objects — and an HTTP relay transport (`relay`) —
+//! ciphertext-only objects over the network, no shared folder needed.
+//! Documented-not-built: CRDT merge for the other row kinds, NAT
+//! traversal, vault rotation / unpairing.
 
 pub mod backup;
 pub mod circle;
+pub mod crdt;
 pub mod crypto;
 pub mod engine;
 pub mod pair;
