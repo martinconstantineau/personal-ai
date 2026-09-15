@@ -416,6 +416,10 @@ async fn find_peer_scores_device_load() {
             cpu_cores: 4,
         }));
     srv_b4.announce().await.unwrap();
-    let want = if b.device.id.0 < c.device.id.0 { b.device.id } else { c.device.id };
+    let want = if b.device.id.0 < c.device.id.0 {
+        b.device.id
+    } else {
+        c.device.id
+    };
     assert_eq!(client.find_peer("echo").await.unwrap(), Some(want));
 }
