@@ -280,6 +280,16 @@ the default when no `oauth` block exists.
   zero-config `pai sync run --lan`; relay auth is the pairing-derived
   `hex(peer_key)` bearer — only paired devices can authenticate.
 - `pai_apps_list` FFI + Dart `appsList` for the dashboard.
+
+**V4g done (2026-09-15):** portable model packs — `pai models install
+<slug> --to <dir>` writes weights plus a self-describing `index.json`
+(manifest + sha256 per file) into any directory. `pack_roots()` probes
+`pai-models/` under every mounted volume; `pai models scan` (and
+`locate` lazily inside `serve`/`runnable`) verifies the sha and
+registers+repoints entries — plug a drive into a fresh device and its
+models are usable on sight. `list` marks unplugged packs `offline`.
+ADR 0017.
+
 - Remaining: capability sharing (`pai-share`), backups, multi-device
   app placement/migration, mobile runtime.
 

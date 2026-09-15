@@ -199,7 +199,18 @@ enum ModelsCmd {
     List,
     /// Download + verify + install a model — a catalog slug or an
     /// `hf://owner/repo/file.gguf` reference.
-    Install { model: String },
+    Install {
+        model: String,
+        /// Install into this directory instead of the local store —
+        /// e.g. a flash drive (`E:\pai-models`). The pack is
+        /// self-describing: plug it into any pai device and it is
+        /// adopted on scan.
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Re-scan mounted drives for `pai-models/` packs and adopt any
+    /// models found — run after plugging in a model drive.
+    Scan,
     /// Remove an installed model.
     Uninstall { slug: String },
     /// Models that fit this device's hardware.
@@ -1089,7 +1100,15 @@ async fn run_models(cmd: &ModelsCmd, cfg: &pai_config::Config) -> Result<()> {
                     m.license.clone().unwrap_or_else(|| "?".into()),
                     fits,
                     if installed {
-                        format!("installed → {}", path.unwrap_or_default().display())
+                        match path {
+                            Some(p) if p.exists() => {
+                                format!("installed → {}", p.display())
+                            }
+                            Some(p) => {
+                                format!("installed (offline — last at {})", p.display())
+                            }
+                            None => "installed".into(),
+                        }
                     } else {
                         String::new()
                     }
@@ -1097,12 +1116,31 @@ async fn run_models(cmd: &ModelsCmd, cfg: &pai_config::Config) -> Result<()> {
             }
             println!("\ninstall: pai models install <slug|hf://owner/repo/file.gguf>");
         }
-        ModelsCmd::Install { model } => {
+        ModelsCmd::Install { model, to } => {
             let manifest = pai_models::resolve_model_arg(model).await?;
             mgr.register(&manifest)?;
-            let p = mgr.install(&manifest.model.slug, &manifest).await?;
+            let p = match to {
+                Some(d) => {
+                    let dir = pai_models::pack_dir_for(std::path::Path::new(d));
+                    mgr.install_to(&manifest.model.slug, &manifest, &dir)
+                        .await?
+                }
+                None => mgr.install(&manifest.model.slug, &manifest).await?,
+            };
             println!("installed: {}", p.display());
+            if to.is_some() {
+                println!("pack:      plug into any pai device — adopted on `pai models scan`");
+            }
             println!("serve:    pai models serve {}", manifest.model.slug);
+        }
+        ModelsCmd::Scan => {
+            let found = mgr.scan()?;
+            if found.is_empty() {
+                println!("no model packs found (looked for pai-models/ on mounted drives)");
+            }
+            for s in found {
+                println!("  adopted {:<44} {}", s.slug, s.path.display());
+            }
         }
         ModelsCmd::Uninstall { slug } => {
             mgr.uninstall(slug)?;
@@ -1172,7 +1210,7 @@ async fn run_models(cmd: &ModelsCmd, cfg: &pai_config::Config) -> Result<()> {
         }
         ModelsCmd::Serve { slug, port } => {
             let path = mgr
-                .installed_path(slug)?
+                .locate(slug)?
                 .ok_or_else(|| Error::NotFound(format!("{slug} not installed")))?;
             let bin = pai_inference::find_in_path("llama-server").ok_or_else(|| {
                 Error::NotFound(

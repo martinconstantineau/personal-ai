@@ -113,7 +113,13 @@ MyGarageApp/
 - Backups are versioned and can be restored to a new device.
 - A "rescue mode" allows restoring the entire Personal Cloud from a single device.
 
-### 6.7 App Operator
+### 6.7 Model packs
+
+- Model weights can live on removable storage instead of the system drive: `pai models install <slug> --to E:\pai-models`.
+- A pack directory is self-describing (`index.json` records each file's manifest + sha256), so **any** pai device adopts it on plug-in — no re-download, no re-registration (`pai models scan`, or lazily on first use via `locate`).
+- An unplugged drive degrades gracefully: `models list` shows `installed (offline)`, and the model drops out of `runnable` until the drive returns — under any letter or mount point.
+
+### 6.8 App Operator
 
 - An AI agent (`pai-agent`) can inspect an app package and configure infrastructure:
   - "Add Google login" → configures OAuth.
