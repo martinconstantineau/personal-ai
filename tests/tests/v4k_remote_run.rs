@@ -122,7 +122,9 @@ impl OpHandler for AppRunHandler {
         }
         let a: A =
             serde_json::from_slice(payload).map_err(|e| Error::InvalidInput(e.to_string()))?;
-        pai_apps::app_run_op(&self.dir, &a.id, &a.args).map_err(|e| Error::Other(e.to_string()))
+        pai_apps::app_run_op(&self.dir, &a.id, &a.args)
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
     }
 }
 

@@ -1240,7 +1240,9 @@ pub unsafe extern "C" fn pai_apps_run(
         Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
     };
     let dir = pai_apps::installed_dir(std::path::Path::new(&rt.data_dir), &id);
-    match pkg.run(&dir, &args, pai_apps::RunLimits::default()) {
+    // FFI runs get no injected envs — there's no async context here to
+    // resolve oauth tokens (device-flow is a CLI/agent path anyway).
+    match pkg.run(&dir, &args, pai_apps::RunLimits::default(), &[]) {
         Ok(out) => to_c(serde_json::json!({
             "stdout": String::from_utf8_lossy(&out.stdout),
             "stderr": String::from_utf8_lossy(&out.stderr),

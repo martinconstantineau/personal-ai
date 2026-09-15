@@ -99,9 +99,8 @@ fn guest_broker<'a>(
     BrokerServer::new(t, &VAULT, host.device.id, &HANDLER).with_guest_handler(
         guests,
         Box::new(move |op, app_id, args| match op {
-            "app-run" => {
-                pai_apps::app_run_op(&data, app_id, args).map_err(|e| Error::Other(e.to_string()))
-            }
+            "app-run" => pai_apps::app_run_op_guest(&data, app_id, args)
+                .map_err(|e| Error::Other(e.to_string())),
             "app-read" => {
                 pai_apps::app_read_op(&data, app_id, args).map_err(|e| Error::Other(e.to_string()))
             }

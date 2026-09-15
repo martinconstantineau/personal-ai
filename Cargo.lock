@@ -1742,6 +1742,7 @@ dependencies = [
  "pai-mesh",
  "pai-models",
  "pai-notify",
+ "pai-oauth",
  "pai-permissions",
  "pai-share",
  "pai-storage",
@@ -1777,6 +1778,7 @@ dependencies = [
  "pai-inference",
  "pai-memory",
  "pai-notify",
+ "pai-oauth",
  "pai-permissions",
  "pai-share",
  "pai-storage",
@@ -1798,6 +1800,7 @@ dependencies = [
  "base64",
  "pai-core",
  "pai-identity",
+ "pai-oauth",
  "pai-storage",
  "rand_core 0.6.4",
  "rusqlite",
@@ -1869,6 +1872,7 @@ dependencies = [
  "mail-parser",
  "pai-core",
  "pai-identity",
+ "pai-oauth",
  "pai-permissions",
  "reqwest",
  "rustls",
@@ -2003,6 +2007,7 @@ dependencies = [
  "pai-memory",
  "pai-mesh",
  "pai-notify",
+ "pai-oauth",
  "pai-permissions",
  "pai-share",
  "pai-storage",
@@ -2106,6 +2111,16 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "uuid",
+]
+
+[[package]]
+name = "pai-oauth"
+version = "0.1.0"
+dependencies = [
+ "pai-core",
+ "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

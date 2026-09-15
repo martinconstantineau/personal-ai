@@ -90,6 +90,7 @@ pub struct ToolContext<'a> {
 /// wires a concrete implementation (CLI: `pai-share` + `pai-sync`
 /// over the local store). Keeping this a trait avoids pai-tools
 /// depending on the share/sync crates.
+#[async_trait]
 pub trait AppOperator: Send + Sync {
     /// Mint a capability token for `app_id` — the `apps share` flow.
     /// `actions` are `exec|read|write|share`; `for_device` is a paired
@@ -114,6 +115,22 @@ pub trait AppOperator: Send + Sync {
     /// Recent run logs for `app_id` (newest first, capped by `limit`)
     /// — exit codes, traps, and captured stdout/stderr.
     fn logs(&self, app_id: &str, limit: usize) -> Result<serde_json::Value>;
+
+    /// OAuth for an app (PRD §6.8 — "add Google login"). Two phases:
+    /// `device_code: None` records the provider config and starts the
+    /// device-authorization flow (returns the user code + verification
+    /// URI + `device_code` for the next call); `Some(code)` polls the
+    /// token endpoint once — `authorized` stores the refresh token in
+    /// the OS keystore. Config is public metadata and syncs; tokens
+    /// stay keystore-local per device.
+    async fn configure_auth(
+        &self,
+        app_id: &str,
+        provider: &str,
+        client_id: &str,
+        scopes: Vec<String>,
+        device_code: Option<&str>,
+    ) -> Result<serde_json::Value>;
 }
 
 impl<'a> ToolContext<'a> {
@@ -1217,6 +1234,88 @@ impl Tool for AppsLogsTool {
     }
 }
 
+/// `apps.configure` — PRD §6.8 "add Google login to the invoice app".
+/// Two phases over the RFC 8628 device flow: no `device_code` records
+/// the provider config and starts the flow (returns user_code +
+/// verification_uri); a call with `device_code` polls once and, when
+/// granted, stores the refresh token in the OS keystore. The app then
+/// receives `PAI_OAUTH_<PROVIDER>` access tokens at run time.
+pub struct AppsConfigureTool;
+
+#[async_trait]
+impl Tool for AppsConfigureTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "apps.configure".into(),
+            description: "Configure OAuth for an installed app (e.g. 'add \
+                          Google login'). Phase 1: pass app_id, provider \
+                          (google|microsoft|custom), client_id and optional \
+                          scopes — returns a user_code + verification_uri \
+                          for the user to approve. Phase 2: pass app_id, provider and \
+                          the returned device_code — when the user has \
+                          approved, the refresh token is stored and the app \
+                          gets PAI_OAUTH_<PROVIDER> injected at run time."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "string"},
+                    "provider": {"type": "string"},
+                    "client_id": {"type": "string"},
+                    "scopes": {"type": "array", "items": {"type": "string"}},
+                    "device_code": {"type": "string"}
+                },
+                "required": ["app_id"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::AppConfigure],
+            risk: RiskLevel::High,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let ops = ctx
+            .apps
+            .ok_or_else(|| Error::InvalidInput("no app operator surface wired".into()))?;
+        let app_id = str_arg(&args, "app_id")?;
+        let device_code = args["device_code"].as_str();
+        let provider = str_arg(&args, "provider")?;
+        if device_code.is_none() {
+            // Phase 1 needs the client registration details.
+            let client_id = str_arg(&args, "client_id")?;
+            let scopes = args["scopes"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let v = ops
+                .configure_auth(app_id, provider, client_id, scopes, None)
+                .await?;
+            return Ok(ToolOutput {
+                summary: format!("apps.configure {app_id} → awaiting user approval"),
+                value: v,
+            });
+        }
+        let v = ops
+            .configure_auth(app_id, provider, "", vec![], device_code)
+            .await?;
+        let state = v["state"].as_str().unwrap_or("pending");
+        Ok(ToolOutput {
+            summary: format!("apps.configure {app_id} → {state}"),
+            value: v,
+        })
+    }
+}
+
 fn pai_storage_err(e: impl std::fmt::Display) -> Error {
     Error::Storage(e.to_string())
 }
@@ -1243,6 +1342,7 @@ pub fn builtin_registry() -> ToolRegistry {
     r.register(Arc::new(AppsBackupTool));
     r.register(Arc::new(AppsStatusTool));
     r.register(Arc::new(AppsLogsTool));
+    r.register(Arc::new(AppsConfigureTool));
     r
 }
 

@@ -1,0 +1,12 @@
+[package]
+name = "pai-oauth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OAuth2 device-authorization flow (RFC 8628) — provider presets, token poll, refresh grant."
+
+[dependencies]
+pai-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true

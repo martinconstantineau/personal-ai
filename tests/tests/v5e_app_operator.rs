@@ -148,6 +148,7 @@ impl StubOps {
     }
 }
 
+#[async_trait::async_trait]
 impl AppOperator for StubOps {
     fn share_grant(
         &self,
@@ -192,6 +193,21 @@ impl AppOperator for StubOps {
         Ok(serde_json::json!({
             "app_id": app_id,
             "entries": [{"exit_code": 0}, {"trap": "oom"}],
+        }))
+    }
+
+    async fn configure_auth(
+        &self,
+        app_id: &str,
+        provider: &str,
+        _client_id: &str,
+        _scopes: Vec<String>,
+        device_code: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "app_id": app_id,
+            "provider": provider,
+            "state": if device_code.is_some() { "authorized" } else { "pending" },
         }))
     }
 }
@@ -470,7 +486,9 @@ async fn store_operator_sees_run_logs() {
 
     // The deployed manifest's app.wasm is a bare header — it has no
     // _start/main/run, so the run traps and the log records the trap.
-    let e = pai_apps::app_run_op(&a.dir, &app_id, &[]).unwrap_err();
+    let e = pai_apps::app_run_op(&a.dir, &app_id, &[])
+        .await
+        .unwrap_err();
     assert!(e.to_string().contains("no _start"));
 
     let v = ops.logs(&app_id, 5).unwrap();
@@ -485,4 +503,26 @@ async fn store_operator_sees_run_logs() {
         .as_str()
         .unwrap()
         .contains("no _start"));
+}
+
+#[tokio::test]
+async fn configure_tool_passes_provider_in_poll_phase() {
+    let ops = StubOps::new();
+    let t = pai_tools::AppsConfigureTool;
+    let c = ctx(Some(&ops));
+    // Phase 2 — the operator needs `provider` to locate the stored
+    // config; a blank provider would fail the auth.providers lookup.
+    let out = t
+        .execute(
+            serde_json::json!({
+                "app_id": "app-1",
+                "provider": "google",
+                "device_code": "DC-9",
+            }),
+            &c,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.value["provider"], "google");
+    assert_eq!(out.value["state"], "authorized");
 }

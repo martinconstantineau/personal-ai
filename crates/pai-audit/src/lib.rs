@@ -146,6 +146,7 @@ pub fn kind_name(k: AuditKind) -> &'static str {
         AuditKind::AppRescued => "app_rescued",
         AuditKind::AppShared => "app_shared",
         AuditKind::AppShareRevoked => "app_share_revoked",
+        AuditKind::AppAuthConfigured => "app_auth_configured",
     }
 }
 

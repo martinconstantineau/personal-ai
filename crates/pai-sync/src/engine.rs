@@ -213,6 +213,13 @@ pub struct AppPayload {
     /// `pai apps migrate`; absent in pre-V4j objects.
     #[serde(default)]
     pub active_device: Option<String>,
+    /// Public OAuth provider config (client ids, endpoints, scopes —
+    /// never tokens). Rides the app object so "add Google login"
+    /// propagates; each device still authorizes locally for its own
+    /// refresh token. `None` = the app has no auth config (or the
+    /// object predates V5i — don't clobber the receiver's file).
+    #[serde(default)]
+    pub auth: Option<pai_apps::auth::AppAuth>,
 }
 
 /// Result of staging + verifying + installing a synced package —
@@ -1170,6 +1177,13 @@ impl<T: SyncTransport> SyncEngine<T> {
                 if let Err(e) = crate::crdt::materialize_all(&self.store, &self.data_dir, &p.id) {
                     tracing::warn!(app = %p.id, "crdt materialize on install: {e}");
                 }
+                // Public OAuth config rides the object; refresh tokens
+                // never do — the receiving device authorizes locally.
+                if let Some(auth) = &p.auth {
+                    if let Err(e) = auth.save(&self.data_dir, &p.id) {
+                        tracing::warn!(app = %p.id, "auth.json write: {e}");
+                    }
+                }
                 tracing::info!(app = %p.id, signer = %signer, "installed synced app");
             }
             StageOutcome::Rejected(e) => {
@@ -1659,6 +1673,9 @@ pub fn app_payload_for(
     let files = collect_package_files(dir)?;
     let signature_b64 = base64::engine::general_purpose::STANDARD
         .encode(std::fs::read(dir.join("signature.bin")).unwrap_or_default());
+    let auth = std::fs::read(dir.join("auth.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<pai_apps::auth::AppAuth>(&raw).ok());
     Ok(AppPayload {
         v: 1,
         id: id.into(),
@@ -1669,6 +1686,7 @@ pub fn app_payload_for(
         signature_b64,
         files,
         active_device: active_device.map(Into::into),
+        auth,
     })
 }
 
@@ -1682,13 +1700,14 @@ pub fn collect_package_files(dir: &std::path::Path) -> Result<Vec<AppFileEntry>>
         for e in std::fs::read_dir(&d).map_err(store_err)? {
             let p = e.map_err(store_err)?.path();
             let rel = p.strip_prefix(dir).map_err(store_err)?.to_path_buf();
+            // Reserved top-level names (`data/`, `logs/`, `auth.json`)
+            // are runtime state — never package content, never shipped.
+            if rel.components().count() == 1
+                && pai_apps::AppPackage::RESERVED_DIRS.contains(&rel.to_str().unwrap_or_default())
+            {
+                continue;
+            }
             if p.is_dir() {
-                if rel.components().count() == 1
-                    && pai_apps::AppPackage::RESERVED_DIRS
-                        .contains(&rel.to_str().unwrap_or_default())
-                {
-                    continue; // live app state stays device-local
-                }
                 stack.push(p);
             } else if rel == std::path::Path::new("signature.bin") {
                 continue; // carried as signature_b64

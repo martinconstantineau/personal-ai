@@ -294,6 +294,39 @@ enum AppsCmd {
         #[arg(short = 'n', long, default_value = "5")]
         limit: usize,
     },
+    /// Configure an OAuth provider for an app — "add Google login".
+    /// Writes the provider config (`auth.json`, synced via `app/`),
+    /// runs the RFC 8628 device-authorization flow, and stores the
+    /// refresh token in the OS keystore. At run time the app receives
+    /// a fresh access token as `PAI_OAUTH_<PROVIDER>` — the refresh
+    /// token never enters the sandbox.
+    Auth {
+        /// Installed app id.
+        id: String,
+        /// Provider preset: `google` | `microsoft` | `custom`.
+        provider: Option<String>,
+        /// OAuth public client_id (from your app registration).
+        #[arg(long)]
+        client_id: Option<String>,
+        /// Scope to request — repeatable. Defaults per provider.
+        #[arg(long)]
+        scope: Vec<String>,
+        /// Custom-IdP device-code endpoint (provider `custom`).
+        #[arg(long)]
+        device_url: Option<String>,
+        /// Custom-IdP token endpoint (provider `custom`).
+        #[arg(long)]
+        token_url: Option<String>,
+        /// Microsoft tenant (default `common`).
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Remove the named provider instead of adding one.
+        #[arg(long)]
+        remove: bool,
+        /// List configured providers + local token state.
+        #[arg(long)]
+        status: bool,
+    },
     /// Issue a capability token for an installed app — a signed,
     /// expiring grant a guest device uses with `pai apps run --cap`.
     Share {
@@ -1752,6 +1785,7 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
                     )));
                 }
                 pai_apps::app_run_op(&self.data_dir, &a.id, &a.args)
+                    .await
                     .map_err(|e| Error::Other(e.to_string()))
             }
             "describe" => {
@@ -2083,13 +2117,15 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                         "app {id} is active on {other} — run it there, or migrate it back with `pai apps migrate {id} --to <me>`"
                     )));
                 }
-                let out = pai_apps::run_logged(&cfg.data_dir, id, args).map_err(|e| {
-                    if e.to_string().contains("not installed") {
-                        Error::NotFound(format!("app {id}"))
-                    } else {
-                        Error::Other(e.to_string())
-                    }
-                })?;
+                let out = pai_apps::run_logged(&cfg.data_dir, id, args)
+                    .await
+                    .map_err(|e| {
+                        if e.to_string().contains("not installed") {
+                            Error::NotFound(format!("app {id}"))
+                        } else {
+                            Error::Other(e.to_string())
+                        }
+                    })?;
                 print!("{}", String::from_utf8_lossy(&out.stdout));
                 if !out.stderr.is_empty() {
                     eprint!("{}", String::from_utf8_lossy(&out.stderr));
@@ -2388,6 +2424,135 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     if !e.stderr.is_empty() {
                         eprintln!("--- stderr ---\n{}", e.stderr);
                     }
+                }
+            }
+            AppsCmd::Auth {
+                id,
+                provider,
+                client_id,
+                scope,
+                device_url,
+                token_url,
+                tenant,
+                remove,
+                status,
+            } => {
+                use pai_apps::auth::AppAuth;
+                // Config changes require the package installed locally.
+                if pai_apps::AppRegistry::new(&cfg.data_dir)
+                    .get(id)
+                    .map_err(|e| Error::Other(e.to_string()))?
+                    .is_none()
+                    && !*status
+                {
+                    return Err(Error::InvalidInput(format!(
+                        "app {id} not installed — `pai apps deploy` it first"
+                    )));
+                }
+                let mut auth =
+                    AppAuth::load(&cfg.data_dir, id).map_err(|e| Error::Other(e.to_string()))?;
+                if *status {
+                    if auth.providers.is_empty() {
+                        println!("{id}: no oauth providers configured");
+                    }
+                    for (name, c) in &auth.providers {
+                        let token = if pai_apps::auth::has_token(&cfg.data_dir, id, name) {
+                            "stored"
+                        } else {
+                            "missing — run `pai apps auth` on this device"
+                        };
+                        println!(
+                            "{name}: provider={} client_id={} env={} token={token}",
+                            c.provider,
+                            c.client_id,
+                            pai_apps::auth::env_name(name)
+                        );
+                    }
+                } else if *remove {
+                    let name = provider.as_deref().ok_or_else(|| {
+                        Error::InvalidInput("apps auth --remove needs a provider".into())
+                    })?;
+                    if auth.providers.remove(name).is_none() {
+                        return Err(Error::NotFound(format!(
+                            "no oauth provider '{name}' configured for {id}"
+                        )));
+                    }
+                    auth.save(&cfg.data_dir, id)
+                        .map_err(|e| Error::Other(e.to_string()))?;
+                    println!("{id}: removed oauth provider '{name}' (syncs on next push)");
+                } else {
+                    let name = provider.as_deref().ok_or_else(|| {
+                        Error::InvalidInput(
+                            "apps auth needs a provider — google|microsoft|custom".into(),
+                        )
+                    })?;
+                    let oc = pai_oauth::OAuthConfig {
+                        provider: name.into(),
+                        client_id: client_id.clone().ok_or_else(|| {
+                            Error::InvalidInput(
+                                "--client-id required — register an oauth app first".into(),
+                            )
+                        })?,
+                        tenant: tenant.clone(),
+                        device_url: device_url.clone(),
+                        token_url: token_url.clone(),
+                        scopes: (!scope.is_empty()).then_some(scope.clone()),
+                    };
+                    auth.providers.insert(name.into(), oc.clone());
+                    auth.save(&cfg.data_dir, id)
+                        .map_err(|e| Error::Other(e.to_string()))?;
+                    // Device-authorization flow: print the code, poll
+                    // until the user authorizes (or the grant expires).
+                    let grant = pai_oauth::device_flow(&oc).await?;
+                    println!();
+                    println!("Go to {}", grant.verification_uri);
+                    if let Some(u) = &grant.verification_uri_complete {
+                        println!("  (or directly: {u})");
+                    }
+                    println!("and enter code: {}", grant.user_code);
+                    let mut interval = grant.interval.max(1);
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(grant.expires_in.max(120));
+                    let mut consecutive_pendings = 0u32;
+                    let tokens = loop {
+                        if std::time::Instant::now() > deadline {
+                            return Err(Error::InvalidInput(
+                                "device grant expired — re-run `pai apps auth`".into(),
+                            ));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                        match pai_oauth::poll_token_once(&oc, &grant.device_code).await? {
+                            pai_oauth::Poll::Pending => {
+                                consecutive_pendings += 1;
+                                if consecutive_pendings == 5 {
+                                    interval += 5; // back off gently
+                                }
+                                print!(".");
+                                std::io::Write::flush(&mut std::io::stdout()).ok();
+                            }
+                            pai_oauth::Poll::Granted(t) => break t,
+                        }
+                    };
+                    let refresh = tokens.refresh_token.ok_or_else(|| {
+                        Error::Provider(
+                            "oauth grant returned no refresh_token — add `offline_access` scope"
+                                .into(),
+                        )
+                    })?;
+                    if !pai_apps::auth::store_refresh_token(&cfg.data_dir, id, name, &refresh) {
+                        return Err(Error::Other(
+                            "cannot persist the refresh token — keystore and file fallback both failed".into(),
+                        ));
+                    }
+                    let mut ev = pai_audit::event(AuditKind::AppAuthConfigured, AuditOutcome::Ok);
+                    ev.detail = serde_json::json!({
+                        "app_id": id,
+                        "provider": name,
+                        "env": pai_apps::auth::env_name(name),
+                    });
+                    pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                    let env_var = pai_apps::auth::env_name(name);
+                    println!("{id}: {name} authorized — token stored; the app sees {env_var} at run time");
                 }
             }
             AppsCmd::Share {
@@ -3083,7 +3248,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 let guest_data = cfg.data_dir.clone();
                 let guest_handler: Box<pai_share::guest::GuestHandler<'static>> =
                     Box::new(move |op, app_id, args| match op {
-                        "app-run" => pai_apps::app_run_op(&guest_data, app_id, args)
+                        "app-run" => pai_apps::app_run_op_guest(&guest_data, app_id, args)
                             .map_err(|e| Error::Other(e.to_string())),
                         "app-read" => pai_apps::app_read_op(&guest_data, app_id, args)
                             .map_err(|e| Error::Other(e.to_string())),

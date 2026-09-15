@@ -46,6 +46,8 @@ pub enum Permission {
     /// Read an app's diagnostics (install, placement, backups, shares,
     /// recent run outcomes) — local metadata, no side effects.
     AppInspect,
+    /// Configure OAuth providers for an app (device flow, keystore tokens).
+    AppConfigure,
 }
 
 /// The engine's verdict for one action.
@@ -107,6 +109,7 @@ impl PolicyTable {
             // Read-only local diagnostics — same posture as
             // MemoryRead/DocumentRead/FilesRead.
             (AppInspect, AlwaysAllow),
+            (AppConfigure, AskUser),
         ] {
             t.set(p, pol);
         }
@@ -160,6 +163,7 @@ pub fn all_permissions() -> Vec<Permission> {
         AppShare,
         AppBackup,
         AppInspect,
+        AppConfigure,
     ]
 }
 

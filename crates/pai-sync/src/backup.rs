@@ -264,6 +264,13 @@ pub(crate) fn restore_unchecked(
         }
         engine::StageOutcome::Installed(_) => {}
     }
+    // Restore the public OAuth config too — a rescued app should know
+    // which providers it expects; the device re-auths for tokens.
+    if let Some(auth) = &p.package.auth {
+        if let Err(e) = auth.save(data_dir, app_id) {
+            tracing::warn!(app = %app_id, "auth.json restore: {e}");
+        }
+    }
     store.with_conn(|c| {
         c.execute(
             "INSERT INTO apps(id, name, version, runtime, installed_at,

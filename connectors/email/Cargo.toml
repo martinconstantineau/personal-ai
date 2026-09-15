@@ -9,6 +9,7 @@ description = "Vendor-neutral email connector interface. Gmail/Outlook/IMAP adap
 pai-core.workspace = true
 pai-permissions.workspace = true
 pai-identity.workspace = true
+pai-oauth.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

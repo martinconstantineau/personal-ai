@@ -503,9 +503,27 @@ guest read/write handles are all shipped and pushed.
   everywhere. Deleting the file withdraws that writer's field-set;
   fields other copies still hold survive (observed-delete semantics).
 
+- [x] **V5i — app OAuth ("add Google login", PRD §6.8)**: the host
+  holds the credential — RFC 8628 device flow extracted into the new
+  `pai-oauth` crate (the email connector re-exports it, so V2o call
+  sites are untouched). `apps/<id>/auth.json` stores *public* provider
+  config (client id, endpoints, scopes) and rides the `app/` sync
+  object's `auth` field so config propagates; refresh tokens never do —
+  they live in the OS keystore at `app-oauth:<app>:<provider>` with a
+  0600-file fallback under `data_dir/.oauth/` (headless hosts, same
+  pattern as `store.key`). At run time `run_logged` resolves each
+  provider to a fresh access token injected as `PAI_OAUTH_<NAME>` —
+  the sandbox never sees the refresh token; guest-capability runs get a
+  dedicated no-token path (`app_run_op_guest`). `auth.json` and `logs/`
+  joined `data/` in the reserved set — excluded from packages,
+  signatures, backups, and upgrades preserve them. `pai apps auth
+  <id> --provider google --client-id …` runs the flow; `--status` /
+  `--remove` manage providers; the `apps.configure` agent tool does the
+  same two-phase flow under `AppConfigure` (default `AskUser`) with an
+  `app_auth_configured` audit event.
+
 - Beyond V4 (PRD-level, future tracks): stable app URLs
-  (`app.user.devices`) and App Operator OAuth config
-  (§6.8 — "add Google login").
+  (`app.user.devices`).
 
 ## Known technical debt (tracked, not hidden)
 

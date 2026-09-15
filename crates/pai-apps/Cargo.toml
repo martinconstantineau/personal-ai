@@ -8,6 +8,7 @@ description = "Signed app packages: manifest parsing, verification, and local re
 [dependencies]
 pai-core.workspace = true
 pai-identity.workspace = true
+pai-oauth.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -28,6 +28,7 @@ pai-tasks.workspace = true
 pai-workflows.workspace = true
 pai-notify.workspace = true
 pai-apps.workspace = true
+pai-oauth.workspace = true
 pai-mesh.workspace = true
 serde.workspace = true
 serde_json.workspace = true

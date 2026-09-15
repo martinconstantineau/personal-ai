@@ -4,6 +4,7 @@
 //! use. Lives here (not in pai-tools) because it needs share+sync+
 //! apps+identity, which pai-tools deliberately doesn't depend on.
 
+use async_trait::async_trait;
 use pai_core::*;
 use pai_identity::IdentityStore;
 use pai_storage::Store;
@@ -29,6 +30,7 @@ impl StoreAppOperator {
     }
 }
 
+#[async_trait]
 impl AppOperator for StoreAppOperator {
     fn share_grant(
         &self,
@@ -276,6 +278,98 @@ impl AppOperator for StoreAppOperator {
             .map(|l| serde_json::to_value(l).unwrap_or_default())
             .collect();
         Ok(serde_json::json!({"app_id": app_id, "entries": entries}))
+    }
+
+    async fn configure_auth(
+        &self,
+        app_id: &str,
+        provider: &str,
+        client_id: &str,
+        scopes: Vec<String>,
+        device_code: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        use pai_apps::auth::AppAuth;
+        if pai_apps::AppRegistry::new(&self.data_dir)
+            .get(app_id)
+            .map_err(|e| Error::InvalidInput(e.to_string()))?
+            .is_none()
+        {
+            return Err(Error::NotFound(format!(
+                "app {app_id} — `pai apps deploy` it first"
+            )));
+        }
+        let mut auth = AppAuth::load(&self.data_dir, app_id)
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        match device_code {
+            None => {
+                let cfg = pai_oauth::OAuthConfig {
+                    provider: provider.into(),
+                    client_id: client_id.into(),
+                    tenant: None,
+                    device_url: None,
+                    token_url: None,
+                    scopes: (!scopes.is_empty()).then_some(scopes),
+                };
+                // Refuse to persist a provider whose endpoints don't
+                // resolve — a typo'd provider would wedge every run.
+                cfg.device_url()?;
+                cfg.token_url()?;
+                cfg.scope_string()?;
+                auth.providers.insert(provider.into(), cfg.clone());
+                auth.save(&self.data_dir, app_id)
+                    .map_err(|e| Error::Other(e.to_string()))?;
+                let grant = pai_oauth::device_flow(&cfg).await?;
+                Ok(serde_json::json!({
+                    "state": "pending",
+                    "app_id": app_id,
+                    "provider": provider,
+                    "verification_uri": grant.verification_uri,
+                    "verification_uri_complete": grant.verification_uri_complete,
+                    "user_code": grant.user_code,
+                    "device_code": grant.device_code,
+                    "interval": grant.interval,
+                    "expires_in": grant.expires_in,
+                }))
+            }
+            Some(code) => {
+                let cfg = auth.providers.get(provider).ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "no oauth config for '{provider}' — run the begin phase first"
+                    ))
+                })?;
+                match pai_oauth::poll_token_once(cfg, code).await? {
+                    pai_oauth::Poll::Pending => Ok(serde_json::json!({
+                        "state": "pending",
+                        "app_id": app_id,
+                        "provider": provider,
+                    })),
+                    pai_oauth::Poll::Granted(tokens) => {
+                        let refresh = tokens.refresh_token.ok_or_else(|| {
+                            Error::Provider(
+                                "grant returned no refresh_token — add `offline_access` scope"
+                                    .into(),
+                            )
+                        })?;
+                        if !pai_apps::auth::store_refresh_token(
+                            &self.data_dir,
+                            app_id,
+                            provider,
+                            &refresh,
+                        ) {
+                            return Err(Error::Other(
+                                "keystore unavailable — cannot persist the refresh token".into(),
+                            ));
+                        }
+                        Ok(serde_json::json!({
+                            "state": "authorized",
+                            "app_id": app_id,
+                            "provider": provider,
+                            "env": pai_apps::auth::env_name(provider),
+                        }))
+                    }
+                }
+            }
+        }
     }
 }
 

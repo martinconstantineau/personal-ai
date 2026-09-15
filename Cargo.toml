@@ -24,6 +24,7 @@ members = [
     "crates/pai-apps",
     "crates/pai-mesh",
     "crates/pai-share",
+    "crates/pai-oauth",
     "crates/pai-ffi",
     "connectors/email",
     "apps/cli",
@@ -94,6 +95,7 @@ pai-media = { path = "crates/pai-media" }
 pai-apps = { path = "crates/pai-apps" }
 pai-mesh = { path = "crates/pai-mesh" }
 pai-share = { path = "crates/pai-share" }
+pai-oauth = { path = "crates/pai-oauth" }
 pai-ffi = { path = "crates/pai-ffi" }
 pai-connector-email = { path = "connectors/email" }
 

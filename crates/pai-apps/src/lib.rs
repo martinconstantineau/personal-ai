@@ -16,12 +16,13 @@
 //! checks `signature.bin` against the signing device's public key.
 //! Unverified packages are rejected.
 
+pub mod auth;
 pub mod logs;
 mod run;
 
 pub use run::{
-    app_read_op, app_run_op, app_write_op, installed_dir, run_logged, RunLimits, RunOutput,
-    APP_IO_MAX,
+    app_read_op, app_run_op, app_run_op_guest, app_write_op, installed_dir, run_logged, RunLimits,
+    RunOutput, APP_IO_MAX,
 };
 
 use pai_core::*;
@@ -320,10 +321,12 @@ pub struct AppPackage {
 }
 
 impl AppPackage {
-    /// Directories that are runtime state, not package content — excluded
-    /// from the file list and content digest so signatures stay stable
-    /// across install/run cycles.
-    pub const RESERVED_DIRS: &'static [&'static str] = &["data"];
+    /// Top-level names that are runtime state, not package content —
+    /// excluded from the file list and content digest so signatures
+    /// stay stable across install/run cycles. `logs/` (run logs) and
+    /// `auth.json` (oauth config) are host-side: they must never ship
+    /// inside `app/`/`bkp/` objects or count toward the signed digest.
+    pub const RESERVED_DIRS: &'static [&'static str] = &["data", "logs", "auth.json"];
 
     /// Load + validate a package directory. Does NOT verify the signature.
     pub fn load(dir: &Path) -> AppResult<Self> {
@@ -745,7 +748,9 @@ impl AppRegistry {
             if !upgrade {
                 return Err(AppError::Layout(format!("{dest:?} already exists")));
             }
-            // Preserve live app data across the upgrade.
+            // Preserve live app state across the upgrade: `data/`,
+            // `logs/` (run history) and `auth.json` (oauth config) are
+            // host-side state the new package must not wipe.
             let live = dest.join("data");
             let backup = self
                 .root
@@ -756,19 +761,45 @@ impl AppRegistry {
                 }
                 std::fs::rename(&live, &backup)?;
             }
+            let auth_saved = std::fs::read(dest.join("auth.json")).ok();
+            let logs = dest.join("logs");
+            let logs_bak = self
+                .root
+                .join(format!(".{}.logs.bak", pkg.manifest.app_id()));
+            if logs.is_dir() {
+                if logs_bak.exists() {
+                    std::fs::remove_dir_all(&logs_bak)?;
+                }
+                std::fs::rename(&logs, &logs_bak)?;
+            }
             std::fs::remove_dir_all(&dest)?;
             let r = pkg.install_to(&dest).and_then(|_| {
                 if backup.is_dir() {
                     copy_merge(&backup, &dest.join("data"))?;
                     std::fs::remove_dir_all(&backup)?;
                 }
+                if logs_bak.is_dir() {
+                    copy_merge(&logs_bak, &dest.join("logs"))?;
+                    std::fs::remove_dir_all(&logs_bak)?;
+                }
+                if let Some(raw) = &auth_saved {
+                    std::fs::write(dest.join("auth.json"), raw)?;
+                }
                 Ok(())
             });
             if let Err(e) = r {
-                // Roll the live data back if the reinstall failed midway.
-                if backup.is_dir() {
+                // Roll the live state back if the reinstall failed midway.
+                if backup.is_dir() || logs_bak.is_dir() || auth_saved.is_some() {
                     let _ = std::fs::create_dir_all(&dest);
-                    let _ = std::fs::rename(&backup, &live);
+                    if backup.is_dir() {
+                        let _ = std::fs::rename(&backup, &live);
+                    }
+                    if logs_bak.is_dir() {
+                        let _ = std::fs::rename(&logs_bak, &logs);
+                    }
+                    if let Some(raw) = &auth_saved {
+                        let _ = std::fs::write(dest.join("auth.json"), raw);
+                    }
                 }
                 return Err(e);
             }
