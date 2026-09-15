@@ -13,3 +13,4 @@ async-trait.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 pai-inference.workspace = true
+reqwest.workspace = true

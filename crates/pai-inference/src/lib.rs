@@ -154,6 +154,18 @@ pub trait VideoGenerationProvider: Send + Sync {
     async fn poll(&self, job: &str) -> Result<JobStatus>;
 }
 
+/// Text-to-audio generation — music, sound effects, ambience (not speech;
+/// voice has its own traits). Implementations adapt a local server
+/// (e.g. a MusicGen/stable-audio wrapper) or a remote provider behind the
+/// same boundary, like every other provider trait here.
+#[async_trait]
+pub trait AudioGenerationProvider: Send + Sync {
+    fn id(&self) -> &'static str;
+    /// Generate up to `duration_secs` of audio for `prompt`. Returns encoded
+    /// audio bytes — WAV is the interoperable default.
+    async fn generate_audio(&self, prompt: &str, duration_secs: u32) -> Result<Vec<u8>>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {

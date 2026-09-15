@@ -30,6 +30,7 @@ pai-notify.workspace = true
 pai-apps.workspace = true
 pai-oauth.workspace = true
 pai-mesh.workspace = true
+pai-media.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true

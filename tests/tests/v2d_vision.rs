@@ -129,6 +129,8 @@ async fn vision_describe_tool_reads_jailed_image() {
         vision: Some(&v),
         notify: None,
         apps: None,
+        audio_gen: None,
+        media_dir: None,
         allowed_roots: std::slice::from_ref(&inbox),
     };
     let out = pai_tools::VisionDescribe

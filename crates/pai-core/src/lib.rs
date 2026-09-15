@@ -265,6 +265,10 @@ pub enum ModelCapability {
     TextGeneration,
     Vision,
     AudioUnderstanding,
+    /// Text-to-audio/music generation (distinct from speech: STT/TTS
+    /// transcribe and synthesize *voice*; this produces music, sound
+    /// effects, ambience).
+    AudioGeneration,
     ToolCalling,
     Reasoning,
     Embeddings,

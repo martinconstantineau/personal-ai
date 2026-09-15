@@ -138,6 +138,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: VoiceCmd,
     },
+    /// Audio generation — text-to-music/SFX via a configured provider.
+    Audio {
+        #[command(subcommand)]
+        cmd: AudioCmd,
+    },
     /// Background tasks — synced across devices; a due task is claimed by
     /// one device under a lease so it doesn't run everywhere at once.
     Task {
@@ -1006,6 +1011,29 @@ enum VoiceCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum AudioCmd {
+    /// Show the configured audio-generation provider and reachability.
+    Status,
+    /// Write media.json: the audio-generation server URL.
+    Configure {
+        /// Base URL, e.g. http://127.0.0.1:8179 (a MusicGen/stable-audio
+        /// wrapper — any server accepting POST /generate {prompt,
+        /// duration_seconds} → audio bytes).
+        #[arg(long)]
+        audio_gen_url: Option<String>,
+    },
+    /// Generate audio from a text prompt → writes a WAV file.
+    Gen {
+        prompt: String,
+        #[arg(long, default_value = "10")]
+        seconds: u32,
+        /// Output path; default <data_dir>/media/audio-<ts>.wav
+        #[arg(long)]
+        out: Option<String>,
+    },
+}
+
 struct Ctx {
     store: Arc<Store>,
     documents: Arc<pai_documents::DocumentStore>,
@@ -1163,6 +1191,11 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             })
         });
 
+    let audio_gen: Option<Arc<dyn pai_inference::AudioGenerationProvider>> =
+        pai_media::providers::detect(&cfg.data_dir, std::time::Duration::from_secs(2))
+            .await
+            .map(|p| Arc::new(p) as _);
+
     let agent = AgentRuntime {
         providers,
         tools: pai_tools::builtin_registry(),
@@ -1189,6 +1222,8 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
             cfg.data_dir.clone(),
             device.id,
         ))),
+        audio_gen,
+        media_dir: Some(cfg.data_dir.join("media")),
         allowed_roots: vec![inbox],
     };
 
@@ -1984,6 +2019,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             println!("signed by device {:.8}", signer.to_string());
             println!("run it: `pai apps run {}`", pkg.manifest.app_id());
         }
+        Cmd::Audio { cmd } => run_audio_cmds(cmd, &cfg).await?,
         Cmd::Apps { cmd } => match cmd {
             AppsCmd::Init { name, dir } => {
                 let base = match dir {
@@ -3662,6 +3698,71 @@ async fn run_voice_cmds(cmd: &VoiceCmd, ctx: &Ctx, cfg: &pai_config::Config) -> 
     Ok(())
 }
 
+/// `pai audio …` — audio-generation provider config + generation.
+/// Needs only config + the provider endpoint (no inference stack), so it
+/// lives on the light command path.
+async fn run_audio_cmds(cmd: &AudioCmd, cfg: &pai_config::Config) -> Result<()> {
+    use pai_inference::AudioGenerationProvider;
+    match cmd {
+        AudioCmd::Status => {
+            let c = pai_media::providers::MediaConfig::load(&cfg.data_dir)?;
+            let url = c
+                .audio_gen_url
+                .clone()
+                .or_else(|| std::env::var("PAI_AUDIO_GEN_URL").ok())
+                .unwrap_or_else(|| pai_media::providers::DEFAULT_AUDIO_GEN_URL.to_string());
+            let p =
+                pai_media::providers::HttpAudioGen::detect(&url, std::time::Duration::from_secs(2))
+                    .await;
+            println!(
+                "audio-gen server: {}",
+                if p.is_some() {
+                    format!("reachable at {url}")
+                } else {
+                    format!("NOT reachable ({url}) — set `pai audio configure --audio-gen-url` or PAI_AUDIO_GEN_URL")
+                }
+            );
+        }
+        AudioCmd::Configure { audio_gen_url } => {
+            let mut c = pai_media::providers::MediaConfig::load(&cfg.data_dir)?;
+            if let Some(u) = audio_gen_url {
+                c.audio_gen_url = Some(u.clone());
+            }
+            c.save(&cfg.data_dir)?;
+            println!("media.json written — `pai audio status` to verify");
+        }
+        AudioCmd::Gen {
+            prompt,
+            seconds,
+            out,
+        } => {
+            let gen =
+                pai_media::providers::detect(&cfg.data_dir, std::time::Duration::from_secs(2))
+                    .await
+                    .ok_or_else(|| {
+                        Error::Provider(
+                            "audio-gen server unreachable — `pai audio status` for diagnostics"
+                                .into(),
+                        )
+                    })?;
+            let secs = (*seconds).clamp(1, 300);
+            println!("generating {secs}s — this can take a while…");
+            let bytes = gen.generate_audio(prompt, secs).await?;
+            let path = match out {
+                Some(o) => std::path::PathBuf::from(o),
+                None => {
+                    let dir = cfg.data_dir.join("media");
+                    std::fs::create_dir_all(&dir).map_err(|e| Error::Storage(e.to_string()))?;
+                    dir.join(format!("audio-{}.wav", pai_core::now().timestamp_millis()))
+                }
+            };
+            std::fs::write(&path, &bytes).map_err(|e| Error::Storage(e.to_string()))?;
+            println!("{} → {} bytes", path.display(), bytes.len());
+        }
+    }
+    Ok(())
+}
+
 async fn email_provider(cfg: &pai_config::Config) -> Result<pai_connector_email::ImapProvider> {
     let c = pai_connector_email::ImapConfig::load(&cfg.data_dir)?.ok_or_else(|| {
         Error::InvalidInput("no email account — run `pai email configure`".into())
@@ -4558,6 +4659,7 @@ async fn main() -> Result<()> {
             | Cmd::Apps { .. }
             | Cmd::Mesh { .. }
             | Cmd::Serve { .. }
+            | Cmd::Audio { .. }
     ) {
         return run_sync_cmds(&cli).await;
     }
@@ -4952,6 +5054,8 @@ async fn main() -> Result<()> {
                     notify: None,
                     allowed_roots: &[],
                     apps: None,
+                    audio_gen: None,
+                    media_dir: None,
                 };
                 // CLI user is the operator — direct invocation, still audited
                 // via the audit log write below.
@@ -4975,6 +5079,8 @@ async fn main() -> Result<()> {
                     notify: None,
                     allowed_roots: &[],
                     apps: None,
+                    audio_gen: None,
+                    media_dir: None,
                 };
                 let out = pai_tools::MemoryShare
                     .execute(
@@ -5006,7 +5112,8 @@ async fn main() -> Result<()> {
         | Cmd::Deploy { .. }
         | Cmd::Apps { .. }
         | Cmd::Mesh { .. }
-        | Cmd::Serve { .. } => {
+        | Cmd::Serve { .. }
+        | Cmd::Audio { .. } => {
             unreachable!("handled before build")
         }
     }

@@ -94,6 +94,8 @@ fn ctx<'a>(mail: Option<&'a dyn EmailProvider>) -> ToolContext<'a> {
         vision: None,
         notify: None,
         apps: None,
+        audio_gen: None,
+        media_dir: None,
         allowed_roots: &[],
     }
 }

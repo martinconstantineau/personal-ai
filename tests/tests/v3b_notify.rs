@@ -70,6 +70,8 @@ async fn notify_send_tool_publishes_to_inbox() {
         vision: None,
         notify: Some(&snk),
         apps: None,
+        audio_gen: None,
+        media_dir: None,
         allowed_roots: &[],
     };
     let out = tool
@@ -95,6 +97,8 @@ async fn no_sink_reports_unavailable() {
         vision: None,
         notify: None,
         apps: None,
+        audio_gen: None,
+        media_dir: None,
         allowed_roots: &[],
     };
     let err = tool
@@ -262,6 +266,8 @@ async fn tool_external_fans_out_when_configured() {
         vision: None,
         notify: Some(&snk),
         apps: None,
+        audio_gen: None,
+        media_dir: None,
         allowed_roots: &[],
     };
     // external=true → inbox row AND the email channel

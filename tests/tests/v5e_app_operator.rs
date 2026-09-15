@@ -126,6 +126,8 @@ fn ctx<'a>(apps: Option<&'a dyn AppOperator>) -> ToolContext<'a> {
         vision: None,
         notify: None,
         apps,
+        audio_gen: None,
+        media_dir: None,
         allowed_roots: &[],
     }
 }

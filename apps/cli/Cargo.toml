@@ -23,6 +23,7 @@ pai-sync.workspace = true
 pai-broker.workspace = true
 pai-mesh.workspace = true
 pai-voice.workspace = true
+pai-media.workspace = true
 pai-vision.workspace = true
 pai-tasks.workspace = true
 pai-workflows.workspace = true

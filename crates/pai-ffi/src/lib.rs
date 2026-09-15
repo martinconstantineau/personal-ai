@@ -220,6 +220,8 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
             data_dir.clone(),
             device.id,
         ))),
+        audio_gen: None,
+        media_dir: None,
         allowed_roots: vec![inbox],
     };
 

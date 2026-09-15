@@ -84,6 +84,12 @@ pub struct ToolContext<'a> {
     /// App Operator surface for `apps.*` tools — capability grants and
     /// backups. Absent → the tool reports unavailable.
     pub apps: Option<&'a dyn AppOperator>,
+    /// Audio-generation provider for `audio.generate` — absent → the tool
+    /// reports unavailable.
+    pub audio_gen: Option<&'a dyn pai_inference::AudioGenerationProvider>,
+    /// Directory `audio.generate` writes artifacts into (the host passes
+    /// `<data_dir>/media`). Absent → the tool reports unavailable.
+    pub media_dir: Option<&'a std::path::Path>,
 }
 
 /// App-operations surface injected into the tool context — the runtime
@@ -1321,6 +1327,95 @@ fn pai_storage_err(e: impl std::fmt::Display) -> Error {
 }
 
 /// A registry pre-loaded with the safe built-ins.
+/// `audio.generate` — text-to-audio (music, sound effects, ambience) via the
+/// configured provider; the artifact lands in `media_dir` and the tool
+/// returns its path (audio bytes never enter model context).
+pub struct AudioGenerateTool;
+
+fn sanitize_media_name(name: &str) -> String {
+    let stem: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let stem = stem.trim_matches('.'); // no hidden files / ".." tricks
+    if stem.is_empty() || stem.len() > 120 {
+        format!("audio-{}.wav", pai_core::now().timestamp_millis())
+    } else {
+        stem.to_string()
+    }
+}
+
+#[async_trait]
+impl Tool for AudioGenerateTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "audio.generate".into(),
+            description: "Generate audio from a text prompt (music, sound \
+                          effects, ambience — not speech). Writes a file \
+                          under the media dir and returns its path."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "duration_secs": {"type": "integer", "minimum": 1, "maximum": 300},
+                    "filename": {"type": "string"}
+                },
+                "required": ["prompt"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::MediaGenerate],
+            risk: RiskLevel::High,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let gen = ctx.audio_gen.ok_or_else(|| {
+            Error::Provider("no audio-generation provider — run `pai audio configure`".into())
+        })?;
+        let dir = ctx.media_dir.ok_or_else(|| {
+            Error::InvalidInput("no media dir wired for generated artifacts".into())
+        })?;
+        let prompt = str_arg(&args, "prompt")?;
+        let secs = args["duration_secs"].as_u64().unwrap_or(10).clamp(1, 300) as u32;
+        let name = match args["filename"].as_str() {
+            Some(f) => sanitize_media_name(f),
+            None => format!("audio-{}.wav", pai_core::now().timestamp_millis()),
+        };
+        let bytes = gen.generate_audio(prompt, secs).await?;
+        std::fs::create_dir_all(dir).map_err(|e| Error::Storage(e.to_string()))?;
+        let path = dir.join(&name);
+        std::fs::write(&path, &bytes).map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(ToolOutput {
+            summary: format!(
+                "audio.generate → {} ({} bytes, {}s)",
+                path.display(),
+                bytes.len(),
+                secs
+            ),
+            value: serde_json::json!({
+                "path": path,
+                "bytes": bytes.len(),
+                "mime": "audio/wav",
+                "duration_secs": secs,
+                "provider": gen.id(),
+            }),
+        })
+    }
+}
+
 pub fn builtin_registry() -> ToolRegistry {
     let mut r = ToolRegistry::default();
     r.register(Arc::new(CalculatorAdd));
@@ -1343,6 +1438,7 @@ pub fn builtin_registry() -> ToolRegistry {
     r.register(Arc::new(AppsStatusTool));
     r.register(Arc::new(AppsLogsTool));
     r.register(Arc::new(AppsConfigureTool));
+    r.register(Arc::new(AudioGenerateTool));
     r
 }
 
@@ -1367,6 +1463,8 @@ mod tests {
             notify: None,
             allowed_roots: &[],
             apps: None,
+            audio_gen: None,
+            media_dir: None,
         };
         let out = tool
             .execute(serde_json::json!({"a":2,"b":3}), &ctx)

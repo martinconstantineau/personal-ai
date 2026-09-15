@@ -189,6 +189,12 @@ pub struct AgentRuntime {
     /// App Operator surface for `apps.*` tools — capability grants
     /// and backups. Absent = those tools report unavailable.
     pub apps: Option<Arc<dyn pai_tools::AppOperator>>,
+    /// Audio-generation provider for `audio.generate`. Absent = the tool
+    /// reports unavailable.
+    pub audio_gen: Option<Arc<dyn pai_inference::AudioGenerationProvider>>,
+    /// Directory `audio.generate` writes artifacts into (`<data_dir>/media`
+    /// from the host). Absent = the tool reports unavailable.
+    pub media_dir: Option<std::path::PathBuf>,
     /// Filesystem jail for file-touching tools: canonicalized roots a tool
     /// may read inside. Empty = no filesystem reads.
     pub allowed_roots: Vec<std::path::PathBuf>,
@@ -576,6 +582,8 @@ impl AgentRuntime {
             notify: self.notify.as_deref(),
             allowed_roots: &self.allowed_roots,
             apps: self.apps.as_deref(),
+            audio_gen: self.audio_gen.as_deref(),
+            media_dir: self.media_dir.as_deref(),
         };
         let out = tool.execute(arguments, &ctx).await.inspect_err(|e| {
             self.audit_error(run, e);
@@ -884,6 +892,8 @@ impl AgentRuntime {
             notify: self.notify.as_deref(),
             allowed_roots: &self.allowed_roots,
             apps: self.apps.as_deref(),
+            audio_gen: self.audio_gen.as_deref(),
+            media_dir: self.media_dir.as_deref(),
         };
         match tool.execute(arguments, &ctx).await {
             Ok(out) => {

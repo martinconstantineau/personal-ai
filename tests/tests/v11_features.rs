@@ -264,6 +264,8 @@ async fn documents_search_tool_returns_citations() {
         vision: None,
         notify: None,
         apps: None,
+        audio_gen: None,
+        media_dir: None,
         allowed_roots: &[],
     };
     let out = tool
@@ -290,6 +292,8 @@ async fn documents_search_tool_returns_citations() {
         vision: None,
         notify: None,
         apps: None,
+        audio_gen: None,
+        media_dir: None,
         allowed_roots: std::slice::from_ref(&jail_dir),
     };
     let out = tool

@@ -48,6 +48,9 @@ pub enum Permission {
     AppInspect,
     /// Configure OAuth providers for an app (device flow, keystore tokens).
     AppConfigure,
+    /// Generate media (audio/image/video) — compute-heavy, may hit a
+    /// configured local server or remote provider.
+    MediaGenerate,
 }
 
 /// The engine's verdict for one action.

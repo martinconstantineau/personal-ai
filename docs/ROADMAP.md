@@ -553,6 +553,22 @@ guest read/write handles are all shipped and pushed.
   — allowed or denied — appends to `logs/fetch.log` beside the run
   logs, so `pai apps status`/`apps.logs` surfaces cover it.
 
+- [x] **V5l — audio generation** (music, SFX, ambience — not speech):
+  `ModelCapability::AudioGeneration`, `MediaJobKind::TextToAudio`, and the
+  `AudioGenerationProvider` trait in `pai-inference` (image-gen shape:
+  `generate_audio(prompt, duration_secs) -> bytes`). Concrete adapter:
+  `pai_media::providers::HttpAudioGen` — POST `{prompt, duration_seconds}`
+  to `{url}/generate`, body back is the audio — the same local-server
+  convention as whisper-server, so any MusicGen/stable-audio wrapper can
+  front it (default `http://127.0.0.1:8179`; `media.json` or
+  `PAI_AUDIO_GEN_URL`). `audio.generate` agent tool (`MediaGenerate`
+  permission, High/SideEffecting) writes the artifact under
+  `<data_dir>/media/` and returns a path — audio bytes never enter model
+  context. `pai audio status|configure|gen` runs on the light command
+  path (no inference stack). The remaining gap is execution *placement*:
+  jobs aren't yet broker-routed (that's the declared MediaJob queue
+  track, shared with image/video).
+
 ## Known technical debt (tracked, not hidden)
 
 | Item | Why it's deferred | Exit |
