@@ -170,6 +170,29 @@ pub fn installed_dir(data_dir: &Path, app_id: &str) -> PathBuf {
     data_dir.join("apps").join(app_id)
 }
 
+/// Broker op body for `app-run`: look up `app_id` in the registry, run
+/// it in the sandbox, return the result as a JSON object
+/// (`{"stdout_b64","stderr_b64","exit_code","fuel"}`). Lives in the
+/// crate (not the CLI) so it's testable and the binary's handler stays
+/// a thin guard + delegation.
+pub fn app_run_op(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<Vec<u8>> {
+    let reg = crate::AppRegistry::new(data_dir);
+    let pkg = reg
+        .get(app_id)?
+        .ok_or_else(|| AppError::Layout(format!("app {app_id} not installed")))?;
+    let dir = installed_dir(data_dir, app_id);
+    let out = pkg.run(&dir, args, RunLimits::default())?;
+    use base64::Engine;
+    Ok(serde_json::json!({
+        "stdout_b64": base64::engine::general_purpose::STANDARD.encode(&out.stdout),
+        "stderr_b64": base64::engine::general_purpose::STANDARD.encode(&out.stderr),
+        "exit_code": out.exit_code,
+        "fuel": out.fuel_consumed,
+    })
+    .to_string()
+    .into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1789,11 +1789,13 @@ dependencies = [
 name = "pai-apps"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "pai-core",
  "pai-identity",
  "pai-storage",
  "rusqlite",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.20",
  "toml",
@@ -1998,9 +2000,11 @@ dependencies = [
  "pai-voice",
  "pai-workflows",
  "rusqlite",
+ "serde",
  "serde_json",
  "tokio",
  "uuid",
+ "wasmi",
 ]
 
 [[package]]
