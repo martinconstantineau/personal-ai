@@ -1175,6 +1175,54 @@ pub unsafe extern "C" fn pai_apps_list(handle: *mut PaiRuntime) -> *mut c_char {
     }
 }
 
+/// Run an installed app in the wasmi sandbox — the mobile/desktop
+/// runtime path. `args_json` is a JSON array of strings (NULL → no
+/// args). Returns `{stdout, stderr, exit_code, fuel}` or `{error}`.
+/// Placement enforcement (the app's `active_device`) is the caller's
+/// concern — see `pai apps run`.
+/// # Safety
+/// `handle` must come from `pai_init`; `id`/`args_json` are
+/// NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn pai_apps_run(
+    handle: *mut PaiRuntime,
+    id: *const c_char,
+    args_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let id = match read_str(id) {
+        Ok(s) => s.to_string(),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let args: Vec<String> = if args_json.is_null() {
+        Vec::new()
+    } else {
+        match read_str(args_json)
+            .map_err(|e| e.to_string())
+            .and_then(|s| serde_json::from_str(s).map_err(|e| e.to_string()))
+        {
+            Ok(v) => v,
+            Err(e) => return to_c(serde_json::json!({"error": e})),
+        }
+    };
+    let reg = pai_apps::AppRegistry::new(std::path::Path::new(&rt.data_dir));
+    let pkg = match reg.get(&id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return to_c(serde_json::json!({"error": format!("app {id} not installed")})),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let dir = pai_apps::installed_dir(std::path::Path::new(&rt.data_dir), &id);
+    match pkg.run(&dir, &args, pai_apps::RunLimits::default()) {
+        Ok(out) => to_c(serde_json::json!({
+            "stdout": String::from_utf8_lossy(&out.stdout),
+            "stderr": String::from_utf8_lossy(&out.stderr),
+            "exit_code": out.exit_code,
+            "fuel": out.fuel_consumed,
+        })),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
 fn voice_err(msg: &str) -> *mut c_char {
     to_c(serde_json::json!({"error": msg}))
 }
