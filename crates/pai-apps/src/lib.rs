@@ -18,7 +18,9 @@
 
 mod run;
 
-pub use run::{app_run_op, installed_dir, RunLimits, RunOutput};
+pub use run::{
+    app_read_op, app_run_op, app_write_op, installed_dir, RunLimits, RunOutput, APP_IO_MAX,
+};
 
 use pai_core::*;
 use serde::{Deserialize, Serialize};

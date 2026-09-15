@@ -193,6 +193,97 @@ pub fn app_run_op(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<V
     .into_bytes())
 }
 
+/// Guest/local file ops jail a request path under the app's dir.
+/// `tops` names the allowed first components (`files`, `data`);
+/// `..`, absolute prefixes, and anything else are refused. The app
+/// must be installed — the jail anchors at its registry dir.
+fn jailed_path(data_dir: &Path, app_id: &str, rel: &str, tops: &[&str]) -> AppResult<PathBuf> {
+    let reg = crate::AppRegistry::new(data_dir);
+    reg.get(app_id)?
+        .ok_or_else(|| AppError::Layout(format!("app {app_id} not installed")))?;
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        return Err(AppError::Layout(format!("path {rel} must be relative")));
+    }
+    let mut parts = rel_path.components();
+    let top = match parts.next() {
+        Some(std::path::Component::Normal(c)) => c,
+        _ => {
+            return Err(AppError::Layout(format!(
+                "path {rel} must start with files/ or data/"
+            )))
+        }
+    };
+    if !tops.iter().any(|t| top == std::ffi::OsStr::new(t)) {
+        return Err(AppError::Layout(format!(
+            "path {rel} outside {}",
+            tops.join("/ or ")
+        )));
+    }
+    for c in parts {
+        if !matches!(c, std::path::Component::Normal(_)) {
+            return Err(AppError::Layout(format!("path {rel} escapes the app dir")));
+        }
+    }
+    Ok(installed_dir(data_dir, app_id).join(rel_path))
+}
+
+/// Max file size read/written through the guest/local ops — keeps a
+/// single sync object bounded on the transport.
+pub const APP_IO_MAX: u64 = 8 * 1024 * 1024;
+
+/// Broker op body for `app-read`: `args = [relpath]` under `files/` or
+/// `data/` — returns `{"path","data_b64","bytes"}`.
+pub fn app_read_op(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<Vec<u8>> {
+    let rel = args
+        .first()
+        .ok_or_else(|| AppError::Layout("app-read needs a path argument".into()))?;
+    let path = jailed_path(data_dir, app_id, rel, &["files", "data"])?;
+    let meta = path
+        .metadata()
+        .map_err(|_| AppError::Layout(format!("{rel}: not found")))?;
+    if !meta.is_file() {
+        return Err(AppError::Layout(format!("{rel}: not a file")));
+    }
+    if meta.len() > APP_IO_MAX {
+        return Err(AppError::Layout(format!("{rel}: exceeds 8 MiB cap")));
+    }
+    let data = std::fs::read(&path)?;
+    use base64::Engine;
+    Ok(serde_json::json!({
+        "path": rel,
+        "bytes": data.len(),
+        "data_b64": base64::engine::general_purpose::STANDARD.encode(&data),
+    })
+    .to_string()
+    .into_bytes())
+}
+
+/// Broker op body for `app-write`: `args = [relpath, data_b64]` —
+/// writes under `data/` only (package files are signed content, not
+/// guest-writable). Returns `{"path","bytes"}`.
+pub fn app_write_op(data_dir: &Path, app_id: &str, args: &[String]) -> AppResult<Vec<u8>> {
+    let (rel, data_b64) = match (args.first(), args.get(1)) {
+        (Some(r), Some(d)) => (r, d),
+        _ => return Err(AppError::Layout("app-write needs path + data_b64".into())),
+    };
+    let path = jailed_path(data_dir, app_id, rel, &["data"])?;
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|e| AppError::Layout(format!("data_b64: {e}")))?;
+    if data.len() as u64 > APP_IO_MAX {
+        return Err(AppError::Layout(format!("{rel}: exceeds 8 MiB cap")));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &data)?;
+    Ok(serde_json::json!({"path": rel, "bytes": data.len()})
+        .to_string()
+        .into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

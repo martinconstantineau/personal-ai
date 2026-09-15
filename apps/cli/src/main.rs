@@ -270,9 +270,10 @@ enum AppsCmd {
     Share {
         /// Installed app id to share.
         id: String,
-        /// Action granted: `exec`, `read`, or `write`.
-        #[arg(long, default_value = "exec")]
-        action: String,
+        /// Action(s) granted: `exec`, `read`, `write`, `share` —
+        /// repeat or comma-separate (`--action read,write`).
+        #[arg(long, default_value = "exec", value_delimiter = ',')]
+        action: Vec<String>,
         /// Token lifetime in days.
         #[arg(long, default_value_t = 30)]
         days: i64,
@@ -293,6 +294,61 @@ enum AppsCmd {
         id: String,
         /// Token id (see `pai apps grants`).
         token: String,
+    },
+    /// Read a file under an installed app's `files/` or `data/` —
+    /// locally, or on a host as a guest with --cap + --on.
+    Read {
+        /// Installed app id.
+        id: String,
+        /// Path relative to the app dir (e.g. data/state.txt).
+        path: String,
+        /// Guest capability token JSON (`share --action read`).
+        #[arg(long)]
+        cap: Option<String>,
+        /// Host device id or paired prefix — required with --cap.
+        #[arg(long)]
+        on: Option<String>,
+        /// Guest transport: shared sync directory.
+        #[arg(long)]
+        dir: Option<String>,
+        /// Guest transport: relay URL.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Guest transport: relay bearer token.
+        #[arg(long)]
+        token: Option<String>,
+        /// Write the bytes here instead of stdout.
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Write bytes into an installed app's `data/` — locally, or on a
+    /// host as a guest with --cap + --on (`share --action write`).
+    Write {
+        /// Installed app id.
+        id: String,
+        /// Path relative to the app dir; must start with data/.
+        path: String,
+        /// File whose bytes to write.
+        #[arg(long)]
+        file: Option<String>,
+        /// Literal text to write.
+        #[arg(long)]
+        text: Option<String>,
+        /// Guest capability token JSON (`share --action write`).
+        #[arg(long)]
+        cap: Option<String>,
+        /// Host device id or paired prefix — required with --cap.
+        #[arg(long)]
+        on: Option<String>,
+        /// Guest transport: shared sync directory.
+        #[arg(long)]
+        dir: Option<String>,
+        /// Guest transport: relay URL.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Guest transport: relay bearer token.
+        #[arg(long)]
+        token: Option<String>,
     },
 }
 
@@ -1440,6 +1496,64 @@ fn resolve_peer(store: &Store, prefix: &str) -> Result<DeviceId> {
 /// Broker op dispatch for `pai broker serve`: each op resolves through
 /// whatever this device actually runs — whisper-server (stt), piper
 /// (tts), llama-server (infer/describe).
+/// Everything `guest_call` needs from `base()` — keeps the signature
+/// under clippy's arg limit.
+struct GuestCtx<'a> {
+    store: &'a Store,
+    ids: &'a pai_identity::IdentityStore,
+    key_dir: &'a std::path::Path,
+    device: &'a Device,
+}
+
+/// Guest-side request common to `apps run/read/write --cap`: load the
+/// token, check it names `want_app`, resolve the target device, and
+/// sign when the grant is bound to this device.
+async fn guest_call(
+    t: &dyn pai_sync::SyncTransport,
+    cx: &GuestCtx<'_>,
+    cap_path: &str,
+    on: &str,
+    want_app: &str,
+    op: &str,
+    args: &[String],
+) -> Result<Vec<u8>> {
+    let json = std::fs::read_to_string(cap_path)
+        .map_err(|e| Error::InvalidInput(format!("{cap_path}: {e}")))?;
+    let capability = pai_share::Capability::from_json(&json)
+        .map_err(|e| Error::InvalidInput(format!("bad token: {e}")))?;
+    if capability.app_id != want_app {
+        return Err(Error::InvalidInput(format!(
+            "token grants app {} not {want_app}",
+            capability.app_id
+        )));
+    }
+    // Guests can't read sealed bcap announcements — a literal device
+    // id, a paired prefix, or the token's issuer (`any`) name the host.
+    let to = if on == "any" {
+        capability.issued_by
+    } else {
+        match uuid::Uuid::parse_str(on) {
+            Ok(u) => DeviceId(u),
+            Err(_) => resolve_peer(cx.store, on)?,
+        }
+    };
+    let signer = |msg: &[u8]| {
+        cx.ids
+            .sign(cx.device.id, cx.key_dir, msg)
+            .map_err(|e| pai_share::ShareError::InvalidInput(e.to_string()))
+    };
+    pai_share::guest::call_guest(
+        t,
+        to,
+        capability,
+        op,
+        args,
+        std::time::Duration::from_secs(120),
+        Some(&signer),
+    )
+    .await
+}
+
 struct BrokerOps {
     stt: Option<pai_voice::WhisperServerStt>,
     tts: Option<pai_voice::PiperTts>,
@@ -1799,40 +1913,25 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     // Guest path: a capability token stands in for
                     // vault membership — request goes out unsealed,
                     // response seals to an ephemeral key in it.
-                    let json = std::fs::read_to_string(cap_path)
+                    let cap_json = std::fs::read_to_string(cap_path)
                         .map_err(|e| Error::InvalidInput(format!("{cap_path}: {e}")))?;
-                    let capability = pai_share::Capability::from_json(&json)
-                        .map_err(|e| Error::InvalidInput(format!("bad token: {e}")))?;
-                    if capability.app_id != *id {
-                        return Err(Error::InvalidInput(format!(
-                            "token grants app {} not {id}",
-                            capability.app_id
-                        )));
-                    }
-                    // Guests can't read sealed bcap announcements — a
-                    // literal device id, a paired prefix, or the
-                    // token's issuer (`any`) name the target.
                     let to = if dev == "any" {
-                        capability.issued_by
+                        pai_share::Capability::from_json(&cap_json)
+                            .map_err(|e| Error::InvalidInput(format!("bad token: {e}")))?
+                            .issued_by
                     } else {
                         match uuid::Uuid::parse_str(dev) {
                             Ok(u) => DeviceId(u),
                             Err(_) => resolve_peer(&store, dev)?,
                         }
                     };
-                    let signer = |msg: &[u8]| {
-                        ids.sign(device.id, &key_dir, msg)
-                            .map_err(|e| pai_share::ShareError::InvalidInput(e.to_string()))
+                    let cx = GuestCtx {
+                        store: &store,
+                        ids: &ids,
+                        key_dir: &key_dir,
+                        device: &device,
                     };
-                    let resp = pai_share::guest::call_guest(
-                        &*t,
-                        to,
-                        capability,
-                        args,
-                        std::time::Duration::from_secs(120),
-                        Some(&signer),
-                    )
-                    .await?;
+                    let resp = guest_call(&*t, &cx, cap_path, dev, id, "app-run", args).await?;
                     (to, resp)
                 } else {
                     let vault = crypto::vault_key(&cfg.data_dir)?.ok_or_else(|| {
@@ -2049,17 +2148,20 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                         "app {id} — `pai apps deploy` it first"
                     )));
                 }
-                let action = match action.as_str() {
-                    "exec" => pai_share::Action::Exec,
-                    "read" => pai_share::Action::Read,
-                    "write" => pai_share::Action::Write,
-                    "share" => pai_share::Action::Share,
-                    other => {
-                        return Err(Error::InvalidInput(format!(
-                            "unknown action '{other}' — exec|read|write|share"
-                        )))
-                    }
-                };
+                let mut actions = Vec::new();
+                for a in action {
+                    actions.push(match a.as_str() {
+                        "exec" => pai_share::Action::Exec,
+                        "read" => pai_share::Action::Read,
+                        "write" => pai_share::Action::Write,
+                        "share" => pai_share::Action::Share,
+                        other => {
+                            return Err(Error::InvalidInput(format!(
+                                "unknown action '{other}' — exec|read|write|share"
+                            )))
+                        }
+                    });
+                }
                 // --for binds the grant to a peer's device key: guest
                 // requests must then arrive signed by that key.
                 let grantee_key = match for_device {
@@ -2086,7 +2188,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     None => None,
                 };
                 let shares = pai_share::ShareStore::new(&cfg.data_dir);
-                let mut spec = pai_share::GrantSpec::for_app(id.clone(), vec![action]);
+                let mut spec = pai_share::GrantSpec::for_app(id.clone(), actions.clone());
                 spec.grantee_key = grantee_key;
                 spec.expires = Some((pai_core::now() + chrono::Duration::days(*days)).timestamp());
                 let cap = shares
@@ -2111,7 +2213,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 ev.detail = serde_json::json!({
                     "app_id": id,
                     "token_id": cap.token_id,
-                    "action": action.to_string(),
+                    "actions": actions.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
                     "bound": cap.grantee_key.is_some(),
                     "expires": cap.expires,
                 });
@@ -2120,7 +2222,11 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 println!(
                     "token {} — {} on {}{} — expires {}",
                     &cap.token_id[..8.min(cap.token_id.len())],
-                    action,
+                    actions
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
                     cap.app_id,
                     if cap.grantee_key.is_some() {
                         " (bound to grantee)"
@@ -2194,6 +2300,110 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 ev.detail = serde_json::json!({"app_id": id, "token_id": token});
                 pai_audit::AuditLog::new(store.clone()).record(&ev)?;
                 println!("revoked {token} — guests holding it are refused on next request");
+            }
+            AppsCmd::Read {
+                id,
+                path,
+                cap,
+                on,
+                dir,
+                relay,
+                token,
+                out,
+            } => {
+                use base64::Engine as _;
+                let args = vec![path.clone()];
+                let resp = match cap {
+                    Some(c) => {
+                        let dev = on.as_deref().ok_or_else(|| {
+                            Error::InvalidInput("--cap needs --on <device|any>".into())
+                        })?;
+                        let t = sync_transport(dir, relay, token)?;
+                        let cx = GuestCtx {
+                            store: &store,
+                            ids: &ids,
+                            key_dir: &key_dir,
+                            device: &device,
+                        };
+                        guest_call(&*t, &cx, c, dev, id, "app-read", &args).await?
+                    }
+                    None => pai_apps::app_read_op(&cfg.data_dir, id, &args)
+                        .map_err(|e| Error::InvalidInput(e.to_string()))?,
+                };
+                let v: serde_json::Value = serde_json::from_slice(&resp)
+                    .map_err(|e| Error::Other(format!("bad app-read response: {e}")))?;
+                let bytes = v["data_b64"]
+                    .as_str()
+                    .and_then(|x| base64::engine::general_purpose::STANDARD.decode(x).ok())
+                    .ok_or_else(|| Error::Other("app-read returned no data_b64".into()))?;
+                match out {
+                    Some(f) => {
+                        std::fs::write(f, &bytes)
+                            .map_err(|e| Error::Storage(format!("{f}: {e}")))?;
+                        println!("wrote {} ({} bytes)", f, bytes.len());
+                    }
+                    None => {
+                        use std::io::Write as _;
+                        std::io::stdout().write_all(&bytes).ok();
+                        println!();
+                    }
+                }
+            }
+            AppsCmd::Write {
+                id,
+                path,
+                file,
+                text,
+                cap,
+                on,
+                dir,
+                relay,
+                token,
+            } => {
+                use base64::Engine as _;
+                let data = match (file, text) {
+                    (Some(f), None) => {
+                        std::fs::read(f).map_err(|e| Error::InvalidInput(format!("{f}: {e}")))?
+                    }
+                    (None, Some(t)) => t.clone().into_bytes(),
+                    _ => {
+                        return Err(Error::InvalidInput(
+                            "pass --file <path> or --text <s>".into(),
+                        ))
+                    }
+                };
+                let args = vec![
+                    path.clone(),
+                    base64::engine::general_purpose::STANDARD.encode(&data),
+                ];
+                match cap {
+                    Some(c) => {
+                        let dev = on.as_deref().ok_or_else(|| {
+                            Error::InvalidInput("--cap needs --on <device|any>".into())
+                        })?;
+                        let t = sync_transport(dir, relay, token)?;
+                        let cx = GuestCtx {
+                            store: &store,
+                            ids: &ids,
+                            key_dir: &key_dir,
+                            device: &device,
+                        };
+                        guest_call(&*t, &cx, c, dev, id, "app-write", &args).await?;
+                    }
+                    None => {
+                        pai_apps::app_write_op(&cfg.data_dir, id, &args)
+                            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                    }
+                }
+                let mut ev = pai_audit::event(AuditKind::AppRun, AuditOutcome::Ok);
+                ev.device = Some(device.id);
+                ev.detail = serde_json::json!({
+                    "app_id": id,
+                    "guest_write": path,
+                    "bytes": data.len(),
+                });
+                pai_audit::AuditLog::new(store.clone()).record(&ev)?;
+                println!("wrote {} bytes to {id}:{path}", data.len());
             }
         },
         Cmd::Mesh { cmd } => match cmd {
@@ -2487,6 +2697,10 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 let guest_handler: Box<pai_share::guest::GuestHandler<'static>> =
                     Box::new(move |op, app_id, args| match op {
                         "app-run" => pai_apps::app_run_op(&guest_data, app_id, args)
+                            .map_err(|e| Error::Other(e.to_string())),
+                        "app-read" => pai_apps::app_read_op(&guest_data, app_id, args)
+                            .map_err(|e| Error::Other(e.to_string())),
+                        "app-write" => pai_apps::app_write_op(&guest_data, app_id, args)
                             .map_err(|e| Error::Other(e.to_string())),
                         other => Err(Error::InvalidInput(format!("unknown guest op '{other}'"))),
                     });

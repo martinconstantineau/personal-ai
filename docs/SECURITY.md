@@ -128,6 +128,13 @@ Emergency/manual commits by maintainers follow the same rule — no
   require the request to be signed by the grantee's device key.
   Bearer tokens are exactly that — anyone holding the file may run
   the app until expiry or `apps revoke`.
+- **Guest file ops are jailed per app**: `app-read`/`app-write`
+  resolve paths under `apps/<id>/` — reads limited to `files/` +
+  `data/`, writes to `data/` only, `..`/absolute paths refused, and
+  an 8 MiB cap bounds the sync objects they produce. The op itself
+  names the required token action (`app-write` needs `write`, not
+  `exec`), and bound-token request signatures cover the op field so
+  a granted `read` can't be upgraded to `exec` in flight.
 - Android `RECORD_AUDIO` is declared for voice capture; the runtime
   grant is still required, and there is no in-app permission-request
   flow yet — voice capture simply fails until granted in system

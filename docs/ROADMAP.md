@@ -355,8 +355,19 @@ sandboxed `app_run_op`; the `gres/` reply seals to the ephemeral key.
 Serve also works vault-free — a host that only shares to guests
 needs no pairing. Covered by tests/tests/v4n_guest_run.rs.
 
-- Remaining: shared read/write handles on guest tokens (only `exec`
-  is consumed today), deeper mobile shell work.
+**V4p done (2026-09-15):** guest read/write handles — `read`/`write`
+token actions now consume: `pai apps read <app> <path>` and `apps
+write <app> <path> --file|--text` run locally, or as a guest with
+`--cap <token> --on <device>`; `share --action` accepts a
+comma-separated list (`read,write`). Paths jail under the app dir —
+reads limited to `files/`+`data/`, writes to `data/` only, `..` and
+absolute paths refused, 8 MiB object cap. The server maps
+op→required-action (`app-run`→exec, `app-read`→read,
+`app-write`→write), so an exec-only token can't read. Bound-token
+request signatures cover the op, so the action is tamper-proof too.
+
+- Remaining: deeper mobile shell work (share/grants UI), `share`
+  re-grant (a bound grantee issuing narrower sub-tokens).
 
 ## Known technical debt (tracked, not hidden)
 

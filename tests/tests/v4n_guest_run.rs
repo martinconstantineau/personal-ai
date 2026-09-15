@@ -102,6 +102,12 @@ fn guest_broker<'a>(
             "app-run" => {
                 pai_apps::app_run_op(&data, app_id, args).map_err(|e| Error::Other(e.to_string()))
             }
+            "app-read" => {
+                pai_apps::app_read_op(&data, app_id, args).map_err(|e| Error::Other(e.to_string()))
+            }
+            "app-write" => {
+                pai_apps::app_write_op(&data, app_id, args).map_err(|e| Error::Other(e.to_string()))
+            }
             other => Err(Error::InvalidInput(format!("unknown guest op '{other}'"))),
         }),
     )
@@ -143,6 +149,7 @@ async fn guest_run_roundtrip_and_revocation() {
         &transport,
         host.device.id,
         cap.clone(),
+        "app-run",
         &[],
         Duration::from_secs(15),
         None,
@@ -170,6 +177,7 @@ async fn guest_run_roundtrip_and_revocation() {
         &transport,
         host.device.id,
         cap,
+        "app-run",
         &[],
         Duration::from_secs(15),
         None,
@@ -214,6 +222,7 @@ async fn guest_run_grantee_bound_needs_signature() {
         &transport,
         host.device.id,
         cap.clone(),
+        "app-run",
         &[],
         Duration::from_secs(5),
         None,
@@ -233,6 +242,7 @@ async fn guest_run_grantee_bound_needs_signature() {
         &transport,
         host.device.id,
         cap,
+        "app-run",
         &[],
         Duration::from_secs(15),
         Some(&signer),
@@ -246,6 +256,133 @@ async fn guest_run_grantee_bound_needs_signature() {
     };
     let (resp, _) = tokio::join!(call, serve);
     resp.unwrap();
+
+    let _ = std::fs::remove_dir_all(&host.dir);
+    let _ = std::fs::remove_dir_all(&guest.dir);
+    let _ = std::fs::remove_dir_all(&shared);
+}
+
+#[tokio::test]
+async fn guest_read_write_roundtrip() {
+    let host = dev("host3");
+    let guest = dev("guest3");
+    install_app(&host);
+    // Seed a package file so app-read has content under files/.
+    std::fs::create_dir_all(host.dir.join("apps/guest-app/files")).unwrap();
+    std::fs::write(
+        host.dir.join("apps/guest-app/files/seed.txt"),
+        b"seed-guest",
+    )
+    .unwrap();
+
+    let shared = tmpdir("bus3");
+    let transport = FolderTransport::new(shared.clone()).unwrap();
+    let shares = ShareStore::new(&host.dir);
+    let cap = shares
+        .grant(
+            &host.ids,
+            &host.key_dir,
+            &host.device,
+            GrantSpec::for_app("guest-app", vec![Action::Read, Action::Write]),
+        )
+        .unwrap();
+
+    let server = guest_broker(&transport, &host);
+    let serve = async {
+        for _ in 0..200 {
+            server.serve_guests_once().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    };
+
+    let read_args = vec!["files/seed.txt".to_string()];
+    let work = async {
+        // read files/seed.txt
+        let resp = call_guest(
+            &transport,
+            host.device.id,
+            cap.clone(),
+            "app-read",
+            &read_args,
+            Duration::from_secs(15),
+            None,
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(v["data_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(data, b"seed-guest");
+
+        // write data/note.txt, then read it back
+        let write_args = vec![
+            "data/note.txt".to_string(),
+            base64::engine::general_purpose::STANDARD.encode(b"from-guest"),
+        ];
+        call_guest(
+            &transport,
+            host.device.id,
+            cap.clone(),
+            "app-write",
+            &write_args,
+            Duration::from_secs(15),
+            None,
+        )
+        .await
+        .unwrap();
+        let resp = call_guest(
+            &transport,
+            host.device.id,
+            cap.clone(),
+            "app-read",
+            &["data/note.txt".to_string()],
+            Duration::from_secs(15),
+            None,
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(v["data_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(data, b"from-guest");
+
+        // jail: a traversal attempt is refused
+        let err = call_guest(
+            &transport,
+            host.device.id,
+            cap.clone(),
+            "app-read",
+            &["../secret".to_string()],
+            Duration::from_secs(15),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("files/ or data/"), "unexpected: {err}");
+
+        // write into files/ is refused — only data/ is writable
+        let err = call_guest(
+            &transport,
+            host.device.id,
+            cap,
+            "app-write",
+            &[
+                "files/x".to_string(),
+                base64::engine::general_purpose::STANDARD.encode(b"nope"),
+            ],
+            Duration::from_secs(15),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("outside"), "unexpected: {err}");
+    };
+    tokio::join!(serve, work);
 
     let _ = std::fs::remove_dir_all(&host.dir);
     let _ = std::fs::remove_dir_all(&guest.dir);

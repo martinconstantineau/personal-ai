@@ -57,8 +57,9 @@ targets the token's `issued_by` since guests can't read sealed
 - Revocation is a tombstone check on the serving device — offline
   for the guest is offline; a revoked token is refused the moment
   the tombstone exists.
-- Only `exec` is consumed today; `read`/`write` tokens verify but
-  have no handler yet (shared read handles are future work).
+- `exec`, `read`, and `write` are all consumed (`app-run` /
+  `app-read` / `app-write` ops); `share` verifies but sub-delegation
+  (a bound grantee minting narrower tokens) is future work.
 - Bearer tokens are replayable by anyone holding the file — bound
   tokens (`--for`) exist for the stronger case.
 - `greq/` payloads are visible on the transport — they reveal which
