@@ -305,6 +305,16 @@ skeleton); `pai apps build <dir> [--sign]` compiles `wasm32-wasip1`
 (or validates an existing package dir) into a deployable package.
 init → build → deploy → run works end-to-end.
 
+**V4k done (2026-09-15):** remote app execution — `pai apps run --on
+<peer|any>` sends the run over the sealed broker transport (`app-run`
+op → `pai_apps::app_run_op`); the peer runs it in the same wasmi
+sandbox and returns base64 stdout/stderr/exit/fuel. Apps already sync
+to every paired device, so `any` routes to whichever peer is serving.
+Verified live (A→B over a folder transport) and in
+`tests/v4k_remote_run.rs`. Any paired vault member may invoke runs —
+same trust class as the existing stt/tts/infer ops. (Lettered V4k;
+code predates V4j's landing — ordering is commit order.)
+
 - Remaining: capability sharing (`pai-share`), multi-device
   app placement/migration, mobile runtime.
 
