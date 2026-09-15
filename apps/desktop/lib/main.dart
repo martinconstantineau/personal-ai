@@ -336,6 +336,14 @@ class _ChatScreenState extends State<ChatScreen> {
                 : () => Navigator.of(context).push(MaterialPageRoute(
                     builder: (_) => PoliciesScreen(bridge: _pai!))),
           ),
+          IconButton(
+            icon: const Icon(Icons.apps_outlined),
+            tooltip: 'Apps',
+            onPressed: _pai == null
+                ? null
+                : () => Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => AppsScreen(bridge: _pai!))),
+          ),
         ],
       ),
       drawer: _pai == null
@@ -1185,6 +1193,106 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                 );
               },
             ),
+    );
+  }
+}
+
+class AppsScreen extends StatefulWidget {
+  const AppsScreen({super.key, required this.bridge});
+  final PaiBridge bridge;
+  @override
+  State<AppsScreen> createState() => _AppsScreenState();
+}
+
+class _AppsScreenState extends State<AppsScreen> {
+  List<dynamic> _apps = const [];
+  bool _loading = true;
+  String? _running;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final r = await widget.bridge.appsList();
+    if (mounted) {
+      setState(() {
+        _apps = (r['apps'] as List?) ?? const [];
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _run(Map<String, dynamic> app) async {
+    final id = '${app['id']}';
+    setState(() => _running = id);
+    final r = await widget.bridge.appsRun(id);
+    if (!mounted) return;
+    setState(() => _running = null);
+    final error = r['error'];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${app['name']}'),
+        content: SingleChildScrollView(
+          child: SelectableText(error != null
+              ? 'error: $error'
+              : [
+                  if ('${r['stdout']}'.isNotEmpty) '${r['stdout']}',
+                  if ('${r['stderr']}'.isNotEmpty)
+                    'stderr:\n${r['stderr']}',
+                  'exit: ${r['exit_code'] ?? 'clean'}'
+                      ' · fuel: ${r['fuel']}',
+                ].join('\n\n')),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Apps')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _apps.isEmpty
+              ? const Center(
+                  child: Text(
+                      'No apps installed — `pai deploy <dir>` on any\n'
+                      'paired device syncs packages here.',
+                      textAlign: TextAlign.center))
+              : ListView.builder(
+                  itemCount: _apps.length,
+                  itemBuilder: (_, i) {
+                    final a = _apps[i] as Map<String, dynamic>;
+                    final id = '${a['id']}';
+                    return ListTile(
+                      leading: const Icon(Icons.widgets_outlined),
+                      title: Text('${a['name']}'),
+                      subtitle: Text(
+                          '$id · v${a['version']} · ${a['runtime']}',
+                          style: const TextStyle(
+                              fontFamily: 'monospace', fontSize: 12)),
+                      trailing: _running == id
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2))
+                          : IconButton(
+                              icon: const Icon(Icons.play_arrow),
+                              tooltip: 'Run on this device',
+                              onPressed: () => _run(a)),
+                    );
+                  },
+                ),
     );
   }
 }
