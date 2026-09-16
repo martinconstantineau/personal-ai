@@ -55,6 +55,32 @@ fn models_scan_then_list() {
 }
 
 #[test]
+fn catalog_lists_builtin_models() {
+    unsafe {
+        let h = init();
+        let v = json(pai_models_catalog(h));
+        let rows = v.as_array().unwrap();
+        assert!(!rows.is_empty(), "catalog should not be empty");
+        assert!(rows[0]["slug"].as_str().unwrap().len() > 3);
+        pai_free(h);
+    }
+}
+
+#[test]
+fn install_unknown_slug_errors() {
+    unsafe {
+        let h = init();
+        let req = CString::new(
+            serde_json::json!({"slug": "no-such-model-xyz"}).to_string(),
+        )
+        .unwrap();
+        let v = json(pai_models_install(h, req.as_ptr()));
+        assert!(v["error"].as_str().unwrap().contains("no-such-model"));
+        pai_free(h);
+    }
+}
+
+#[test]
 fn serve_missing_slug_errors_without_spawning() {
     unsafe {
         let h = init();

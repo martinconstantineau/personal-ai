@@ -1501,6 +1501,88 @@ pub unsafe extern "C" fn pai_models_serve(
         "provider": "llama-server", "model": slug}))
 }
 
+/// The built-in model catalog — what `pai models install <slug>` can
+/// fetch. Rows: `{slug, family, quant, size_mb, capabilities, context}`.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_models_catalog(handle: *mut PaiRuntime) -> *mut c_char {
+    let _ = handle;
+    let rows: Vec<serde_json::Value> = pai_models::builtin_catalog()
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "slug": m.model.slug,
+                "family": m.model.family,
+                "provider": m.model.provider,
+                "quant": m.model.quantization,
+                "size_mb": m.model.size_bytes / 1_000_000,
+                "context": m.model.context_length,
+                "capabilities": m.model.capabilities,
+                "license": m.model.license,
+            })
+        })
+        .collect();
+    to_c(serde_json::Value::Array(rows))
+}
+
+/// Install a model: `json` is `{"slug"|"ref"(hf://…), "dest_dir"?}`.
+/// `dest_dir` empty/absent installs to the internal model dir; a path
+/// like `D:\pai-models` writes a portable pack (copies the file instead
+/// of re-downloading when the model is already on disk). Blocking —
+/// downloads are large; call from a worker thread.
+/// # Safety
+/// `handle` must come from `pai_init`; `json` is NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_models_install(
+    handle: *mut PaiRuntime,
+    json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let raw = match read_str(json) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    #[derive(serde::Deserialize)]
+    struct Req {
+        slug: String,
+        #[serde(default)]
+        dest_dir: Option<String>,
+    }
+    let req: Req = match serde_json::from_str(&raw) {
+        Ok(r) => r,
+        Err(e) => return to_c(serde_json::json!({"error": format!("bad JSON: {e}")})),
+    };
+    let mgr = ModelManager::new(rt.store.clone(), std::path::Path::new(&rt.data_dir));
+    let out: std::result::Result<std::path::PathBuf, String> = rt.rt.block_on(async {
+        let manifest = pai_models::resolve_model_arg(&req.slug)
+            .await
+            .map_err(|e| e.to_string())?;
+        match req.dest_dir.as_deref().filter(|d| !d.trim().is_empty()) {
+            Some(d) => mgr
+                .install_to(&manifest.model.slug, &manifest, std::path::Path::new(d))
+                .await
+                .map_err(|e| e.to_string()),
+            None => mgr
+                .install(&manifest.model.slug, &manifest)
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    });
+    match out {
+        Ok(path) => {
+            let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+            e.device = Some(rt.device);
+            e.detail = serde_json::json!({
+                "installed_model": req.slug, "path": path.to_string_lossy()});
+            let _ = rt.audit.record(&e);
+            to_c(serde_json::json!({
+                "installed": req.slug, "path": path.to_string_lossy()}))
+        }
+        Err(e) => to_c(serde_json::json!({"error": e})),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Media jobs — local audio generation + the shared job log. Remote
 // broker-routed jobs recorded by the CLI/broker also appear in

@@ -102,6 +102,11 @@ class PaiClient {
       'pai_models_serve');
   late final _setProvider = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_set_provider');
+  late final _modelsCatalog = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_models_catalog');
+  late final _modelsInstall = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
+      'pai_models_install');
   late final _mediaList = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_media_list');
   late final _mediaGen = _lib.lookupFunction<_SendNative,
@@ -417,6 +422,15 @@ class PaiClient {
       malloc.free(s);
     }
   }
+
+  /// The installable model catalog (what `modelsInstall` accepts).
+  List<dynamic> modelsCatalog() =>
+      _json(_modelsCatalog(_handle)) as List<dynamic>;
+
+  /// Install [slugOrRef] — `requestJson` is `{slug, dest_dir?}`.
+  /// Blocking (downloads are large) — worker isolate only.
+  Map<String, dynamic> modelsInstall(String requestJson) =>
+      _call1(_modelsInstall, requestJson);
 
   /// Media job log, newest first — local and broker-routed rows.
   List<dynamic> mediaList() =>

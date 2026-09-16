@@ -2889,6 +2889,86 @@ class _DevicesScreenState extends State<DevicesScreen> {
     await _load();
   }
 
+  /// Catalog picker + destination — `dest` empty installs internally,
+  /// a path like `D:\pai-models` writes a portable pack onto that
+  /// drive (the file is copied, not re-downloaded, when the model is
+  /// already on disk somewhere reachable).
+  Future<void> _installDialog() async {
+    List<dynamic> catalog;
+    try {
+      catalog = await widget.bridge.modelsCatalog();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Catalog failed: $e')));
+      }
+      return;
+    }
+    if (!mounted) return;
+    String? chosen = catalog.isNotEmpty ? '${catalog.first['slug']}' : null;
+    final destCtl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('Install a model'),
+          content: SizedBox(
+            width: 420,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              RadioGroup<String>(
+                groupValue: chosen,
+                onChanged: (v) => setD(() => chosen = v),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  for (final m in catalog)
+                    RadioListTile<String>(
+                      dense: true,
+                      value: '${m['slug']}',
+                      title: Text('${m['slug']}'),
+                      subtitle: Text(
+                          '${m['family']} - ${m['quant'] ?? '?'} - ${m['size_mb']} MB',
+                          style: const TextStyle(fontSize: 12)),
+                    ),
+                ]),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: destCtl,
+                decoration: const InputDecoration(
+                    labelText: 'Destination (optional)',
+                    hintText: 'e.g. D:\\pai-models - leave empty for internal',
+                    border: OutlineInputBorder()),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Install')),
+          ],
+        ),
+      ),
+    );
+    final dest = destCtl.text.trim();
+    destCtl.dispose();
+    if (ok != true || chosen == null || !mounted) return;
+    final slug = chosen!;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(dest.isEmpty
+            ? 'Installing $slug - this can take a while'
+            : 'Installing $slug to $dest - this can take a while'),
+        duration: const Duration(seconds: 6)));
+    final r = await widget.bridge.modelsInstall(slug, dest: dest);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r['error'] != null
+            ? 'Install failed: ${r['error']}'
+            : 'Installed ${r['installed']} -> ${r['path']}')));
+    _scan();
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -3001,6 +3081,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
                         : const Icon(Icons.sync),
                     tooltip: 'Rescan drives for pai-models/ packs',
                     onPressed: _scanning ? null : _scan),
+                IconButton(
+                    icon: const Icon(Icons.download_outlined),
+                    tooltip: 'Install a model (internal or to a drive)',
+                    onPressed: _installDialog),
               ]),
               const SizedBox(height: 4),
               if (_models.isEmpty)

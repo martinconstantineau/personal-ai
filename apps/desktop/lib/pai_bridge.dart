@@ -121,6 +121,20 @@ class PaiBridge {
     return r;
   }
 
+  /// The installable catalog (slug → manifest resolution happens
+  /// core-side; hf:// refs work too).
+  Future<List<dynamic>> modelsCatalog() async =>
+      (await _call(_Op.modelsCatalog)) as List<dynamic>;
+
+  /// Install a model — `dest` empty installs internally; a path like
+  /// `D:\pai-models` writes a portable pack (copies if already on disk).
+  /// Long-running — runs on the worker isolate.
+  Future<Map<String, dynamic>> modelsInstall(String slug,
+      {String dest = ''}) async =>
+      (await _call(_Op.modelsInstall,
+          arg: jsonEncode({'slug': slug, 'dest_dir': dest})))
+          as Map<String, dynamic>;
+
   /// Media job log — newest first (local + broker-routed rows).
   Future<List<dynamic>> mediaList() async =>
       (await _call(_Op.mediaList)) as List<dynamic>;
@@ -382,6 +396,10 @@ class PaiBridge {
               result = client.modelsServe(
                   a['slug'] as String, (a['port'] as num? ?? 0).toInt());
             }
+          case _Op.modelsCatalog:
+            result = client.modelsCatalog();
+          case _Op.modelsInstall:
+            result = client.modelsInstall(req.arg!);
           case _Op.audit:
             result = client.audit();
           case _Op.runs:
@@ -518,6 +536,8 @@ enum _Op {
   modelsList,
   modelsScan,
   modelsServe,
+  modelsCatalog,
+  modelsInstall,
   audit,
   runs,
   conversations,
