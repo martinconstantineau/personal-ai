@@ -414,7 +414,10 @@ pub unsafe extern "C" fn pai_init(config_json: *const c_char) -> *mut PaiRuntime
     };
     match init_runtime(cfg) {
         Ok(rt) => Box::into_raw(Box::new(rt)),
-        Err(_) => std::ptr::null_mut(),
+        Err(e) => {
+            eprintln!("pai_init failed: {e}");
+            std::ptr::null_mut()
+        }
     }
 }
 
