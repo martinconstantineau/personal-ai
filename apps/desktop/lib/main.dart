@@ -790,6 +790,19 @@ Widget _errorView(BuildContext context, String err, VoidCallback onRetry) {
   ]));
 }
 
+/// Approval-sheet risk styling.
+Color _riskColor(ColorScheme cs, String risk) => switch (risk) {
+      'high' || 'critical' => cs.error,
+      'medium' || 'moderate' => Colors.amber,
+      _ => Colors.greenAccent,
+    };
+
+IconData _riskIcon(String risk) => switch (risk) {
+      'high' || 'critical' => Icons.warning_amber_outlined,
+      'medium' || 'moderate' => Icons.error_outline,
+      _ => Icons.verified_outlined,
+    };
+
 /// "HH:MM" for bubble labels.
 String _fmtHm(DateTime t) =>
     '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
@@ -915,19 +928,28 @@ class _ApprovalSheet extends StatelessWidget {
           ]),
           const SizedBox(height: 16),
           Text('${req['tool']}',
-              style: const TextStyle(fontWeight: FontWeight.bold)),
+              style: const TextStyle(
+                  fontWeight: FontWeight.bold)),
           Text('${req['summary']}'),
           const SizedBox(height: 8),
           Wrap(spacing: 6, children: [
             Chip(
+              avatar: Icon(_riskIcon('${req['risk']}'),
+                  size: 14,
+                  color: _riskColor(cs, '${req['risk']}')),
               label: Text('Risk: ${req['risk']}',
-                  style: const TextStyle(fontSize: 11)),
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: _riskColor(cs, '${req['risk']}'))),
               visualDensity: VisualDensity.compact,
             ),
-            Chip(
-              label: Text(perms, style: const TextStyle(fontSize: 11)),
-              visualDensity: VisualDensity.compact,
-            ),
+            if (perms.isNotEmpty)
+              Chip(
+                avatar: const Icon(Icons.key_outlined, size: 14),
+                label:
+                    Text(perms, style: const TextStyle(fontSize: 11)),
+                visualDensity: VisualDensity.compact,
+              ),
           ]),
           const SizedBox(height: 20),
           Row(mainAxisAlignment: MainAxisAlignment.end, children: [
@@ -1077,7 +1099,14 @@ class _ConvDrawerState extends State<_ConvDrawer> {
             context: context,
             builder: (ctx) => AlertDialog(
                   title: const Text('Rename chat'),
-                  content: TextField(controller: ctrl, autofocus: true),
+                  content: TextField(
+                      controller: ctrl,
+                      autofocus: true,
+                      onSubmitted: (_) {
+                        widget.onRename(
+                            c['id'] as String, ctrl.text.trim());
+                        Navigator.pop(ctx);
+                      }),
                   actions: [
                     TextButton(
                         onPressed: () => Navigator.pop(ctx),
@@ -1255,6 +1284,7 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
   List<dynamic> _items = const [];
   List<dynamic> _hits = const [];
   bool _loading = true;
+  bool _ingesting = false;
   final _pathCtrl = TextEditingController();
   final _searchCtrl = TextEditingController();
 
@@ -1288,13 +1318,16 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
 
   Future<void> _ingest() async {
     final path = _pathCtrl.text.trim();
-    if (path.isEmpty) return;
+    if (path.isEmpty || _ingesting) return;
+    setState(() => _ingesting = true);
     final r = await widget.bridge.docsIngest(path);
+    if (!mounted) return;
+    setState(() => _ingesting = false);
     _pathCtrl.clear();
-    if (r['error'] != null && mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('${r['error']}')));
-    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r['error'] != null
+            ? '${r['error']}'
+            : 'Ingested — sections are searchable now')));
     await _load();
   }
 
@@ -1333,7 +1366,12 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Documents')),
+      appBar: AppBar(title: const Text('Documents'), actions: [
+        IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _load),
+      ]),
       body: _loading
           ? _listSkeleton(context)
           : Column(children: [
@@ -1364,9 +1402,16 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                   ),
                   const SizedBox(width: 8),
                   FilledButton.icon(
-                      onPressed: _ingest,
-                      icon: const Icon(Icons.upload_file),
-                      label: const Text('Ingest')),
+                      onPressed: _ingesting ? null : _ingest,
+                      icon: _ingesting
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2))
+                          : const Icon(Icons.upload_file),
+                      label:
+                          Text(_ingesting ? 'Ingesting…' : 'Ingest')),
                 ]),
               ),
               Padding(
@@ -1419,7 +1464,8 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                             title:
                                 Text('${d['title'] ?? 'Untitled'}'),
                             subtitle: Text(
-                                '${d['mime']}  •  ${d['sections']} sections'),
+                                '${d['mime']}  •  ${d['sections']} sections'
+                                '${d['created_at'] != null ? '  •  ${_fmtTs(d['created_at'])}' : ''}'),
                             trailing: IconButton(
                               icon: Icon(Icons.delete_outline,
                                   color: cs.error),
@@ -1616,9 +1662,18 @@ class _EmailScreenState extends State<EmailScreen> {
                                 : Icons.mark_email_unread_outlined),
                             title: Text(m['subject'] ?? '(No subject)',
                                 maxLines: 1,
-                                overflow: TextOverflow.ellipsis),
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    fontWeight:
+                                        (m['flags'] as List?)?.contains(
+                                                    '\\Seen') ==
+                                                true
+                                            ? FontWeight.normal
+                                            : FontWeight.w600)),
                             subtitle: Text(
-                                '${m['from'] ?? ''} — ${m['snippet'] ?? ''}',
+                                '${m['from'] ?? ''}'
+                                '${m['date'] != null ? ' · ${_fmtTs(m['date'])}' : ''}'
+                                ' — ${m['snippet'] ?? ''}',
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis),
                             onTap: () => _open(m));
