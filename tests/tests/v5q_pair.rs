@@ -132,7 +132,7 @@ fn pair_folder_exchange_end_to_end() {
         for h in [a, b] {
             let st = json(pai_sync_status(h));
             assert_eq!(st["peers"].as_u64().unwrap(), 1, "{st}");
-            assert_eq!(st["has_vault"].as_bool().unwrap(), true, "{st}");
+            assert!(st["has_vault"].as_bool().unwrap(), "{st}");
             assert_eq!(
                 st["dir"].as_str().unwrap(),
                 shared.to_string_lossy(),
@@ -170,8 +170,14 @@ fn pair_folder_without_sync_dir_errors() {
 #[test]
 fn pair_offer_bad_path_errors() {
     unsafe {
-        let h = init(&tmpdir("solo"));
-        let out = CString::new("Z:\\no\\such\\dir\\offer.pai").unwrap();
+        // A regular file as the parent dir fails on every OS (ENOTDIR)
+        // — a drive-letter path would be valid syntax elsewhere.
+        let dir = tmpdir("solo");
+        let h = init(&dir);
+        let blocker = dir.join("notadir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let bad = blocker.join("offer.pai").to_string_lossy().to_string();
+        let out = CString::new(bad).unwrap();
         let v = json(pai_pair_offer(h, out.as_ptr()));
         assert!(v["error"].as_str().is_some());
         pai_free(h);
@@ -190,6 +196,57 @@ fn init_reuses_persisted_identity() {
         // Same data dir → same device across inits (pairing targets a
         // stable identity).
         assert_eq!(status_a["device"], status_b["device"]);
+        pai_free(b);
+    }
+}
+
+/// QR render path: the FFI produces a scannable matrix whose payload
+/// is the complete signed message — the offer QR payload drives accept
+/// directly, and the accept payload completes via the file path.
+#[test]
+fn pair_qr_payload_roundtrip() {
+    unsafe {
+        let dir_a = tmpdir("qa");
+        let dir_b = tmpdir("qb");
+        let a = init(&dir_a);
+        let b = init(&dir_b);
+
+        let req = CString::new(r#"{"mode":"offer"}"#).unwrap();
+        let v = json(pai_pair_qr(a, req.as_ptr()));
+        assert!(v["error"].is_null(), "offer qr: {v}");
+        let offer = v["payload"].as_str().unwrap().to_string();
+        let n = v["size"].as_u64().unwrap() as usize;
+        let rows = v["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), n, "matrix row count == size");
+        assert!(rows.iter().all(|r| r.as_str().unwrap().len() == n));
+        // Finder squares anchor all three corners (7x7 dark ring edge).
+        let dark = |x: usize, y: usize| rows[y].as_str().unwrap().as_bytes()[x] == b'1';
+        for (cx, cy) in [(0, 0), (n - 7, 0), (0, n - 7)] {
+            for d in 0..7 {
+                assert!(dark(cx + d, cy) && dark(cx + d, cy + 6));
+                assert!(dark(cx, cy + d) && dark(cx + 6, cy + d));
+            }
+        }
+
+        let req = CString::new(serde_json::json!({"mode": "accept", "offer": offer}).to_string())
+            .unwrap();
+        let v = json(pai_pair_qr(b, req.as_ptr()));
+        assert!(v["error"].is_null(), "accept qr: {v}");
+        let accept = v["payload"].as_str().unwrap().to_string();
+
+        let apath = dir_a.join("accept.pai");
+        std::fs::write(&apath, &accept).unwrap();
+        let acp = CString::new(apath.to_string_lossy().to_string()).unwrap();
+        let v = json(pai_pair_complete(a, acp.as_ptr()));
+        assert!(v["error"].is_null(), "complete: {v}");
+
+        // Bad payloads reject cleanly.
+        let req =
+            CString::new(serde_json::json!({"mode": "accept", "offer": "{}"}).to_string()).unwrap();
+        let v = json(pai_pair_qr(b, req.as_ptr()));
+        assert!(v["error"].as_str().is_some(), "{v}");
+
+        pai_free(a);
         pai_free(b);
     }
 }

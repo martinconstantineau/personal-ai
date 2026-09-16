@@ -143,6 +143,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AudioCmd,
     },
+    /// Media generation — audio/image/video via the configured
+    /// providers or a paired `media-run` device.
+    Media {
+        #[command(subcommand)]
+        cmd: MediaCmd,
+    },
     /// Background tasks — synced across devices; a due task is claimed by
     /// one device under a lease so it doesn't run everywhere at once.
     Task {
@@ -186,6 +192,44 @@ enum Cmd {
     },
 }
 
+/// `app.user.devices` name layer: slugify a display name into the DNS
+/// label the gateway recognizes (`Alice's phone` -> `alice-s-phone`).
+fn name_slug(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut dash = false;
+    for c in s.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            dash = false;
+        } else if !dash && !out.is_empty() {
+            out.push('-');
+            dash = true;
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// Host-header name route — `<app>.<user>.devices` (port ignored)
+/// resolves to app id `app` when `<user>` is this device's user slug.
+/// The app id may itself be dotted (`com.example.app`).
+fn parse_app_name(host: &str, user_slug: &str) -> Option<String> {
+    let host = host
+        .split(':')
+        .next()
+        .unwrap_or(host)
+        .trim_end_matches('.')
+        .to_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 3 || *labels.last()? != "devices" {
+        return None;
+    }
+    if labels[labels.len() - 2] != user_slug {
+        return None;
+    }
+    let app = labels[..labels.len() - 2].join(".");
+    (!app.is_empty()).then_some(app)
+}
+
 #[derive(Subcommand)]
 enum AppsCmd {
     /// Scaffold a new app source project (manifest.toml + Rust wasm
@@ -211,6 +255,15 @@ enum AppsCmd {
     },
     /// List installed apps.
     List,
+    /// Emit hosts-file lines: `<ip> <app>.<user>.devices` for every
+    /// serve-enabled app — append to /etc/hosts (or feed a Tailscale
+    /// nameserver) so `http://app.user.devices` URLs resolve here.
+    Names {
+        /// IP the names should point at (default 127.0.0.1 — the local
+        /// `pai serve` gateway). For a shared/LAN gateway pass its IP.
+        #[arg(long)]
+        ip: Option<String>,
+    },
     /// Sign a package in place with this device's key (writes
     /// signature.bin over manifest + content digest).
     Sign {
@@ -700,6 +753,10 @@ enum PairCmd {
     Offer {
         #[arg(long)]
         out: String,
+        /// Also print the offer as a QR code — the other device scans
+        /// it instead of receiving the file.
+        #[arg(long)]
+        qr: bool,
     },
     /// Accept an offer file; writes the signed accept (carries the vault
     /// key sealed to the offerer).
@@ -707,6 +764,10 @@ enum PairCmd {
         offer: String,
         #[arg(long)]
         out: String,
+        /// Also print the accept as a QR code — the offering device
+        /// scans it instead of receiving the file back.
+        #[arg(long)]
+        qr: bool,
     },
     /// Complete pairing from an accept file; installs the vault key.
     Complete { accept: String },
@@ -1029,6 +1090,65 @@ enum AudioCmd {
         #[arg(long, default_value = "10")]
         seconds: u32,
         /// Output path; default <data_dir>/media/audio-<ts>.wav
+        #[arg(long)]
+        out: Option<String>,
+        /// Run on a paired device (id prefix or "any" = best advertised
+        /// media-run peer). Needs --dir or --relay for the transport.
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// List recent media jobs (local + executed-for-peers rows).
+    Jobs,
+}
+
+#[derive(Subcommand)]
+enum MediaCmd {
+    /// Show configured media providers (audio/image/video) and reachability.
+    Status,
+    /// Write media.json: generation server URLs.
+    Configure {
+        /// Audio-gen base URL (POST /generate {prompt,duration_seconds}
+        /// → WAV), e.g. services/media-gen or a MusicGen/stable-audio
+        /// wrapper. Also PAI_AUDIO_GEN_URL.
+        #[arg(long)]
+        audio_gen_url: Option<String>,
+        /// Image-gen base URL. Also PAI_IMAGE_GEN_URL.
+        #[arg(long)]
+        image_gen_url: Option<String>,
+        /// Image adapter: `sdcpp` (default — stable-diffusion.cpp's
+        /// OpenAI /v1/images/generations) or `onnx` (minimal
+        /// POST /generate → PNG convention).
+        #[arg(long)]
+        image_backend: Option<String>,
+        /// Video-gen base URL (async job contract: POST /generate →
+        /// {job_id}, GET /jobs/{id} → {status,result_b64}).
+        /// Also PAI_VIDEO_GEN_URL.
+        #[arg(long)]
+        video_gen_url: Option<String>,
+    },
+    /// Generate media from a text prompt → writes a file.
+    Gen {
+        /// audio | image | image-edit | upscale | video
+        #[arg(long, default_value = "audio")]
+        kind: String,
+        prompt: String,
+        /// Audio/video duration, seconds (clamped 1–300).
+        #[arg(long, default_value = "10")]
+        seconds: u32,
+        #[arg(long)]
+        width: Option<u32>,
+        #[arg(long)]
+        height: Option<u32>,
+        /// Source image file (image-edit / upscale kinds).
+        #[arg(long)]
+        input: Option<String>,
+        /// Output path; default <data_dir>/media/<kind>-<ts>.<ext>
         #[arg(long)]
         out: Option<String>,
         /// Run on a paired device (id prefix or "any" = best advertised
@@ -1650,6 +1770,36 @@ fn place_weights(store: &Arc<Store>) -> Box<dyn Fn(&DeviceId) -> i64 + Send + Sy
     })
 }
 
+/// Render `payload` as a QR in the terminal — two modules per
+/// character via half-blocks, 2-module quiet zone.
+fn print_qr(payload: &str) -> Result<()> {
+    let code = qrcode::QrCode::new(payload.as_bytes())
+        .map_err(|e| Error::Other(format!("qr encode (payload {}B): {e}", payload.len())))?;
+    let w = code.width();
+    let colors = code.to_colors();
+    let at = |x: i32, y: i32| -> bool {
+        if x < 0 || y < 0 || x >= w as i32 || y >= w as i32 {
+            false
+        } else {
+            colors[y as usize * w + x as usize] == qrcode::Color::Dark
+        }
+    };
+    for y in ((-2)..(w as i32 + 2)).step_by(2) {
+        let mut line = String::with_capacity(w + 8);
+        for x in -2..(w as i32 + 2) {
+            let ch = match (at(x, y), at(x, y + 1)) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            };
+            line.push(ch);
+        }
+        println!("{line}");
+    }
+    Ok(())
+}
+
 fn resolve_peer(store: &Store, prefix: &str) -> Result<DeviceId> {
     use pai_sync::pair;
     let peers = pair::list_peers(store)?;
@@ -1740,9 +1890,10 @@ async fn guest_call(
 struct BrokerOps {
     stt: Option<pai_voice::WhisperServerStt>,
     tts: Option<pai_voice::PiperTts>,
-    /// Audio-generation provider — when Some, the device advertises
-    /// `media-run` and executes generation jobs for vault members.
-    audio_gen: Option<pai_media::providers::HttpAudioGen>,
+    /// Any media-generation backend reachable — the device advertises
+    /// `media-run` and executes generation jobs for vault members
+    /// (the op itself dispatches to audio/image/video by `kind`).
+    has_media: bool,
     server_url: String,
     model: String,
     data_dir: std::path::PathBuf,
@@ -1778,7 +1929,7 @@ impl BrokerOps {
         if self.tts.is_some() {
             v.push("tts".into());
         }
-        if self.audio_gen.is_some() {
+        if self.has_media {
             v.push("media-run".into());
         }
         v
@@ -1967,8 +2118,9 @@ async fn broker_ops(
         .await
         .map(|v| (v.stt, v.tts))
         .unwrap_or((None, None));
-    let audio_gen =
-        pai_media::providers::detect(&cfg.data_dir, std::time::Duration::from_secs(2)).await;
+    let has_media =
+        pai_media::providers::any_media_backend(&cfg.data_dir, std::time::Duration::from_secs(2))
+            .await;
     let model = cli
         .model
         .clone()
@@ -1976,7 +2128,7 @@ async fn broker_ops(
     BrokerOps {
         stt,
         tts,
-        audio_gen,
+        has_media,
         server_url: cfg.inference.local_server_url.clone(),
         model,
         data_dir: cfg.data_dir.clone(),
@@ -2049,6 +2201,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             println!("run it: `pai apps run {}`", pkg.manifest.app_id());
         }
         Cmd::Audio { cmd } => run_audio_cmds(cmd, &cfg, &store, &device).await?,
+        Cmd::Media { cmd } => run_media_cmds(cmd, &cfg, &store, &device).await?,
         Cmd::Apps { cmd } => match cmd {
             AppsCmd::Init { name, dir } => {
                 let base = match dir {
@@ -2075,6 +2228,31 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     println!("signed by device {:.8}", device.id);
                 }
                 println!("deploy:  pai deploy {}", pkg_dir.display());
+            }
+            AppsCmd::Names { ip } => {
+                // `app.user.devices` hosts-file lines — one per
+                // serve-enabled app. Append to /etc/hosts (Linux/macOS),
+                // C:\Windows\System32\drivers\etc\hosts, or the lines a
+                // Tailscale/MagicDNS-style nameserver would serve.
+                let ip = ip.as_deref().unwrap_or("127.0.0.1");
+                let slug = name_slug(&user.display_name);
+                let mut any = false;
+                for (id, m) in pai_apps::AppRegistry::new(&cfg.data_dir)
+                    .list()
+                    .map_err(|e| Error::Storage(e.to_string()))?
+                {
+                    if m.app.serve {
+                        println!("{ip:<15}  {id}.{slug}.devices");
+                        any = true;
+                    }
+                }
+                if !any {
+                    println!("(no serve-enabled apps — mark `serve = true` in manifest.toml)");
+                } else {
+                    eprintln!(
+                        "# append to your hosts file, then open http://<app>.{slug}.devices[:port]"
+                    );
+                }
             }
             AppsCmd::List => {
                 let apps = pai_apps::AppRegistry::new(&cfg.data_dir)
@@ -3062,14 +3240,21 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             }
         },
         Cmd::Pair { cmd } => match cmd {
-            PairCmd::Offer { out } => {
+            PairCmd::Offer { out, qr } => {
                 let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
                 let m = pair::make_offer(&device, &agree, &ids, &key_dir)?;
                 pair::write_message(&m, std::path::Path::new(out))?;
                 println!("offer for '{}' written to {out}", device.name);
-                println!("send it to the other device: pai pair accept {out} --out accept.pai");
+                if *qr {
+                    let payload =
+                        serde_json::to_string(&m).map_err(|e| Error::Sync(e.to_string()))?;
+                    print_qr(&payload)?;
+                    println!("scan me with the other device's camera");
+                } else {
+                    println!("send it to the other device: pai pair accept {out} --out accept.pai");
+                }
             }
-            PairCmd::Accept { offer, out } => {
+            PairCmd::Accept { offer, out, qr } => {
                 let offer = pair::read_message(std::path::Path::new(offer))?;
                 let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
                 let m = pair::accept_offer(
@@ -3087,7 +3272,14 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     offer.name,
                     &offer.device_id[..8.min(offer.device_id.len())]
                 );
-                println!("return it to the offering device: pai pair complete {out}");
+                if *qr {
+                    let payload =
+                        serde_json::to_string(&m).map_err(|e| Error::Sync(e.to_string()))?;
+                    print_qr(&payload)?;
+                    println!("scan me with the offering device");
+                } else {
+                    println!("return it to the offering device: pai pair complete {out}");
+                }
             }
             PairCmd::Complete { accept } => {
                 let accept = pair::read_message(std::path::Path::new(accept))?;
@@ -3479,7 +3671,12 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
         } => {
             let http = tiny_http::Server::http(bind)
                 .map_err(|e| Error::Other(format!("serve bind {bind}: {e}")))?;
+            let user_slug = name_slug(&user.display_name);
             println!("serving apps on http://{bind}/apps/<app-id>/<path> — ctrl-c to stop");
+            println!(
+                "name layer: http://<app>.{user_slug}.devices[:port] — \
+                 `pai apps names` emits hosts-file lines"
+            );
             let cx = ServeCtx {
                 data_dir: cfg.data_dir.clone(),
                 store: store.clone(),
@@ -3487,6 +3684,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 dir: dir.clone(),
                 relay: relay.clone(),
                 token: token.clone(),
+                user_slug,
             };
             let rt = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
@@ -3729,42 +3927,21 @@ async fn run_voice_cmds(cmd: &VoiceCmd, ctx: &Ctx, cfg: &pai_config::Config) -> 
 
 /// `pai audio …` — audio-generation provider config + generation.
 /// Needs only config + the provider endpoint (no inference stack), so it
-/// lives on the light command path.
+/// lives on the light command path. Sugar over `pai media`.
 async fn run_audio_cmds(
     cmd: &AudioCmd,
     cfg: &pai_config::Config,
     store: &Arc<Store>,
     device: &Device,
 ) -> Result<()> {
-    use pai_inference::AudioGenerationProvider;
-    match cmd {
-        AudioCmd::Status => {
-            let c = pai_media::providers::MediaConfig::load(&cfg.data_dir)?;
-            let url = c
-                .audio_gen_url
-                .clone()
-                .or_else(|| std::env::var("PAI_AUDIO_GEN_URL").ok())
-                .unwrap_or_else(|| pai_media::providers::DEFAULT_AUDIO_GEN_URL.to_string());
-            let p =
-                pai_media::providers::HttpAudioGen::detect(&url, std::time::Duration::from_secs(2))
-                    .await;
-            println!(
-                "audio-gen server: {}",
-                if p.is_some() {
-                    format!("reachable at {url}")
-                } else {
-                    format!("NOT reachable ({url}) — set `pai audio configure --audio-gen-url` or PAI_AUDIO_GEN_URL")
-                }
-            );
-        }
-        AudioCmd::Configure { audio_gen_url } => {
-            let mut c = pai_media::providers::MediaConfig::load(&cfg.data_dir)?;
-            if let Some(u) = audio_gen_url {
-                c.audio_gen_url = Some(u.clone());
-            }
-            c.save(&cfg.data_dir)?;
-            println!("media.json written — `pai audio status` to verify");
-        }
+    let m = match cmd {
+        AudioCmd::Status => MediaCmd::Status,
+        AudioCmd::Configure { audio_gen_url } => MediaCmd::Configure {
+            audio_gen_url: audio_gen_url.clone(),
+            image_gen_url: None,
+            image_backend: None,
+            video_gen_url: None,
+        },
         AudioCmd::Gen {
             prompt,
             seconds,
@@ -3773,18 +3950,153 @@ async fn run_audio_cmds(
             dir,
             relay,
             token,
+        } => MediaCmd::Gen {
+            kind: "audio".into(),
+            prompt: prompt.clone(),
+            seconds: *seconds,
+            width: None,
+            height: None,
+            input: None,
+            out: out.clone(),
+            device: on.clone(),
+            dir: dir.clone(),
+            relay: relay.clone(),
+            token: token.clone(),
+        },
+        AudioCmd::Jobs => MediaCmd::Jobs,
+    };
+    run_media_cmds(&m, cfg, store, device).await
+}
+
+/// `pai media …` — media generation (audio/image/video) provider
+/// config + generation. Needs only config + the provider endpoints,
+/// so it lives on the light command path.
+async fn run_media_cmds(
+    cmd: &MediaCmd,
+    cfg: &pai_config::Config,
+    store: &Arc<Store>,
+    device: &Device,
+) -> Result<()> {
+    use base64::Engine as _;
+    match cmd {
+        MediaCmd::Status => {
+            let c = pai_media::providers::MediaConfig::load(&cfg.data_dir)?;
+            let t = std::time::Duration::from_secs(2);
+            let audio = pai_media::providers::detect(&cfg.data_dir, t).await;
+            let image = pai_media::providers::detect_image(&cfg.data_dir, t).await;
+            let video = pai_media::providers::detect_video(&cfg.data_dir, t).await;
+            let report = |name: &str, url: Option<String>, up: bool| {
+                let at = url.unwrap_or_else(|| "(unset)".into());
+                println!(
+                    "{name}: {}",
+                    if up {
+                        format!("reachable at {at}")
+                    } else {
+                        format!("not reachable ({at})")
+                    }
+                );
+            };
+            report("audio", c.audio_gen_url.clone(), audio.is_some());
+            report("image", c.image_gen_url.clone(), image.is_some());
+            report("video", c.video_gen_url.clone(), video.is_some());
+            if audio.is_none() && image.is_none() && video.is_none() {
+                println!(
+                    "none reachable — `pai media configure` sets URLs (defaults from env); \
+                     services/media-gen is the bundled reference backend"
+                );
+            }
+        }
+        MediaCmd::Configure {
+            audio_gen_url,
+            image_gen_url,
+            image_backend,
+            video_gen_url,
         } => {
+            let mut c = pai_media::providers::MediaConfig::load(&cfg.data_dir)?;
+            if let Some(u) = audio_gen_url {
+                c.audio_gen_url = Some(u.clone());
+            }
+            if let Some(u) = image_gen_url {
+                c.image_gen_url = Some(u.clone());
+            }
+            if let Some(b) = image_backend {
+                if b != "sdcpp" && b != "onnx" {
+                    return Err(Error::InvalidInput(
+                        "--image-backend must be `sdcpp` or `onnx`".into(),
+                    ));
+                }
+                c.image_backend = Some(b.clone());
+            }
+            if let Some(u) = video_gen_url {
+                c.video_gen_url = Some(u.clone());
+            }
+            c.save(&cfg.data_dir)?;
+            println!("media.json written — `pai media status` to verify");
+        }
+        MediaCmd::Gen {
+            kind,
+            prompt,
+            seconds,
+            width,
+            height,
+            input,
+            out,
+            device: on,
+            dir,
+            relay,
+            token,
+        } => {
+            let k = pai_media::jobs::kind_from_str(kind)
+                .map_err(|_| Error::InvalidInput(format!("unknown media kind: {kind}")))?;
             let secs = (*seconds).clamp(1, 300);
-            let out_path = |data_dir: &std::path::Path| match out {
-                Some(o) => Ok(std::path::PathBuf::from(o)),
-                None => {
-                    let dir = data_dir.join("media");
-                    std::fs::create_dir_all(&dir).map_err(|e| Error::Storage(e.to_string()))?;
-                    Ok(dir.join(format!("audio-{}.wav", pai_core::now().timestamp_millis())))
+            let size = (width.unwrap_or(512), height.unwrap_or(512));
+            let input_bytes = match input {
+                Some(p) => {
+                    let bytes = std::fs::read(p).map_err(|e| Error::Storage(e.to_string()))?;
+                    let mime = match std::path::Path::new(p)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .as_str()
+                    {
+                        "png" => "image/png",
+                        "jpg" | "jpeg" => "image/jpeg",
+                        "webp" => "image/webp",
+                        _ => "application/octet-stream",
+                    };
+                    Some((bytes, mime.to_string()))
+                }
+                None => None,
+            };
+            let out_path = |data_dir: &std::path::Path, mime: &str| -> Result<std::path::PathBuf> {
+                match out {
+                    Some(o) => Ok(std::path::PathBuf::from(o)),
+                    None => {
+                        let dir = data_dir.join("media");
+                        std::fs::create_dir_all(&dir).map_err(|e| Error::Storage(e.to_string()))?;
+                        let ext = match mime {
+                            "image/png" => "png",
+                            "video/mp4" => "mp4",
+                            _ => "wav",
+                        };
+                        Ok(dir.join(format!(
+                            "{}-{}.{}",
+                            kind,
+                            pai_core::now().timestamp_millis(),
+                            ext
+                        )))
+                    }
                 }
             };
-            let mut job = pai_media::jobs::new_job(pai_media::MediaJobKind::TextToAudio, prompt);
-            let params = serde_json::json!({"duration_seconds": secs}).to_string();
+            let mut job = pai_media::jobs::new_job(k, prompt);
+            let params = serde_json::json!({
+                "kind": kind,
+                "duration_seconds": secs,
+                "size": [size.0, size.1],
+                "has_input": input_bytes.is_some(),
+            })
+            .to_string();
             pai_media::jobs::record(store, &job, Some(&params), Some(device.id), None)?;
 
             if let Some(dev) = on {
@@ -3810,13 +4122,21 @@ async fn run_audio_cmds(
                     job.state = pai_media::JobState::Running;
                     job.placement_device = Some(to);
                     pai_media::jobs::record(store, &job, Some(&params), Some(device.id), None)?;
-                    let payload = serde_json::json!({
+                    let mut payload = serde_json::json!({
                         "prompt": prompt,
+                        "kind": kind,
                         "duration_seconds": secs,
-                    })
-                    .to_string()
-                    .into_bytes();
-                    println!("generating {secs}s on {to} — this can take a while…");
+                        "width": size.0,
+                        "height": size.1,
+                    });
+                    if let Some((bytes, mime)) = &input_bytes {
+                        payload["input_b64"] = serde_json::Value::String(
+                            base64::engine::general_purpose::STANDARD.encode(bytes),
+                        );
+                        payload["input_mime"] = serde_json::Value::String(mime.clone());
+                    }
+                    let payload = payload.to_string().into_bytes();
+                    println!("generating {kind} on {to} — this can take a while…");
                     client
                         .call(
                             to,
@@ -3830,19 +4150,22 @@ async fn run_audio_cmds(
 
                 match result {
                     Ok(resp) => {
-                        use base64::Engine as _;
                         let v: serde_json::Value = serde_json::from_slice(&resp)
                             .map_err(|e| Error::Other(format!("bad media-run reply: {e}")))?;
-                        let bytes = v["audio_b64"]
+                        let b64 = v["result_b64"]
                             .as_str()
-                            .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+                            .or_else(|| v["audio_b64"].as_str())
                             .ok_or_else(|| {
-                                Error::Other("media-run reply missing audio_b64".into())
+                                Error::Other("media-run reply missing result_b64".into())
                             })?;
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .map_err(|e| Error::Other(e.to_string()))?;
+                        let mime = v["mime"].as_str().unwrap_or("audio/wav").to_string();
                         job.state = pai_media::JobState::Done;
                         job.result_blob = Some(store.put_blob(&bytes)?);
                         pai_media::jobs::record(store, &job, Some(&params), Some(device.id), None)?;
-                        let path = out_path(&cfg.data_dir)?;
+                        let path = out_path(&cfg.data_dir, &mime)?;
                         std::fs::write(&path, &bytes).map_err(|e| Error::Storage(e.to_string()))?;
                         println!(
                             "{} → {} bytes (job {} on {})",
@@ -3865,24 +4188,24 @@ async fn run_audio_cmds(
                     }
                 }
             } else {
-                let gen =
-                    pai_media::providers::detect(&cfg.data_dir, std::time::Duration::from_secs(2))
-                        .await
-                        .ok_or_else(|| {
-                            Error::Provider(
-                                "audio-gen server unreachable — `pai audio status` for diagnostics"
-                                    .into(),
-                            )
-                        })?;
                 job.state = pai_media::JobState::Running;
                 job.placement_device = Some(device.id);
-                println!("generating {secs}s — this can take a while…");
-                match gen.generate_audio(prompt, secs).await {
-                    Ok(bytes) => {
+                println!("generating {kind} — this can take a while…");
+                match pai_media::providers::generate(
+                    &cfg.data_dir,
+                    k,
+                    prompt,
+                    secs,
+                    size,
+                    input_bytes,
+                )
+                .await
+                {
+                    Ok((bytes, mime)) => {
                         job.state = pai_media::JobState::Done;
                         job.result_blob = Some(store.put_blob(&bytes)?);
                         pai_media::jobs::record(store, &job, Some(&params), Some(device.id), None)?;
-                        let path = out_path(&cfg.data_dir)?;
+                        let path = out_path(&cfg.data_dir, mime)?;
                         std::fs::write(&path, &bytes).map_err(|e| Error::Storage(e.to_string()))?;
                         println!("{} → {} bytes", path.display(), bytes.len());
                     }
@@ -3900,7 +4223,7 @@ async fn run_audio_cmds(
                 }
             }
         }
-        AudioCmd::Jobs => {
+        MediaCmd::Jobs => {
             for j in pai_media::jobs::list(store, 20)? {
                 println!(
                     "{} {} [{}] {} {}",
@@ -4819,6 +5142,7 @@ async fn main() -> Result<()> {
             | Cmd::Mesh { .. }
             | Cmd::Serve { .. }
             | Cmd::Audio { .. }
+            | Cmd::Media { .. }
     ) {
         return run_sync_cmds(&cli).await;
     }
@@ -5272,7 +5596,8 @@ async fn main() -> Result<()> {
         | Cmd::Apps { .. }
         | Cmd::Mesh { .. }
         | Cmd::Serve { .. }
-        | Cmd::Audio { .. } => {
+        | Cmd::Audio { .. }
+        | Cmd::Media { .. } => {
             unreachable!("handled before build")
         }
     }
@@ -5288,6 +5613,9 @@ struct ServeCtx {
     dir: Option<String>,
     relay: Option<String>,
     token: Option<String>,
+    /// Local user's `app.user.devices` slug — Host-header routing only
+    /// answers names in this namespace.
+    user_slug: String,
 }
 
 fn serve_response(
@@ -5313,10 +5641,21 @@ fn serve_request(
     use std::io::Read as _;
     let b64 = base64::engine::general_purpose::STANDARD;
     let url = req.url().to_string();
-    let (path, query) = match url.split_once('?') {
+    let (mut path, query) = match url.split_once('?') {
         Some((a, b)) => (a.to_string(), b.to_string()),
         None => (url, String::new()),
     };
+    // `app.user.devices` name layer — a Host like
+    // `notes.alice.devices` routes `/x` to `/apps/notes/x`, so names
+    // stay valid no matter which device the app is placed on.
+    if let Some(app) = req
+        .headers()
+        .iter()
+        .find(|h| h.field.to_string().eq_ignore_ascii_case("host"))
+        .and_then(|h| parse_app_name(h.value.as_str(), &cx.user_slug))
+    {
+        path = format!("/apps/{app}{path}");
+    }
     if path == "/" || path == "/apps" || path == "/apps/" {
         // Index: apps that opted into serving.
         let reg = pai_apps::AppRegistry::new(&cx.data_dir);
@@ -5475,4 +5814,34 @@ fn serve_request(
         }
     }
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_slug_makes_dns_labels() {
+        assert_eq!(name_slug("Alice"), "alice");
+        assert_eq!(name_slug("Martin C."), "martin-c");
+        assert_eq!(name_slug("Alice's phone"), "alice-s-phone");
+        assert_eq!(name_slug("  spaced  out  "), "spaced-out");
+    }
+
+    #[test]
+    fn app_name_resolves_own_namespace() {
+        assert_eq!(
+            parse_app_name("notes.martin.devices", "martin"),
+            Some("notes".into())
+        );
+        // Port + trailing dot tolerated.
+        assert_eq!(
+            parse_app_name("com.example.app.martin.devices:8787", "martin"),
+            Some("com.example.app".into())
+        );
+        // Other users' namespace isn't answered here.
+        assert_eq!(parse_app_name("notes.bob.devices", "martin"), None);
+        assert_eq!(parse_app_name("localhost", "martin"), None);
+        assert_eq!(parse_app_name("a.b", "martin"), None);
+    }
 }

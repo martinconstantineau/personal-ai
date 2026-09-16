@@ -1753,6 +1753,7 @@ dependencies = [
  "pai-vision",
  "pai-voice",
  "pai-workflows",
+ "qrcode",
  "rpassword",
  "rusqlite",
  "serde",
@@ -1945,6 +1946,7 @@ dependencies = [
  "pai-tools",
  "pai-vision",
  "pai-voice",
+ "qrcode",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2047,6 +2049,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "uuid",
 ]
 
@@ -2390,6 +2393,12 @@ dependencies = [
  "version_check",
  "yansi",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quinn"

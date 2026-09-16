@@ -143,7 +143,14 @@ pub trait ImageUnderstandingProvider: Send + Sync {
 #[async_trait]
 pub trait ImageGenerationProvider: Send + Sync {
     fn id(&self) -> &'static str;
-    async fn generate_image(&self, prompt: &str, size: (u32, u32)) -> Result<Vec<u8>>;
+    /// `input` carries an optional source image (bytes + mime) for
+    /// edit/upscale kinds.
+    async fn generate_image(
+        &self,
+        prompt: &str,
+        size: (u32, u32),
+        input: Option<(&[u8], &str)>,
+    ) -> Result<Vec<u8>>;
 }
 
 #[async_trait]

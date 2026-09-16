@@ -125,6 +125,9 @@ class PaiClient {
       Pointer<Utf8> Function(Pointer<Void>)>('pai_sync_status');
   late final _pairFolder = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_pair_folder');
+  late final _pairQr = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
+      'pai_pair_qr');
   late final _mediaList = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_media_list');
   late final _mediaGen = _lib.lookupFunction<_SendNative,
@@ -156,6 +159,9 @@ class PaiClient {
       'pai_apps_migrate');
   late final _peersList = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_peers_list');
+  late final _devicesPlacement = _lib.lookupFunction<_NoArgNative,
+          Pointer<Utf8> Function(Pointer<Void>)>(
+      'pai_devices_placement');
   late final _shareGrant = _lib.lookupFunction<_ShareGrantNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, int,
           Pointer<Utf8>)>('pai_share_grant');
@@ -376,8 +382,12 @@ class PaiClient {
       _call2(_appsMigrate, id, to);
 
   /// Paired peer devices: {peers: [{id, name, platform}]}.
+  Map<String, dynamic> pairQr(String requestJson) =>
+      _call1(_pairQr, requestJson);
   Map<String, dynamic> peersList() =>
       _json(_peersList(_handle)) as Map<String, dynamic>;
+  Map<String, dynamic> devicesPlacement() =>
+      _json(_devicesPlacement(_handle)) as Map<String, dynamic>;
 
   /// Mint a capability token for [id] — the guest's credential.
   /// [actions] like `exec,read`; [forDevice] (a paired-peer prefix or

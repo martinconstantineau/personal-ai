@@ -23,8 +23,7 @@ use pai_agent::{
 };
 use pai_core::*;
 use pai_inference::{
-    AudioGenerationProvider, EchoProvider, LlamaServerProvider, SpeechToTextProvider,
-    TextToSpeechProvider,
+    EchoProvider, LlamaServerProvider, SpeechToTextProvider, TextToSpeechProvider,
 };
 use pai_memory::{MemoryBackend, MemoryScopeQuery, RecallQuery, SqliteMemory};
 use pai_models::ModelManager;
@@ -412,10 +411,15 @@ pub unsafe extern "C" fn pai_init(config_json: *const c_char) -> *mut PaiRuntime
         Ok(c) => c,
         Err(_) => return std::ptr::null_mut(),
     };
+    let data_dir = cfg.data_dir.clone();
     match init_runtime(cfg) {
         Ok(rt) => Box::into_raw(Box::new(rt)),
         Err(e) => {
             eprintln!("pai_init failed: {e}");
+            let _ = std::fs::write(
+                std::path::Path::new(&data_dir).join("init.err"),
+                format!("{e}"),
+            );
             std::ptr::null_mut()
         }
     }
@@ -1194,7 +1198,7 @@ pub unsafe extern "C" fn pai_email_configure(
     let rt = &mut *handle;
     let c: CfgIn = match read_str(config_json)
         .map_err(|e| e.to_string())
-        .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+        .and_then(|s| serde_json::from_str(s).map_err(|e| e.to_string()))
     {
         Ok(c) => c,
         Err(e) => return to_c(serde_json::json!({"error": e})),
@@ -1556,7 +1560,7 @@ pub unsafe extern "C" fn pai_models_serve(
     };
     let port = if port > 0 { port as u16 } else { 8090 };
     let mgr = ModelManager::new(rt.store.clone(), std::path::Path::new(&rt.data_dir));
-    let path = match mgr.locate(&slug) {
+    let path = match mgr.locate(slug) {
         Ok(Some(p)) => p,
         Ok(None) => {
             return to_c(serde_json::json!({
@@ -1617,7 +1621,7 @@ pub unsafe extern "C" fn pai_models_serve(
     }
     *rt.llama_child.lock().unwrap() = Some(child);
     *rt.serving_slug.lock().unwrap() = Some(slug.to_string());
-    apply_provider(rt, &url, &slug);
+    apply_provider(rt, &url, slug);
     let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
     e.device = Some(rt.device);
     e.detail = serde_json::json!({"served_model": slug, "url": url});
@@ -1675,7 +1679,7 @@ pub unsafe extern "C" fn pai_models_install(
         #[serde(default)]
         dest_dir: Option<String>,
     }
-    let req: Req = match serde_json::from_str(&raw) {
+    let req: Req = match serde_json::from_str(raw) {
         Ok(r) => r,
         Err(e) => return to_c(serde_json::json!({"error": format!("bad JSON: {e}")})),
     };
@@ -2002,7 +2006,7 @@ pub unsafe extern "C" fn pai_sync_now(handle: *mut PaiRuntime, json: *const c_ch
         #[serde(default)]
         auto_minutes: Option<u64>,
     }
-    let req: Req = match serde_json::from_str(&raw) {
+    let req: Req = match serde_json::from_str(raw) {
         Ok(r) => r,
         Err(e) => return to_c(serde_json::json!({"error": format!("bad JSON: {e}")})),
     };
@@ -2141,6 +2145,91 @@ pub unsafe extern "C" fn pai_pair_complete(
     .unwrap_or_else(|e| to_c(serde_json::json!({"error": e.to_string()})))
 }
 
+/// Pairing via QR: `json` is `{"mode": "offer"}` — produces this
+/// device's offer payload — or `{"mode": "accept", "offer": "<json>"}`
+/// — consumes an offer payload (e.g. scanned from the other device's
+/// QR) and produces the accept payload to show back. Returns
+/// `{payload, size, rows}` where `rows` is the QR bit matrix as '0'/'1'
+/// strings (dark modules = '1'); render it with any square-grid painter.
+/// # Safety
+/// `handle` must come from `pai_init`; `json` is NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_pair_qr(handle: *mut PaiRuntime, json: *const c_char) -> *mut c_char {
+    let rt = &mut *handle;
+    #[derive(serde::Deserialize)]
+    struct Req {
+        mode: Option<String>,
+        offer: Option<String>,
+    }
+    let req: Req = match read_str(json)
+        .ok()
+        .and_then(|s| serde_json::from_str(s).ok())
+    {
+        Some(r) => r,
+        None => return to_c(serde_json::json!({"error": "bad json"})),
+    };
+    let dir = std::path::Path::new(&rt.data_dir);
+    let ids = pai_identity::IdentityStore::new(rt.store.clone());
+    let out = (|| -> Result<serde_json::Value> {
+        let agree = pai_sync::crypto::agreement_key(rt.device, dir)?;
+        let m = match req.mode.as_deref().unwrap_or("offer") {
+            "offer" => pai_sync::pair::make_offer(&rt.device_rec, &agree, &ids, &dir.join("keys"))?,
+            "accept" => {
+                let offer: pai_sync::pair::PairingMessage =
+                    serde_json::from_str(req.offer.as_deref().unwrap_or_default())
+                        .map_err(|e| Error::InvalidInput(format!("bad offer payload: {e}")))?;
+                pai_sync::pair::accept_offer(
+                    &rt.store,
+                    &offer,
+                    &rt.device_rec,
+                    &agree,
+                    &ids,
+                    &dir.join("keys"),
+                    dir,
+                )?
+            }
+            other => {
+                return Err(Error::InvalidInput(format!(
+                    "unknown qr mode '{other}' (offer|accept)"
+                )))
+            }
+        };
+        let payload = serde_json::to_string(&m).map_err(|e| Error::Sync(e.to_string()))?;
+        let code = qrcode::QrCode::new(payload.as_bytes())
+            .map_err(|e| Error::Other(format!("qr encode: {e}")))?;
+        let w = code.width();
+        let colors = code.to_colors(); // row-major, dark = true
+        let rows: Vec<String> = (0..w)
+            .map(|y| {
+                (0..w)
+                    .map(|x| {
+                        if colors[y * w + x] == qrcode::Color::Dark {
+                            '1'
+                        } else {
+                            '0'
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "payload": payload,
+            "size": w,
+            "rows": rows,
+        }))
+    })();
+    match out {
+        Ok(v) => {
+            let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+            e.device = Some(rt.device);
+            e.detail = serde_json::json!({"pair_qr": req.mode});
+            let _ = rt.audit.record(&e);
+            to_c(v)
+        }
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
 /// Pairing over the configured shared sync folder — one call performs
 /// the whole exchange step that's currently possible:
 /// publishes `offer-<id>.pai` under `<sync.dir>/pairing/`, accepts any
@@ -2178,46 +2267,62 @@ pub unsafe extern "C" fn pai_pair_folder(handle: *mut PaiRuntime) -> *mut c_char
         let offer =
             pai_sync::pair::make_offer(&rt.device_rec, &agree, &ids, &data_dir.join("keys"))?;
         pai_sync::pair::write_message(&offer, &pdir.join(format!("offer-{our_id}.pai")))?;
+        // Two passes: accepts first, then offers. Completing adopts the
+        // group vault; answering an offer first would mint a competing
+        // local vault and the later complete would conflict.
+        let mut accepts = Vec::new();
+        let mut offers = Vec::new();
         for entry in std::fs::read_dir(&pdir).map_err(pai_storage::store_err)? {
             let entry = entry.map_err(pai_storage::store_err)?;
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with(&format!("accept-{our_id}-")) {
-                match pai_sync::pair::read_message(&entry.path()).and_then(|m| {
-                    if known.contains(&m.device_id) {
-                        return Err(Error::InvalidInput("already paired".into()));
-                    }
-                    pai_sync::pair::complete_pairing(&rt.store, &m, &agree, data_dir)
-                        .map(|_| m.name)
-                }) {
-                    Ok(n) => completed.push(n),
-                    Err(e) if e.to_string().contains("already paired") => {}
-                    Err(_) => rejected.push(name),
-                }
+                accepts.push((name, entry.path()));
             } else if name.starts_with("offer-") {
-                match pai_sync::pair::read_message(&entry.path()).and_then(|m| {
-                    if m.device_id == our_id || known.contains(&m.device_id) {
-                        return Err(Error::InvalidInput("skip".into()));
-                    }
-                    pai_sync::pair::accept_offer(
-                        &rt.store,
-                        &m,
-                        &rt.device_rec,
-                        &agree,
-                        &ids,
-                        &data_dir.join("keys"),
-                        data_dir,
+                offers.push((name, entry.path()));
+            }
+        }
+        for (name, path) in accepts {
+            match pai_sync::pair::read_message(&path).and_then(|m| {
+                if known.contains(&m.device_id) {
+                    return Err(Error::InvalidInput("already paired".into()));
+                }
+                pai_sync::pair::complete_pairing(&rt.store, &m, &agree, data_dir).map(|_| m.name)
+            }) {
+                Ok(n) => completed.push(n),
+                Err(e) if e.to_string().contains("already paired") => {}
+                Err(e) => {
+                    eprintln!("pair_folder complete {name}: {e}");
+                    rejected.push(name);
+                }
+            }
+        }
+        for (name, path) in offers {
+            match pai_sync::pair::read_message(&path).and_then(|m| {
+                if m.device_id == our_id || known.contains(&m.device_id) {
+                    return Err(Error::InvalidInput("skip".into()));
+                }
+                pai_sync::pair::accept_offer(
+                    &rt.store,
+                    &m,
+                    &rt.device_rec,
+                    &agree,
+                    &ids,
+                    &data_dir.join("keys"),
+                    data_dir,
+                )
+                .and_then(|a| {
+                    pai_sync::pair::write_message(
+                        &a,
+                        &pdir.join(format!("accept-{}-{our_id}.pai", m.device_id)),
                     )
-                    .and_then(|a| {
-                        pai_sync::pair::write_message(
-                            &a,
-                            &pdir.join(format!("accept-{}-{our_id}.pai", m.device_id)),
-                        )
-                        .map(|_| m.name)
-                    })
-                }) {
-                    Ok(n) => accepted.push(n),
-                    Err(e) if e.to_string().contains("skip") => {}
-                    Err(_) => rejected.push(name),
+                    .map(|_| m.name)
+                })
+            }) {
+                Ok(n) => accepted.push(n),
+                Err(e) if e.to_string().contains("skip") => {}
+                Err(e) => {
+                    eprintln!("pair_folder accept {name}: {e}");
+                    rejected.push(name);
                 }
             }
         }
@@ -2261,10 +2366,12 @@ pub unsafe extern "C" fn pai_media_list(handle: *mut PaiRuntime) -> *mut c_char 
     }
 }
 
-/// Generate audio locally: `json` is `{"prompt", "duration_seconds"?}`
-/// (seconds clamped to 1–300, default 10). Records the job in
-/// `media_jobs`, stores the WAV in the blob store, returns
-/// `{job_id, bytes, blob, state}`.
+/// Generate media locally: `json` is `{"prompt", "kind"?, "duration_seconds"?,
+/// "width"?, "height"?, "input_b64"?, "input_mime"?}`. `kind` is one of
+/// `audio` (default) / `image` / `image_edit` / `upscale` / `video`;
+/// seconds clamped to 1–300 (default 10), size defaults to 512×512.
+/// Records the job in `media_jobs`, stores the result in the blob store,
+/// returns `{job_id, bytes, blob, state, mime}`.
 /// # Safety
 /// `handle` must come from `pai_init`; `json` is NUL-terminated UTF-8.
 #[no_mangle]
@@ -2280,81 +2387,153 @@ pub unsafe extern "C" fn pai_media_gen(
     #[derive(serde::Deserialize)]
     struct Req {
         prompt: String,
+        /// Job kind — absent means text_to_audio (the original contract).
+        /// Accepts audio|image|image_edit|upscale|video (or the
+        /// media_job `text_to_*` spellings).
+        #[serde(default)]
+        kind: Option<String>,
         #[serde(default)]
         duration_seconds: Option<u32>,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+        /// Source image for edit/upscale kinds — base64 + optional mime.
+        #[serde(default)]
+        input_b64: Option<String>,
+        #[serde(default)]
+        input_mime: Option<String>,
     }
-    let req: Req = match serde_json::from_str(&raw) {
+    let req: Req = match serde_json::from_str(raw) {
         Ok(r) => r,
         Err(e) => return to_c(serde_json::json!({"error": format!("bad JSON: {e}")})),
     };
     if req.prompt.trim().is_empty() {
         return to_c(serde_json::json!({"error": "empty prompt"}));
     }
+    let kind = match req.kind.as_deref().unwrap_or("audio") {
+        "audio" | "text_to_audio" => pai_media::MediaJobKind::TextToAudio,
+        "image" | "text_to_image" => pai_media::MediaJobKind::TextToImage,
+        "image_edit" => pai_media::MediaJobKind::ImageEdit,
+        "upscale" => pai_media::MediaJobKind::Upscale,
+        "video" | "text_to_video" => pai_media::MediaJobKind::TextToVideo,
+        k => return to_c(serde_json::json!({"error": format!("unknown kind '{k}'")})),
+    };
     let secs = req.duration_seconds.unwrap_or(10).clamp(1, 300);
+    let size = (req.width.unwrap_or(512), req.height.unwrap_or(512));
+    let input = match req.input_b64 {
+        Some(b64) => match base64::engine::general_purpose::STANDARD.decode(&b64) {
+            Ok(b) => Some((
+                b,
+                req.input_mime.clone().unwrap_or_else(|| "image/png".into()),
+            )),
+            Err(e) => return to_c(serde_json::json!({"error": format!("bad input_b64: {e}")})),
+        },
+        None => None,
+    };
+    let kind_str = serde_json::to_value(kind)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "text_to_audio".into());
+    let backend = match kind {
+        pai_media::MediaJobKind::TextToAudio => "audio-gen",
+        pai_media::MediaJobKind::TextToImage
+        | pai_media::MediaJobKind::ImageEdit
+        | pai_media::MediaJobKind::Upscale => "image-gen",
+        pai_media::MediaJobKind::TextToVideo => "video-gen",
+    };
     let dir = std::path::PathBuf::from(&rt.data_dir);
-    // Local audio-gen server first; when none is configured, fall back
+    // Local media server first; when none is configured, fall back
     // to a paired mesh peer advertising `media-run` — same routing the
-    // CLI's `pai audio gen --on any` uses.
-    let out: std::result::Result<(Vec<u8>, DeviceId), String> = rt.rt.block_on(async {
-        if let Some(gen) = pai_media::providers::detect(&dir, Duration::from_secs(2)).await {
-            return gen
-                .generate_audio(&req.prompt, secs)
+    // CLI's `pai media gen --on any` uses.
+    let out: std::result::Result<(Vec<u8>, DeviceId, &'static str), String> =
+        rt.rt.block_on(async {
+            let local = pai_media::providers::any_media_backend(&dir, Duration::from_secs(2)).await;
+            if local {
+                return pai_media::providers::generate(&dir, kind, &req.prompt, secs, size, input)
+                    .await
+                    .map(|(b, mime)| (b, rt.device, mime))
+                    .map_err(|e| e.to_string());
+            }
+            // Mesh: discover a paired peer, build a tokened relay transport
+            // to it, and let its broker find the media-run worker.
+            let ids = pai_identity::IdentityStore::new(rt.store.clone());
+            let bind = std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                pai_mesh::MULTICAST_PORT,
+            );
+            let sock = pai_mesh::bind_listener(bind, Some(pai_mesh::MULTICAST_GROUP))
+                .map_err(|e| e.to_string())?;
+            let found = pai_mesh::discover(&sock, Duration::from_secs(3));
+            let paired = pai_mesh::paired_announcements(&rt.store, &ids, found)
+                .map_err(|e| e.to_string())?;
+            let target = paired.first().ok_or_else(|| {
+                format!("no {backend} server here and no paired mesh peer announcing")
+            })?;
+            let agree =
+                pai_sync::crypto::agreement_key(rt.device, &dir).map_err(|e| e.to_string())?;
+            let token = pai_mesh::token_for(&agree.secret, &target.peer);
+            let transport = pai_sync::relay::RelayTransport::new(
+                format!("http://{}", target.relay_addr),
+                Some(token),
+            );
+            let vault = pai_sync::crypto::vault_key(&dir)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "no vault key — pair a device first".to_string())?;
+            let client = pai_broker::rpc::BrokerClient::new(&transport, &vault, rt.device);
+            let to = client
+                .find_peer("media-run")
                 .await
-                .map(|b| (b, rt.device))
-                .map_err(|e| e.to_string());
-        }
-        // Mesh: discover a paired peer, build a tokened relay transport
-        // to it, and let its broker find the media-run worker.
-        let ids = pai_identity::IdentityStore::new(rt.store.clone());
-        let bind = std::net::SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            pai_mesh::MULTICAST_PORT,
-        );
-        let sock = pai_mesh::bind_listener(bind, Some(pai_mesh::MULTICAST_GROUP))
-            .map_err(|e| e.to_string())?;
-        let found = pai_mesh::discover(&sock, Duration::from_secs(3));
-        let paired =
-            pai_mesh::paired_announcements(&rt.store, &ids, found).map_err(|e| e.to_string())?;
-        let target = paired.first().ok_or_else(|| {
-            "no audio-gen server here and no paired mesh peer announcing".to_string()
-        })?;
-        let agree = pai_sync::crypto::agreement_key(rt.device, &dir).map_err(|e| e.to_string())?;
-        let token = pai_mesh::token_for(&agree.secret, &target.peer);
-        let transport = pai_sync::relay::RelayTransport::new(
-            format!("http://{}", target.relay_addr),
-            Some(token),
-        );
-        let vault = pai_sync::crypto::vault_key(&dir)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "no vault key — pair a device first".to_string())?;
-        let client = pai_broker::rpc::BrokerClient::new(&transport, &vault, rt.device);
-        let to = client
-            .find_peer("media-run")
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "no paired device advertises media-run".to_string())?;
-        let payload = serde_json::json!({
-            "prompt": req.prompt, "duration_seconds": secs,
-        })
-        .to_string()
-        .into_bytes();
-        let resp = client
-            .call(to, "media-run", &payload, Duration::from_secs(660))
-            .await
-            .map_err(|e| e.to_string())?;
-        let v: serde_json::Value =
-            serde_json::from_slice(&resp).map_err(|e| format!("bad media-run reply: {e}"))?;
-        let bytes = v["audio_b64"]
-            .as_str()
-            .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
-            .ok_or_else(|| "media-run reply missing audio_b64".to_string())?;
-        Ok((bytes, to))
-    });
-    let mut job = pai_media::jobs::new_job(pai_media::MediaJobKind::TextToAudio, &req.prompt);
-    let params = serde_json::json!({"duration_seconds": secs}).to_string();
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "no paired device advertises media-run".to_string())?;
+            let mut body = serde_json::json!({
+                "prompt": req.prompt,
+                "kind": kind_str,
+                "duration_seconds": secs,
+                "width": size.0,
+                "height": size.1,
+            });
+            if let Some((bytes, mime)) = &input {
+                body["input_b64"] = serde_json::Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                );
+                body["input_mime"] = serde_json::Value::String(mime.clone());
+            }
+            let payload = body.to_string().into_bytes();
+            let resp = client
+                .call(to, "media-run", &payload, Duration::from_secs(660))
+                .await
+                .map_err(|e| e.to_string())?;
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp).map_err(|e| format!("bad media-run reply: {e}"))?;
+            let b64 = v["result_b64"]
+                .as_str()
+                .or_else(|| v["audio_b64"].as_str())
+                .ok_or_else(|| "media-run reply missing result_b64".to_string())?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| e.to_string())?;
+            let mime = v["mime"].as_str().unwrap_or("application/octet-stream");
+            Ok((
+                bytes,
+                to,
+                match mime {
+                    "image/png" => "image/png",
+                    "video/mp4" => "video/mp4",
+                    _ => "audio/wav",
+                },
+            ))
+        });
+    let mut job = pai_media::jobs::new_job(kind, &req.prompt);
+    let params = serde_json::json!({
+        "kind": kind_str,
+        "duration_seconds": secs,
+        "size": [size.0, size.1],
+    })
+    .to_string();
     let _ = pai_media::jobs::record(&rt.store, &job, Some(&params), Some(rt.device), None);
     match out {
-        Ok((bytes, worker)) => {
+        Ok((bytes, worker, mime)) => {
             job.state = pai_media::JobState::Done;
             job.placement_device = Some(worker);
             let blob = match rt.store.put_blob(&bytes) {
@@ -2375,12 +2554,14 @@ pub unsafe extern "C" fn pai_media_gen(
             let _ = pai_media::jobs::record(&rt.store, &job, Some(&params), Some(rt.device), None);
             let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
             e.device = Some(rt.device);
-            e.detail =
-                serde_json::json!({"media_gen": "audio", "secs": secs, "bytes": bytes.len()});
+            e.detail = serde_json::json!({
+                "media_gen": kind_str,
+                "secs": secs, "bytes": bytes.len(),
+            });
             let _ = rt.audit.record(&e);
             to_c(serde_json::json!({
                 "job_id": job.id.to_string(), "state": "done",
-                "bytes": bytes.len(), "blob": blob}))
+                "bytes": bytes.len(), "blob": blob, "mime": mime}))
         }
         Err(e) => {
             job.state = pai_media::JobState::Failed;
@@ -2410,7 +2591,7 @@ pub unsafe extern "C" fn pai_media_export(
         Ok(s) => s,
         Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
     };
-    let task = match uuid::Uuid::parse_str(&id) {
+    let task = match uuid::Uuid::parse_str(id) {
         Ok(u) => TaskId(u),
         Err(e) => return to_c(serde_json::json!({"error": format!("bad job id: {e}")})),
     };
@@ -2424,10 +2605,13 @@ pub unsafe extern "C" fn pai_media_export(
         None => return to_c(serde_json::json!({"error": "job has no result yet"})),
     };
     match rt.store.get_blob(&blob) {
-        Ok(bytes) => match std::fs::write(&dest, &bytes) {
-            Ok(()) => to_c(serde_json::json!({"path": dest, "bytes": bytes.len()})),
-            Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
-        },
+        Ok(bytes) => {
+            let n = bytes.len();
+            match std::fs::write(dest, bytes) {
+                Ok(()) => to_c(serde_json::json!({"path": dest, "bytes": n})),
+                Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+            }
+        }
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
     }
 }
@@ -2643,6 +2827,68 @@ pub unsafe extern "C" fn pai_peers_list(handle: *mut PaiRuntime) -> *mut c_char 
         })),
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+/// Placement view over devices — every paired peer plus this device,
+/// each with its latest `bcap` announcement (advertised ops, reported
+/// `DeviceLoad`, freshness, placement score) and the local placement
+/// weight (`place_weight.<id>` meta). Returns
+/// `{devices: [{id, name, platform, self, weight, announced, fresh,
+/// age_secs, score, ops, load}]}` or `{error}`.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_devices_placement(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    let peers = match pai_sync::pair::list_peers(&rt.store) {
+        Ok(p) => p,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let dir = std::path::PathBuf::from(&rt.data_dir);
+    let caps: Vec<pai_broker::rpc::CapsInfo> = match pai_sync::crypto::vault_key(&dir) {
+        Ok(Some(v)) => pai_broker::rpc::list_caps(&rt.store, &v).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let weight = |id: &DeviceId| -> i64 {
+        rt.store
+            .meta_get(&format!("place_weight.{id}"))
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    };
+    let row = |id: DeviceId, name: &str, platform: serde_json::Value, paired_at: Option<String>| {
+        let caps = caps.iter().find(|c| c.device == id.to_string());
+        serde_json::json!({
+            "id": id.to_string(),
+            "name": name,
+            "platform": platform,
+            "self": id == rt.device,
+            "paired_at": paired_at,
+            "weight": weight(&id),
+            "announced": caps.is_some(),
+            "fresh": caps.map(|c| c.fresh),
+            "age_secs": caps.map(|c| c.age_secs),
+            "score": caps.map(|c| c.score),
+            "ops": caps.map(|c| c.ops.clone()).unwrap_or_default(),
+            "load": caps.and_then(|c| c.load.clone()),
+        })
+    };
+    let mut devices = vec![row(
+        rt.device,
+        &rt.device_rec.name,
+        serde_json::to_value(rt.device_rec.platform).unwrap_or_default(),
+        None,
+    )];
+    for p in &peers {
+        devices.push(row(
+            p.device_id,
+            &p.name,
+            serde_json::Value::String(p.platform.clone()),
+            Some(pai_storage::ts(&p.paired_at)),
+        ));
+    }
+    to_c(serde_json::json!({"devices": devices}))
 }
 
 /// Migrate an app to a paired device — the same steps as

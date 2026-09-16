@@ -159,6 +159,7 @@ async fn media_run_op_end_to_end() {
     let url = stub_audio("200 OK", b"RIFF-worked-bytes");
     MediaConfig {
         audio_gen_url: Some(url),
+        ..MediaConfig::default()
     }
     .save(&w.dir)
     .unwrap();
@@ -201,6 +202,7 @@ async fn media_run_op_failure_records_job() {
     let url = stub_audio("500 Internal Server Error", b"");
     MediaConfig {
         audio_gen_url: Some(url),
+        ..MediaConfig::default()
     }
     .save(&w.dir)
     .unwrap();
@@ -220,6 +222,7 @@ async fn media_run_op_no_provider() {
     let w = dev("noprov");
     MediaConfig {
         audio_gen_url: Some("http://127.0.0.1:1".into()), // never listening
+        ..MediaConfig::default()
     }
     .save(&w.dir)
     .unwrap();
@@ -259,6 +262,7 @@ async fn remote_media_run_roundtrip() {
     let url = stub_audio("200 OK", b"RIFF-remote-audio");
     MediaConfig {
         audio_gen_url: Some(url),
+        ..MediaConfig::default()
     }
     .save(&b.dir)
     .unwrap();

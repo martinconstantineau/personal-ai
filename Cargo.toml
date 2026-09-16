@@ -58,6 +58,7 @@ hex = "0.4"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+qrcode = { version = "0.14", default-features = false }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 rpassword = "7"

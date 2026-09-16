@@ -9,7 +9,6 @@ use crate::providers;
 use crate::{JobState, MediaJob, MediaJobKind};
 use base64::Engine as _;
 use pai_core::*;
-use pai_inference::AudioGenerationProvider;
 use pai_storage::Store;
 use rusqlite::params;
 use std::path::Path;
@@ -126,10 +125,28 @@ pub fn new_job(kind: MediaJobKind, prompt: &str) -> MediaJob {
 }
 
 // ---------------------------------------------------------------------------
-// `media-run` op — the worker side. Payload: {"prompt","duration_seconds"?}.
-// Response: {"job_id","audio_b64","mime","bytes"} — the result also lands in
-// the worker's blob store + media_jobs row for `pai audio jobs`.
+// `media-run` op — the worker side. Payload: {"prompt", "kind"?,
+// "duration_seconds"?, "width"?, "height"?, "input_b64"?, "input_mime"?}.
+// `kind` defaults to text_to_audio (the original contract). Response:
+// {"job_id","result_b64","mime","bytes","blob"} — `audio_b64` is also set
+// for audio results, and the result lands in the worker's blob store +
+// media_jobs row for `pai media jobs`.
 // ---------------------------------------------------------------------------
+
+/// Parse a media-job kind string — accepts the snake_case serde spelling
+/// plus short aliases (`audio`, `image`, `video`).
+pub fn kind_from_str(s: &str) -> Result<MediaJobKind> {
+    match s {
+        "text_to_audio" | "audio" => Ok(MediaJobKind::TextToAudio),
+        "text_to_image" | "image" => Ok(MediaJobKind::TextToImage),
+        "image_edit" => Ok(MediaJobKind::ImageEdit),
+        "upscale" => Ok(MediaJobKind::Upscale),
+        "text_to_video" | "video" => Ok(MediaJobKind::TextToVideo),
+        other => Err(Error::InvalidInput(format!(
+            "media-run: unknown kind '{other}'"
+        ))),
+    }
+}
 
 pub async fn media_run_op(
     data_dir: &Path,
@@ -140,38 +157,77 @@ pub async fn media_run_op(
     #[derive(serde::Deserialize)]
     struct Req {
         prompt: String,
+        /// Job kind — absent means text_to_audio (the original contract).
+        #[serde(default)]
+        kind: Option<String>,
         #[serde(default)]
         duration_seconds: Option<u32>,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+        /// Source image (edit/upscale kinds) — base64 + optional mime.
+        #[serde(default)]
+        input_b64: Option<String>,
+        #[serde(default)]
+        input_mime: Option<String>,
     }
     let req: Req = serde_json::from_slice(payload)
         .map_err(|e| Error::InvalidInput(format!("media-run payload JSON: {e}")))?;
     if req.prompt.trim().is_empty() {
         return Err(Error::InvalidInput("media-run: empty prompt".into()));
     }
-    let gen = providers::detect(data_dir, std::time::Duration::from_secs(2))
-        .await
-        .ok_or_else(|| Error::Provider("no audio-gen server on this device".into()))?;
+    let kind = req
+        .kind
+        .as_deref()
+        .map(kind_from_str)
+        .transpose()?
+        .unwrap_or(MediaJobKind::TextToAudio);
 
     let secs = req.duration_seconds.unwrap_or(10).clamp(1, 300);
-    let mut job = new_job(MediaJobKind::TextToAudio, &req.prompt);
+    let size = (req.width.unwrap_or(512), req.height.unwrap_or(512));
+    let input = match req.input_b64 {
+        Some(b64) => Some((
+            base64::engine::general_purpose::STANDARD
+                .decode(&b64)
+                .map_err(|e| Error::InvalidInput(format!("media-run input_b64: {e}")))?,
+            req.input_mime.unwrap_or_else(|| "image/png".into()),
+        )),
+        None => None,
+    };
+    // No reachable backend → fail before recording — nothing to claim.
+    providers::detect_for_kind(data_dir, kind, std::time::Duration::from_secs(2)).await?;
+
+    let mut job = new_job(kind, &req.prompt);
     job.state = JobState::Running;
     job.placement_device = Some(worker);
-    let params = serde_json::json!({"duration_seconds": secs}).to_string();
+    let params = serde_json::json!({
+        "kind": kind_str(kind),
+        "duration_seconds": secs,
+        "size": [size.0, size.1],
+        "has_input": input.is_some(),
+    })
+    .to_string();
     record(store, &job, Some(&params), None, None)?;
 
-    let out = match gen.generate_audio(&req.prompt, secs).await {
-        Ok(bytes) => {
+    let out = match providers::generate(data_dir, kind, &req.prompt, secs, size, input).await {
+        Ok((bytes, mime)) => {
             let blob = store.put_blob(&bytes)?;
             job.state = JobState::Done;
             job.result_blob = Some(blob.clone());
             record(store, &job, Some(&params), None, None)?;
-            serde_json::json!({
+            let mut v = serde_json::json!({
                 "job_id": job.id.to_string(),
-                "audio_b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                "mime": "audio/wav",
+                "result_b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                "mime": mime,
                 "bytes": bytes.len(),
                 "blob": blob,
-            })
+            });
+            if kind == MediaJobKind::TextToAudio {
+                // original response field name — older requesters read it
+                v["audio_b64"] = v["result_b64"].clone();
+            }
+            v
         }
         Err(e) => {
             job.state = JobState::Failed;

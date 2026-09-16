@@ -85,6 +85,7 @@ fn media_config_roundtrip() {
     assert!(MediaConfig::load(&dir).unwrap().audio_gen_url.is_none());
     let c = MediaConfig {
         audio_gen_url: Some("http://127.0.0.1:9000".into()),
+        ..MediaConfig::default()
     };
     c.save(&dir).unwrap();
     let c2 = MediaConfig::load(&dir).unwrap();

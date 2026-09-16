@@ -8,6 +8,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
 if command -v flutter >/dev/null && [ -d apps/desktop ]; then
+  # The widget test boots the real bridge — it needs the cdylib, which
+  # `cargo test` (rlib-only) does not build.
+  cargo build -p pai-ffi
   (cd apps/desktop && flutter pub get >/dev/null && flutter analyze && flutter test)
 fi
 

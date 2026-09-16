@@ -1,0 +1,4 @@
+-r requirements.txt
+torch>=2.2
+torchaudio>=2.2
+audiocraft>=1.3
