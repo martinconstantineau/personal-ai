@@ -252,7 +252,11 @@ class _HomeShellState extends State<HomeShell> {
   /// amber on the echo fallback, grey until status lands.
   Color _healthColor(ColorScheme cs) {
     if (_status.isEmpty) return cs.onSurfaceVariant.withValues(alpha: 0.4);
-    return _status['provider'] == 'echo' ? Colors.amber : Colors.greenAccent;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    if (_status['provider'] == 'echo') {
+      return dark ? Colors.amber : Colors.orange.shade800;
+    }
+    return dark ? Colors.greenAccent : Colors.green.shade700;
   }
 
   /// Destination icon — Alerts carries the unread-count badge.
@@ -1000,7 +1004,9 @@ class _ChatScreenState extends State<ChatScreen> {
                           ]),
                     ],
                   ]))
-              : ListView.builder(
+              : Semantics(
+                  label: 'Conversation transcript',
+                  child: ListView.builder(
                   controller: _scroll,
                   padding: const EdgeInsets.all(12),
                   itemCount: _entries.length,
@@ -1017,13 +1023,18 @@ class _ChatScreenState extends State<ChatScreen> {
                     );
                   },
                 ),
+                ),
         ),
         Padding(
           padding: const EdgeInsets.all(8),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             if (_cmdSuggestions.isNotEmpty)
-              Card(
-                margin: const EdgeInsets.only(bottom: 8),
+              Semantics(
+                container: true,
+                liveRegion: true,
+                label: 'Command suggestions',
+                child: Card(
+                  margin: const EdgeInsets.only(bottom: 8),
                 clipBehavior: Clip.antiAlias,
                 child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -1041,6 +1052,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           },
                         ),
                     ]),
+                ),
               ),
             Row(children: [
             Expanded(
@@ -1112,14 +1124,17 @@ Widget _listSkeleton(BuildContext context) {
       .colorScheme
       .surfaceContainerHighest
       .withValues(alpha: 0.45);
-  return ListView(padding: const EdgeInsets.all(12), children: [
-    for (var i = 0; i < 5; i++)
-      Container(
-          margin: const EdgeInsets.only(bottom: 10),
-          height: 56,
-          decoration: BoxDecoration(
-              color: c, borderRadius: BorderRadius.circular(10))),
-  ]);
+  return Semantics(
+    label: 'Loading',
+    child: ListView(padding: const EdgeInsets.all(12), children: [
+      for (var i = 0; i < 5; i++)
+        Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            height: 56,
+            decoration: BoxDecoration(
+                color: c, borderRadius: BorderRadius.circular(10))),
+    ]),
+  );
 }
 
 /// Shared error block with a Retry action.
@@ -1208,11 +1223,12 @@ class _BubbleState extends State<_Bubble> {
             if (_hov && !e.streaming && e.text.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(left: 8),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(4),
-                  onTap: _copy,
-                  child: Icon(Icons.copy_outlined,
-                      size: 12,
+                child: IconButton(
+                  iconSize: 12,
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Copy message',
+                  onPressed: _copy,
+                  icon: Icon(Icons.copy_outlined,
                       color:
                           cs.onSecondaryContainer.withValues(alpha: 0.6)),
                 ),
@@ -1431,6 +1447,7 @@ class _ConvDrawerState extends State<_ConvDrawer> {
                     style: const TextStyle(fontSize: 11)),
                 trailing: IconButton(
                     icon: const Icon(Icons.play_arrow),
+                    tooltip: 'Resume interrupted run',
                     onPressed: () => widget.onResume(r['id'] as String)),
               ),
           ],
@@ -1535,7 +1552,10 @@ class _MemoriesScreenState extends State<MemoriesScreen> {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(title: const Text('Memories'), actions: [
-        IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+        IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _load),
       ]),
       body: _loading
           ? _listSkeleton(context)
@@ -1776,7 +1796,9 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                   ),
                   const SizedBox(width: 8),
                   IconButton(
-                      onPressed: _search, icon: const Icon(Icons.search)),
+                      onPressed: _search,
+                      tooltip: 'Search',
+                      icon: const Icon(Icons.search)),
                 ]),
               ),
               if (_hits.isNotEmpty)
@@ -1974,6 +1996,7 @@ class _EmailScreenState extends State<EmailScreen> {
                   onPressed: () => _compose()),
               IconButton(
                   icon: const Icon(Icons.refresh),
+                  tooltip: 'Refresh',
                   onPressed: _search),
             ]),
         body: Column(children: [
@@ -3576,7 +3599,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
         (_detect?['binaries'] as Map?)?.cast<String, dynamic>() ?? const {};
     return Scaffold(
       appBar: AppBar(title: const Text('Devices'), actions: [
-        IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+        IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _load),
       ]),
       body: _loading
           ? _listSkeleton(context)
@@ -3867,7 +3893,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                     : Icons.filter_alt_off_outlined,
                 size: 18),
             label: Text(_unreadOnly ? 'Unread' : 'All')),
-        IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+        IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _load),
       ]),
       body: _loading
           ? _listSkeleton(context)
@@ -3962,7 +3991,10 @@ class _ActivityScreenState extends State<ActivityScreen> {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(title: const Text('Activity'), actions: [
-        IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+        IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _load),
       ]),
       body: _loading
           ? _listSkeleton(context)
