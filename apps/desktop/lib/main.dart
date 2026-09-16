@@ -3551,6 +3551,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
     if (!mounted) return;
     String? chosen = catalog.isNotEmpty ? '${catalog.first['slug']}' : null;
     final destCtl = TextEditingController();
+    final refCtl = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -3576,6 +3577,15 @@ class _DevicesScreenState extends State<DevicesScreen> {
               ),
               const SizedBox(height: 8),
               TextField(
+                controller: refCtl,
+                decoration: const InputDecoration(
+                    labelText: 'Custom reference (optional)',
+                    hintText:
+                        'hf://owner/repo/file.gguf — overrides the pick above',
+                    border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 8),
+              TextField(
                 controller: destCtl,
                 decoration: const InputDecoration(
                     labelText: 'Destination (optional)',
@@ -3596,9 +3606,11 @@ class _DevicesScreenState extends State<DevicesScreen> {
       ),
     );
     final dest = destCtl.text.trim();
+    final ref = refCtl.text.trim();
     destCtl.dispose();
-    if (ok != true || chosen == null || !mounted) return;
-    final slug = chosen!;
+    refCtl.dispose();
+    if (ok != true || (chosen == null && ref.isEmpty) || !mounted) return;
+    final slug = ref.isNotEmpty ? ref : chosen!;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(dest.isEmpty
             ? 'Installing $slug - this can take a while'
