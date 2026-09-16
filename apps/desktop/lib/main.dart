@@ -33,6 +33,21 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
+/// The ten surfaces, in rail order — shared by the wide rail, the
+/// compact icon-rail, and the narrow bottom bar.
+const _dests = [
+  (Icons.chat_bubble_outline, 'Chat'),
+  (Icons.apps_outlined, 'Apps'),
+  (Icons.devices_outlined, 'Devices'),
+  (Icons.notifications_outlined, 'Alerts'),
+  (Icons.psychology_outlined, 'Memories'),
+  (Icons.description_outlined, 'Documents'),
+  (Icons.mail_outline, 'Email'),
+  (Icons.receipt_long_outlined, 'Activity'),
+  (Icons.policy_outlined, 'Permissions'),
+  (Icons.music_note_outlined, 'Media'),
+];
+
 /// Ctrl+1..9,0 jump straight to a rail destination.
 const _railKeys = [
   LogicalKeyboardKey.digit1,
@@ -122,6 +137,14 @@ class _HomeShellState extends State<HomeShell> {
     return _status['provider'] == 'echo' ? Colors.amber : Colors.greenAccent;
   }
 
+  /// Destination icon — Alerts carries the unread-count badge.
+  Widget _navIcon(int i) {
+    final icon = Icon(_dests[i].$1);
+    if (i != 3) return icon;
+    return Badge.count(
+        count: _unread, isLabelVisible: _unread > 0, child: icon);
+  }
+
   String _healthMsg() {
     if (_status.isEmpty) return 'Provider status unknown';
     return _status['provider'] == 'echo'
@@ -152,6 +175,8 @@ class _HomeShellState extends State<HomeShell> {
         return ActivityScreen(bridge: pai);
       case 8:
         return PoliciesScreen(bridge: pai);
+      case 9:
+        return MediaScreen(bridge: pai);
       default:
         return const SizedBox.shrink();
     }
@@ -190,76 +215,86 @@ class _HomeShellState extends State<HomeShell> {
           _chatKey.currentState?.newConversation();
         },
       },
-      child: Scaffold(
-        body: Row(children: [
+      child: LayoutBuilder(
+        builder: (_, c) {
+          final content = IndexedStack(
+              index: _index, children: List.generate(10, _tab));
+          // Narrow windows (and the Android build): bottom bar with
+          // labels on the selected destination only — all ten fit.
+          if (c.maxWidth < 640) {
+            return Scaffold(
+              body: content,
+              bottomNavigationBar: NavigationBar(
+                selectedIndex: _index,
+                onDestinationSelected: _select,
+                labelBehavior:
+                    NavigationDestinationLabelBehavior.onlyShowSelected,
+                destinations: [
+                  for (var i = 0; i < _dests.length; i++)
+                    NavigationDestination(
+                        icon: _navIcon(i), label: _dests[i].$2),
+                ],
+              ),
+            );
+          }
+          final wide = c.maxWidth > 1120;
           // Ten destinations outgrow short windows — let the rail scroll.
           // SizedBox keeps height bounded so the trailing health dot can
           // still dock at the bottom on tall windows.
-          LayoutBuilder(
-            builder: (_, c) {
-              final overflow = c.maxHeight < 10 * 72 + 96;
-              final rail = SingleChildScrollView(
-              child: SizedBox(
-                height: math.max(c.maxHeight, 10 * 72 + 96),
-                child: NavigationRail(
-          selectedIndex: _index,
-          onDestinationSelected: _select,
-          labelType: NavigationRailLabelType.all,
-          trailing: Expanded(
-            child: Align(
-              alignment: Alignment.bottomCenter,
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 14),
-                child: Tooltip(
-                  message: _healthMsg(),
-                  child: Icon(Icons.circle,
-                      size: 10,
-                      color: _healthColor(
-                          Theme.of(context).colorScheme)),
+          final rail = LayoutBuilder(
+            builder: (_, rc) {
+              final overflow = rc.maxHeight < 10 * 72 + 96;
+              final scrollable = SingleChildScrollView(
+                child: SizedBox(
+                  height: math.max(rc.maxHeight, 10 * 72 + 96),
+                  child: NavigationRail(
+                    selectedIndex: _index,
+                    onDestinationSelected: _select,
+                    labelType: wide
+                        ? NavigationRailLabelType.all
+                        : NavigationRailLabelType.none,
+                    trailing: Expanded(
+                      child: Align(
+                        alignment: Alignment.bottomCenter,
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 14),
+                          child: Tooltip(
+                            message: _healthMsg(),
+                            child: Icon(Icons.circle,
+                                size: 10,
+                                color: _healthColor(
+                                    Theme.of(context).colorScheme)),
+                          ),
+                        ),
+                      ),
+                    ),
+                    destinations: [
+                      for (var i = 0; i < _dests.length; i++)
+                        NavigationRailDestination(
+                            icon: wide
+                                ? _navIcon(i)
+                                : Tooltip(
+                                    message: _dests[i].$2,
+                                    child: _navIcon(i)),
+                            label: Text(_dests[i].$2)),
+                    ],
+                  ),
                 ),
-              ),
-            ),
-          ),
-          destinations: [
-            const NavigationRailDestination(
-                icon: Icon(Icons.chat_bubble_outline), label: Text('Chat')),
-            const NavigationRailDestination(
-                icon: Icon(Icons.apps_outlined), label: Text('Apps')),
-            const NavigationRailDestination(
-                icon: Icon(Icons.devices_outlined), label: Text('Devices')),
-            NavigationRailDestination(
-                icon: Badge.count(
-                    count: _unread,
-                    isLabelVisible: _unread > 0,
-                    child: const Icon(Icons.notifications_outlined)),
-                label: const Text('Alerts')),
-            const NavigationRailDestination(
-                icon: Icon(Icons.psychology_outlined), label: Text('Memories')),
-            const NavigationRailDestination(
-                icon: Icon(Icons.description_outlined),
-                label: Text('Documents')),
-            const NavigationRailDestination(
-                icon: Icon(Icons.mail_outline), label: Text('Email')),
-            const NavigationRailDestination(
-                icon: Icon(Icons.receipt_long_outlined),
-                label: Text('Activity')),
-            const NavigationRailDestination(
-                icon: Icon(Icons.policy_outlined), label: Text('Permissions')),
-          ],
-                ),
-              ),
-            );
+              );
               return overflow
                   ? Scrollbar(
-                      thumbVisibility: true, thickness: 4, child: rail)
-                  : rail;
+                      thumbVisibility: true, thickness: 4, child: scrollable)
+                  : scrollable;
             },
-          ),
-        const VerticalDivider(width: 1),
-        Expanded(
-            child: IndexedStack(
-                index: _index, children: List.generate(9, _tab))),
-        ]),
+          );
+          return Scaffold(
+            body: Row(children: [
+              rail,
+              const VerticalDivider(width: 1),
+              Expanded(child: content),
+            ]),
+          );
+        },
       ),
     );
   }
