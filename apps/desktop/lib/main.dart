@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -32,7 +33,7 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-/// Ctrl+1..9 jump straight to a rail destination.
+/// Ctrl+1..9,0 jump straight to a rail destination.
 const _railKeys = [
   LogicalKeyboardKey.digit1,
   LogicalKeyboardKey.digit2,
@@ -43,6 +44,7 @@ const _railKeys = [
   LogicalKeyboardKey.digit7,
   LogicalKeyboardKey.digit8,
   LogicalKeyboardKey.digit9,
+  LogicalKeyboardKey.digit0,
 ];
 
 class _HomeShellState extends State<HomeShell> {
@@ -190,7 +192,16 @@ class _HomeShellState extends State<HomeShell> {
       },
       child: Scaffold(
         body: Row(children: [
-          NavigationRail(
+          // Ten destinations outgrow short windows — let the rail scroll.
+          // SizedBox keeps height bounded so the trailing health dot can
+          // still dock at the bottom on tall windows.
+          LayoutBuilder(
+            builder: (_, c) {
+              final overflow = c.maxHeight < 10 * 72 + 96;
+              final rail = SingleChildScrollView(
+              child: SizedBox(
+                height: math.max(c.maxHeight, 10 * 72 + 96),
+                child: NavigationRail(
           selectedIndex: _index,
           onDestinationSelected: _select,
           labelType: NavigationRailLabelType.all,
@@ -235,7 +246,15 @@ class _HomeShellState extends State<HomeShell> {
             const NavigationRailDestination(
                 icon: Icon(Icons.policy_outlined), label: Text('Permissions')),
           ],
-        ),
+                ),
+              ),
+            );
+              return overflow
+                  ? Scrollbar(
+                      thumbVisibility: true, thickness: 4, child: rail)
+                  : rail;
+            },
+          ),
         const VerticalDivider(width: 1),
         Expanded(
             child: IndexedStack(
@@ -2479,6 +2498,261 @@ String _fmtTs(dynamic ts) {
   if (ts == null) return '';
   final t = '$ts';
   return t.length > 16 ? t.substring(0, 16).replaceFirst('T', ' ') : t;
+}
+
+
+/// Media — the media_jobs log (local + broker-routed generation work)
+/// plus a local audio-generation action. Remote jobs submitted through
+/// the CLI appear here too; they share the same store.
+class MediaScreen extends StatefulWidget {
+  const MediaScreen({super.key, required this.bridge});
+  final PaiBridge bridge;
+  @override
+  State<MediaScreen> createState() => _MediaScreenState();
+}
+
+class _MediaScreenState extends State<MediaScreen> {
+  List<dynamic> _jobs = const [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final jobs = await widget.bridge.mediaList();
+      if (mounted) setState(() { _jobs = jobs; _loading = false; });
+    } catch (e) {
+      if (mounted) setState(() { _error = '$e'; _loading = false; });
+    }
+  }
+
+  Future<void> _generate() async {
+    final promptCtl = TextEditingController();
+    final secsCtl = TextEditingController(text: '10');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Generate audio'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: promptCtl,
+            autofocus: true,
+            maxLines: 3,
+            minLines: 1,
+            decoration: const InputDecoration(
+                labelText: 'Prompt',
+                hintText: 'e.g. calm lo-fi rain ambience',
+                border: OutlineInputBorder()),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: secsCtl,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+                labelText: 'Duration (seconds, 1-300)',
+                border: OutlineInputBorder()),
+          ),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Generate')),
+        ],
+      ),
+    );
+    final prompt = promptCtl.text.trim();
+    final secs = int.tryParse(secsCtl.text.trim()) ?? 10;
+    promptCtl.dispose();
+    secsCtl.dispose();
+    if (ok != true || prompt.isEmpty || !mounted) return;
+    try {
+      final r = await widget.bridge.mediaGen(prompt, seconds: secs);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(r['error'] != null
+              ? 'Generation failed: ${r['error']}'
+              : 'Done - ${r['bytes']} bytes (job ${('${r['job_id']}').substring(0, 8)})')));
+      _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Generation failed: $e')));
+      }
+    }
+  }
+
+  Future<void> _export(Map job) async {
+    final destCtl = TextEditingController(
+        text: 'media-${(job['id'] as String? ?? 'job').substring(0, 8)}.wav');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Export result'),
+        content: TextField(
+          controller: destCtl,
+          autofocus: true,
+          decoration: const InputDecoration(
+              labelText: 'Destination path',
+              hintText: 'e.g. clip.wav',
+              border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    final dest = destCtl.text.trim();
+    destCtl.dispose();
+    if (ok != true || dest.isEmpty || !mounted) return;
+    final r = await widget.bridge.mediaExport('${job['id']}', dest);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r['error'] != null
+            ? 'Export failed: ${r['error']}'
+            : 'Saved ${r['bytes']} bytes to ${r['path']}')));
+  }
+
+  Color _stateColor(ColorScheme cs, String state) => switch (state) {
+        'done' => Colors.greenAccent,
+        'running' => cs.primary,
+        'failed' => cs.error,
+        _ => cs.onSurfaceVariant,
+      };
+
+  IconData _kindIcon(String kind) => switch (kind) {
+        'text_to_audio' => Icons.music_note_outlined,
+        'text_to_image' => Icons.image_outlined,
+        'text_to_video' => Icons.videocam_outlined,
+        'image_edit' => Icons.edit_outlined,
+        _ => Icons.auto_awesome_outlined,
+      };
+
+  String _kindLabel(String kind) => kind.replaceAll('_', ' ');
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Media'), actions: [
+        IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _load),
+        Padding(
+          padding: const EdgeInsets.only(right: 12),
+          child: FilledButton.icon(
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('New audio'),
+              onPressed: _generate),
+        ),
+      ]),
+      body: _loading
+          ? _listSkeleton(context)
+          : _error != null
+              ? _errorView(context, _error!, _load)
+              : _jobs.isEmpty
+                  ? Center(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.auto_awesome_outlined,
+                            size: 40, color: cs.onSurfaceVariant),
+                        const SizedBox(height: 12),
+                        const Text('No media jobs yet'),
+                        const SizedBox(height: 4),
+                        Text('Generate audio from a prompt - it lands here.',
+                            style: TextStyle(
+                                color: cs.onSurfaceVariant, fontSize: 13)),
+                      ]),
+                    )
+                  : ListView.builder(
+                      itemCount: _jobs.length,
+                      itemBuilder: (_, i) {
+                        final j = _jobs[i];
+                        final state = '${j['state']}';
+                        final kind = '${j['kind']}';
+                        final err = j['error'] as String?;
+                        final done =
+                            state == 'done' && j['result_blob'] != null;
+                        return Card(
+                          margin: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 4),
+                          child: ListTile(
+                            leading: Icon(_kindIcon(kind),
+                                color: _stateColor(cs, state)),
+                            title: Text('${j['prompt']}',
+                                maxLines: 1, overflow: TextOverflow.ellipsis),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Wrap(spacing: 6, runSpacing: 4, children: [
+                                  Chip(
+                                      label: Text(state,
+                                          style: TextStyle(
+                                              fontSize: 10,
+                                              color:
+                                                  _stateColor(cs, state))),
+                                      visualDensity:
+                                          VisualDensity.compact),
+                                  Chip(
+                                      label: Text(_kindLabel(kind),
+                                          style:
+                                              const TextStyle(fontSize: 10)),
+                                      visualDensity:
+                                          VisualDensity.compact),
+                                  if (j['worker'] != null)
+                                    Chip(
+                                        label: Text(
+                                            'worker ${(j['worker'] as String).substring(0, 8)}',
+                                            style: const TextStyle(
+                                                fontSize: 10)),
+                                        visualDensity:
+                                            VisualDensity.compact),
+                                  Chip(
+                                      label: Text(_fmtTs(j['created_at']),
+                                          style:
+                                              const TextStyle(fontSize: 10)),
+                                      visualDensity:
+                                          VisualDensity.compact),
+                                ]),
+                                if (err != null && err.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 4),
+                                    child: Text(err,
+                                        style: TextStyle(
+                                            color: cs.error, fontSize: 12)),
+                                  ),
+                              ],
+                            ),
+                            isThreeLine: err != null && err.isNotEmpty,
+                            trailing: done
+                                ? IconButton(
+                                    icon:
+                                        const Icon(Icons.save_alt, size: 20),
+                                    tooltip: 'Export result (WAV)',
+                                    onPressed: () => _export(j))
+                                : null,
+                          ),
+                        );
+                      },
+                    ),
+    );
+  }
 }
 
 /// Devices — this machine's detected inference endpoints + binaries, and

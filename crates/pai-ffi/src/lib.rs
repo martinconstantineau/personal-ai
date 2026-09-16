@@ -23,7 +23,8 @@ use pai_agent::{
 };
 use pai_core::*;
 use pai_inference::{
-    EchoProvider, LlamaServerProvider, SpeechToTextProvider, TextToSpeechProvider,
+    AudioGenerationProvider, EchoProvider, LlamaServerProvider, SpeechToTextProvider,
+    TextToSpeechProvider,
 };
 use pai_memory::{MemoryBackend, MemoryScopeQuery, RecallQuery, SqliteMemory};
 use pai_models::ModelManager;
@@ -1498,6 +1499,147 @@ pub unsafe extern "C" fn pai_models_serve(
     to_c(serde_json::json!({
         "serving": slug, "url": url,
         "provider": "llama-server", "model": slug}))
+}
+
+// ---------------------------------------------------------------------------
+// Media jobs — local audio generation + the shared job log. Remote
+// broker-routed jobs recorded by the CLI/broker also appear in
+// `pai_media_list`; `pai_media_gen` generates on this device only.
+
+/// Newest-first media job rows: `{id, kind, prompt, params, state,
+/// requester, worker, result_blob, error, created_at, updated_at}`.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_media_list(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    match pai_media::jobs::list(&rt.store, 100) {
+        Ok(rows) => to_c(serde_json::Value::Array(rows)),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Generate audio locally: `json` is `{"prompt", "duration_seconds"?}`
+/// (seconds clamped to 1–300, default 10). Records the job in
+/// `media_jobs`, stores the WAV in the blob store, returns
+/// `{job_id, bytes, blob, state}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `json` is NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_media_gen(
+    handle: *mut PaiRuntime,
+    json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let raw = match read_str(json) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    #[derive(serde::Deserialize)]
+    struct Req {
+        prompt: String,
+        #[serde(default)]
+        duration_seconds: Option<u32>,
+    }
+    let req: Req = match serde_json::from_str(&raw) {
+        Ok(r) => r,
+        Err(e) => return to_c(serde_json::json!({"error": format!("bad JSON: {e}")})),
+    };
+    if req.prompt.trim().is_empty() {
+        return to_c(serde_json::json!({"error": "empty prompt"}));
+    }
+    let secs = req.duration_seconds.unwrap_or(10).clamp(1, 300);
+    let dir = std::path::PathBuf::from(&rt.data_dir);
+    let out: std::result::Result<Vec<u8>, String> = rt.rt.block_on(async {
+        let gen = pai_media::providers::detect(&dir, Duration::from_secs(2))
+            .await
+            .ok_or_else(|| {
+                "no audio-gen server on this device — see `pai audio status`".to_string()
+            })?;
+        gen.generate_audio(&req.prompt, secs)
+            .await
+            .map_err(|e| e.to_string())
+    });
+    let mut job = pai_media::jobs::new_job(pai_media::MediaJobKind::TextToAudio, &req.prompt);
+    let params = serde_json::json!({"duration_seconds": secs}).to_string();
+    let _ = pai_media::jobs::record(&rt.store, &job, Some(&params), Some(rt.device), None);
+    match out {
+        Ok(bytes) => {
+            job.state = pai_media::JobState::Done;
+            job.placement_device = Some(rt.device);
+            let blob = match rt.store.put_blob(&bytes) {
+                Ok(b) => b,
+                Err(e) => {
+                    job.state = pai_media::JobState::Failed;
+                    let _ = pai_media::jobs::record(
+                        &rt.store,
+                        &job,
+                        Some(&params),
+                        Some(rt.device),
+                        Some(&e.to_string()),
+                    );
+                    return to_c(serde_json::json!({"error": e.to_string()}));
+                }
+            };
+            job.result_blob = Some(blob.clone());
+            let _ = pai_media::jobs::record(&rt.store, &job, Some(&params), Some(rt.device), None);
+            let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+            e.device = Some(rt.device);
+            e.detail =
+                serde_json::json!({"media_gen": "audio", "secs": secs, "bytes": bytes.len()});
+            let _ = rt.audit.record(&e);
+            to_c(serde_json::json!({
+                "job_id": job.id.to_string(), "state": "done",
+                "bytes": bytes.len(), "blob": blob}))
+        }
+        Err(e) => {
+            job.state = pai_media::JobState::Failed;
+            let _ =
+                pai_media::jobs::record(&rt.store, &job, Some(&params), Some(rt.device), Some(&e));
+            to_c(serde_json::json!({"error": e}))
+        }
+    }
+}
+
+/// Export a finished job's result blob to `dest` — writes the stored
+/// bytes (a WAV today) and returns `{path, bytes}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `job_id`/`dest` are NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_media_export(
+    handle: *mut PaiRuntime,
+    job_id: *const c_char,
+    dest: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let id = match read_str(job_id) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let dest = match read_str(dest) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let task = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => TaskId(u),
+        Err(e) => return to_c(serde_json::json!({"error": format!("bad job id: {e}")})),
+    };
+    let row = match pai_media::jobs::get(&rt.store, task) {
+        Ok(Some(r)) => r,
+        Ok(None) => return to_c(serde_json::json!({"error": "job not found"})),
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let blob = match row["result_blob"].as_str() {
+        Some(b) => b.to_string(),
+        None => return to_c(serde_json::json!({"error": "job has no result yet"})),
+    };
+    match rt.store.get_blob(&blob) {
+        Ok(bytes) => match std::fs::write(&dest, &bytes) {
+            Ok(()) => to_c(serde_json::json!({"path": dest, "bytes": bytes.len()})),
+            Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+        },
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
 }
 
 /// Voice capability probe: `{stt, tts, mic, speaker, whisper_url}`.

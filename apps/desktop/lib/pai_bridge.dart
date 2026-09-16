@@ -121,6 +121,25 @@ class PaiBridge {
     return r;
   }
 
+  /// Media job log — newest first (local + broker-routed rows).
+  Future<List<dynamic>> mediaList() async =>
+      (await _call(_Op.mediaList)) as List<dynamic>;
+
+  /// Generate audio locally. `json`: `{prompt, duration_seconds?}`.
+  /// Long-running — runs on the worker isolate.
+  Future<Map<String, dynamic>> mediaGen(String prompt,
+      {int seconds = 10}) async =>
+      (await _call(_Op.mediaGen,
+          arg: jsonEncode(
+              {'prompt': prompt, 'duration_seconds': seconds})))
+          as Map<String, dynamic>;
+
+  /// Write a finished job's result blob to `dest`.
+  Future<Map<String, dynamic>> mediaExport(String jobId, String dest) async =>
+      (await _call(_Op.mediaExport,
+          arg: jsonEncode({'id': jobId, 'dest': dest})))
+          as Map<String, dynamic>;
+
   Future<Map<String, dynamic>> conversationNew({bool isolated = false}) async =>
       (await _call(_Op.convNew, arg: isolated ? 'isolated' : 'shared'))
           as Map<String, dynamic>;
@@ -463,6 +482,14 @@ class PaiBridge {
             result = client.shareList();
           case _Op.shareRevoke:
             result = client.shareRevoke(req.arg!);
+          case _Op.mediaList:
+            result = client.mediaList();
+          case _Op.mediaGen:
+            result = client.mediaGen(req.arg!);
+          case _Op.mediaExport:
+            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+            result = client.mediaExport(
+                a['id'] as String, a['dest'] as String);
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -530,6 +557,9 @@ enum _Op {
   guestCall,
   shareList,
   shareRevoke,
+  mediaList,
+  mediaGen,
+  mediaExport,
 }
 
 class _InitError {

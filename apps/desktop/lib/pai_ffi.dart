@@ -102,6 +102,13 @@ class PaiClient {
       'pai_models_serve');
   late final _setProvider = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_set_provider');
+  late final _mediaList = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_media_list');
+  late final _mediaGen = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_media_gen');
+  late final _mediaExport = _lib.lookupFunction<_ThreeStrNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>(
+      'pai_media_export');
   late final _voiceStatus = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_voice_status');
   late final _voiceListen = _lib.lookupFunction<_VoiceListenNative,
@@ -408,6 +415,28 @@ class PaiClient {
       return _json(_modelsServe(_handle, s, port)) as Map<String, dynamic>;
     } finally {
       malloc.free(s);
+    }
+  }
+
+  /// Media job log, newest first — local and broker-routed rows.
+  List<dynamic> mediaList() =>
+      _json(_mediaList(_handle)) as List<dynamic>;
+
+  /// Generate audio locally: `requestJson` is
+  /// `{prompt, duration_seconds?}`. Blocking (up to minutes) — worker
+  /// isolate only.
+  Map<String, dynamic> mediaGen(String requestJson) =>
+      _call1(_mediaGen, requestJson);
+
+  /// Write job [jobId]'s result blob to [dest].
+  Map<String, dynamic> mediaExport(String jobId, String dest) {
+    final a = jobId.toNativeUtf8();
+    final b = dest.toNativeUtf8();
+    try {
+      return _json(_mediaExport(_handle, a, b)) as Map<String, dynamic>;
+    } finally {
+      malloc.free(a);
+      malloc.free(b);
     }
   }
 

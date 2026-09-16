@@ -1933,6 +1933,7 @@ dependencies = [
  "pai-documents",
  "pai-identity",
  "pai-inference",
+ "pai-media",
  "pai-memory",
  "pai-models",
  "pai-notify",
