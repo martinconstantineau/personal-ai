@@ -533,6 +533,8 @@ pub enum AuditKind {
     SyncReceived,
     SyncSent,
     PermissionChanged,
+    /// Provider/model/endpoint reconfigured at runtime.
+    ConfigChanged,
     ApprovalRequested,
     ApprovalResolved,
     AppDeployed,

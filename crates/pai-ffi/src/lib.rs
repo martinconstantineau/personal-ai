@@ -69,6 +69,9 @@ pub struct PaiRuntime {
     /// when neither is configured. Mic/speaker probes are cheap enough
     /// to answer live in `pai_voice_status`.
     voice: Option<pai_voice::VoiceSetup>,
+    /// Base URL the chat provider points at — kept so `pai_set_provider`
+    /// can rebuild it on a different model/endpoint without re-init.
+    server_url: String,
 }
 
 #[derive(Deserialize)]
@@ -276,6 +279,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         documents,
         email,
         voice,
+        server_url,
     })
 }
 
@@ -1272,6 +1276,55 @@ pub unsafe extern "C" fn pai_status(handle: *mut PaiRuntime) -> *mut c_char {
         "device": rt.device.to_string(),
         "data_dir": rt.data_dir,
     }))
+}
+
+/// Re-point chat at a different endpoint/model without re-init:
+/// `{"server_url"?, "model"?}`. Rebuilds the llama-server provider
+/// and vision adapter so the next send uses them. Returns the resolved
+/// `{provider, model}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `json` must be a valid
+/// NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn pai_set_provider(
+    handle: *mut PaiRuntime,
+    json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    #[derive(Deserialize)]
+    struct Cfg {
+        server_url: Option<String>,
+        model: Option<String>,
+    }
+    let cfg: Cfg = match read_str(json)
+        .and_then(|s| serde_json::from_str(s).map_err(|e| Error::InvalidInput(e.to_string())))
+    {
+        Ok(c) => c,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    if let Some(u) = cfg.server_url {
+        rt.server_url = u;
+    }
+    if let Some(m) = cfg.model {
+        rt.def.model = Some(m);
+    }
+    let model = rt.def.model.clone().unwrap_or_default();
+    rt.agent.providers.register(Arc::new(
+        LlamaServerProvider::new(&rt.server_url, model.clone())
+            .with_timeout(Duration::from_secs(120)),
+    ));
+    rt.def.provider = "llama-server".into();
+    rt.agent.vision = Some(Arc::new(pai_vision::LlamaVisionProvider::new(
+        &rt.server_url,
+        model,
+    )));
+    let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+    e.device = Some(rt.device);
+    e.detail = serde_json::json!({
+        "server_url": rt.server_url, "model": rt.def.model});
+    let _ = rt.audit.record(&e);
+    to_c(serde_json::json!({
+        "provider": rt.def.provider, "model": rt.def.model}))
 }
 
 /// Voice capability probe: `{stt, tts, mic, speaker, whisper_url}`.

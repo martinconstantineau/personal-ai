@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -198,6 +199,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _speakReplies = false;
   Map<String, dynamic> _voice = const {};
   Map<String, dynamic> _status = const {};
+  StreamSubscription<Map<String, dynamic>>? _statusSub;
   final _entries = <_Entry>[];
   List<dynamic> _convs = const [];
   List<dynamic> _interrupted = const [];
@@ -224,8 +226,10 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) setState(() => _interrupted = runs);
       final voice = await _pai!.voiceStatus();
       if (mounted) setState(() => _voice = voice);
-      final status = await _pai!.status();
-      if (mounted) setState(() => _status = status);
+      _statusSub ??= _pai!.statusStream.listen((st) {
+        if (mounted) setState(() => _status = st);
+      });
+      await _pai!.status();
     } catch (e) {
       if (mounted) setState(() => _error = 'Load failed: $e');
     }
@@ -2012,6 +2016,16 @@ class _DevicesScreenState extends State<DevicesScreen> {
     }
   }
 
+  Future<void> _switchTo(Map<dynamic, dynamic> e, String model) async {
+    final r = await widget.bridge
+        .setProvider(serverUrl: e['base_url'] as String?, model: model);
+    if (!mounted) return;
+    final err = r['error'] as String?;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(err ?? 'Chat now served by $model')));
+    await _load();
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -2072,6 +2086,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                 embedOnly: (e['embed_only'] as List? ??
                                         const [])
                                     .contains(m),
+                                onTap: () => _switchTo(e, '$m'),
                               ),
                             if ((e['models'] as List? ?? const []).isEmpty)
                               Text('No models reported',
@@ -2343,11 +2358,13 @@ class _ModelChip extends StatelessWidget {
       {required this.name,
       required this.serving,
       required this.chatPick,
-      required this.embedOnly});
+      required this.embedOnly,
+      required this.onTap});
   final String name;
   final bool serving;
   final bool chatPick;
   final bool embedOnly;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -2359,7 +2376,7 @@ class _ModelChip extends StatelessWidget {
             : embedOnly
                 ? 'embeddings'
                 : null;
-    return Container(
+    final chip = Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: serving
@@ -2383,6 +2400,15 @@ class _ModelChip extends StatelessWidget {
                   color: serving ? cs.primary : cs.onSurfaceVariant)),
         ],
       ]),
+    );
+    if (embedOnly) {
+      return Tooltip(
+          message: 'Embeddings only — cannot answer chat', child: chip);
+    }
+    return Tooltip(
+      message: serving ? 'Serving chat' : 'Tap to serve chat from $name',
+      child: InkWell(
+          borderRadius: BorderRadius.circular(6), onTap: onTap, child: chip),
     );
   }
 }

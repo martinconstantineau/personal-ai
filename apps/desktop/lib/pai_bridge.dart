@@ -25,6 +25,13 @@ class PaiBridge {
   int _nextId = 0;
   final _pending = <int, _Pending>{};
 
+  /// Latest resolved provider/model status — refreshed by [status]
+  /// and [setProvider]. [statusStream] pushes updates so the chat
+  /// header can react live.
+  Map<String, dynamic> lastStatus = const {};
+  final _statusCtl = StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get statusStream => _statusCtl.stream;
+
   /// Spawns the worker isolate and initializes the Rust runtime inside it.
   static Future<PaiBridge> start(Map<String, dynamic> config) async {
     final ready = ReceivePort();
@@ -230,8 +237,28 @@ class PaiBridge {
       (await _call(_Op.shareRevoke, arg: tokenId)) as Map<String, dynamic>;
 
   /// Resolved provider/model + device — the chat header line.
-  Future<Map<String, dynamic>> status() async =>
-      (await _call(_Op.status)) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> status() async {
+    final r = (await _call(_Op.status)) as Map<String, dynamic>;
+    if (!r.containsKey('error')) {
+      lastStatus = r;
+      _statusCtl.add(r);
+    }
+    return r;
+  }
+
+  /// Switch the serving endpoint/model: {server_url?, model?}. The
+  /// returned status is also pushed into [statusNotifier] so headers
+  /// refresh live.
+  Future<Map<String, dynamic>> setProvider(
+      {String? serverUrl, String? model}) async {
+    final r = (await _call(_Op.setProvider,
+        arg: jsonEncode(
+            {'server_url': ?serverUrl, 'model': ?model}))) as Map<String, dynamic>;
+    if (!r.containsKey('error')) {
+      await status();
+    }
+    return r;
+  }
 
   Future<Map<String, dynamic>> voiceStatus() async =>
       (await _call(_Op.voiceStatus)) as Map<String, dynamic>;
@@ -357,6 +384,8 @@ class PaiBridge {
             result = client.notifyMarkRead(req.arg!);
           case _Op.status:
             result = client.status();
+          case _Op.setProvider:
+            result = client.setProvider(req.arg!);
           case _Op.voiceStatus:
             result = client.voiceStatus();
           case _Op.voiceListen:
@@ -450,6 +479,7 @@ enum _Op {
   notifyList,
   notifyMarkRead,
   status,
+  setProvider,
   voiceStatus,
   voiceListen,
   voiceListenStream,

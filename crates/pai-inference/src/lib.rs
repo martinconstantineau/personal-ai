@@ -910,14 +910,8 @@ mod tests {
 
     #[test]
     fn pick_chat_model_skips_embedders() {
-        let models = vec![
-            "nomic-embed-text:latest".into(),
-            "qwen2.5:0.5b".into(),
-        ];
-        assert_eq!(
-            pick_chat_model(&models).as_deref(),
-            Some("qwen2.5:0.5b")
-        );
+        let models = vec!["nomic-embed-text:latest".into(), "qwen2.5:0.5b".into()];
+        assert_eq!(pick_chat_model(&models).as_deref(), Some("qwen2.5:0.5b"));
         // All-embedding list still yields something rather than nothing.
         let embed_only = vec!["bge-m3:latest".into(), "nomic-embed-text".into()];
         assert_eq!(

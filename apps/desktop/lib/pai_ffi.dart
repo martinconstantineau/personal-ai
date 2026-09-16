@@ -91,6 +91,8 @@ class PaiClient {
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_send');
   late final _status = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_status');
+  late final _setProvider = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_set_provider');
   late final _voiceStatus = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_voice_status');
   late final _voiceListen = _lib.lookupFunction<_VoiceListenNative,
@@ -376,6 +378,10 @@ class PaiClient {
   /// Resolved runtime status: {provider, model, device, data_dir}.
   Map<String, dynamic> status() =>
       _json(_status(_handle)) as Map<String, dynamic>;
+
+  /// Re-point chat: {server_url?, model?} → {provider, model}.
+  Map<String, dynamic> setProvider(String request) =>
+      _call1(_setProvider, request);
 
   /// Voice capability probe: {stt, tts, mic, speaker, whisper_url}.
   Map<String, dynamic> voiceStatus() =>
