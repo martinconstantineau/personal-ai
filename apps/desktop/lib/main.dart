@@ -53,6 +53,7 @@ class _HomeShellState extends State<HomeShell> {
   Map<String, dynamic> _status = const {};
   StreamSubscription? _statusSub;
   final _visited = <int>{0};
+  final _chatKey = GlobalKey<_ChatScreenState>();
 
   @override
   void initState() {
@@ -132,7 +133,7 @@ class _HomeShellState extends State<HomeShell> {
     final pai = _pai!;
     switch (i) {
       case 0:
-        return ChatScreen(bridge: pai);
+        return ChatScreen(key: _chatKey, bridge: pai);
       case 1:
         return AppsScreen(bridge: pai);
       case 2:
@@ -176,6 +177,16 @@ class _HomeShellState extends State<HomeShell> {
       bindings: {
         for (var i = 0; i < _railKeys.length; i++)
           SingleActivator(_railKeys[i], control: true): () => _select(i),
+        const SingleActivator(LogicalKeyboardKey.keyK, control: true):
+            () {
+          _select(0);
+          _chatKey.currentState?.focusInput();
+        },
+        const SingleActivator(LogicalKeyboardKey.keyN, control: true):
+            () {
+          _select(0);
+          _chatKey.currentState?.newConversation();
+        },
       },
       child: Scaffold(
         body: Row(children: [
@@ -256,11 +267,19 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
+  final _inputFocus = FocusNode();
+
+  /// Ctrl+K lands here — jump focus to the message field.
+  void focusInput() => _inputFocus.requestFocus();
+
+  /// Ctrl+N lands here — same as the drawer's New chat button.
+  void newConversation() => _newConversation();
   final _scroll = ScrollController();
   PaiBridge? get _pai => widget.bridge;
   bool _ready = false;
   String? _error;
   bool _sending = false;
+  String _lastUserText = '';
   bool _listening = false;
   bool _speakReplies = false;
   Map<String, dynamic> _voice = const {};
@@ -274,6 +293,15 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     if (_pai != null) _onReady();
+  }
+
+  @override
+  void dispose() {
+    _statusSub?.cancel();
+    _inputFocus.dispose();
+    _input.dispose();
+    _scroll.dispose();
+    super.dispose();
   }
 
   @override
@@ -333,6 +361,22 @@ class _ChatScreenState extends State<ChatScreen> {
     return _Entry(role: role == 'user' ? 'you' : 'ai', text: text, at: at);
   }
 
+  /// Plugin-free export: the visible transcript goes to the clipboard
+  /// as "You (HH:MM): ..." lines.
+  void _copyTranscript() {
+    final buf = StringBuffer();
+    for (final e in _entries) {
+      if (e.streaming || e.text.isEmpty) continue;
+      final who =
+          e.role == 'you' ? 'You' : e.role == 'system' ? 'Event' : 'Assistant';
+      buf.writeln('$who (${_fmtHm(e.at)}): ${e.text}\n');
+    }
+    Clipboard.setData(ClipboardData(text: buf.toString()));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Transcript copied to clipboard'),
+        duration: Duration(seconds: 2)));
+  }
+
   void _scrollDown() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
@@ -344,6 +388,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _pai == null || _sending) return;
+    _lastUserText = text;
     _input.clear();
     final user = _Entry(role: 'you', text: text);
     final ai = _Entry(role: 'ai', streaming: true);
@@ -524,6 +569,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
             ]),
         actions: [
+          if (_entries.any((e) => !e.streaming && e.text.isNotEmpty))
+            IconButton(
+              icon: const Icon(Icons.copy_all_outlined),
+              tooltip: 'Copy transcript',
+              onPressed: _copyTranscript,
+            ),
           if (_sending)
             IconButton(
               icon: const Icon(Icons.stop_circle_outlined),
@@ -636,7 +687,18 @@ class _ChatScreenState extends State<ChatScreen> {
                   controller: _scroll,
                   padding: const EdgeInsets.all(12),
                   itemCount: _entries.length,
-                  itemBuilder: (_, i) => _Bubble(entry: _entries[i]),
+                  itemBuilder: (_, i) {
+                    final e = _entries[i];
+                    return _Bubble(
+                      entry: e,
+                      onRetry: e.isError && _lastUserText.isNotEmpty
+                          ? () {
+                              _input.text = _lastUserText;
+                              _send();
+                            }
+                          : null,
+                    );
+                  },
                 ),
         ),
         Padding(
@@ -645,6 +707,7 @@ class _ChatScreenState extends State<ChatScreen> {
             Expanded(
               child: TextField(
                 controller: _input,
+                focusNode: _inputFocus,
                 maxLines: null,
                 textInputAction: TextInputAction.send,
                 onChanged: (_) => setState(() {}),
@@ -731,17 +794,34 @@ Widget _errorView(BuildContext context, String err, VoidCallback onRetry) {
 String _fmtHm(DateTime t) =>
     '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
-class _Bubble extends StatelessWidget {
-  const _Bubble({required this.entry});
+class _Bubble extends StatefulWidget {
+  const _Bubble({required this.entry, this.onRetry});
   final _Entry entry;
+  final VoidCallback? onRetry;
+
+  @override
+  State<_Bubble> createState() => _BubbleState();
+}
+
+class _BubbleState extends State<_Bubble> {
+  bool _hov = false;
+
+  void _copy() {
+    Clipboard.setData(ClipboardData(text: widget.entry.text));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Copied'), duration: Duration(seconds: 1)));
+  }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final e = entry;
+    final e = widget.entry;
     final isYou = e.role == 'you';
     final isSys = e.role == 'system';
-    return Align(
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hov = true),
+      onExit: (_) => setState(() => _hov = false),
+      child: Align(
       alignment: isYou ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 4),
@@ -756,20 +836,44 @@ class _Bubble extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(
-            '${isYou ? 'You' : isSys ? 'Event' : 'Assistant'} · ${_fmtHm(e.at)}',
-            style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: cs.onSecondaryContainer.withValues(alpha: 0.6)),
-          ),
-          if (e.text.isNotEmpty || !e.streaming) Text(e.text),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(
+              '${isYou ? 'You' : isSys ? 'Event' : 'Assistant'} · ${_fmtHm(e.at)}',
+              style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: cs.onSecondaryContainer.withValues(alpha: 0.6)),
+            ),
+            if (_hov && !e.streaming && e.text.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(4),
+                  onTap: _copy,
+                  child: Icon(Icons.copy_outlined,
+                      size: 12,
+                      color:
+                          cs.onSecondaryContainer.withValues(alpha: 0.6)),
+                ),
+              ),
+          ]),
+          if (e.text.isNotEmpty || !e.streaming) SelectableText(e.text),
           if (e.isError && e.text.contains('provider'))
             Text(
                 'Check the provider endpoint — the Devices tab shows what\'s live',
                 style: TextStyle(
                     fontSize: 10,
                     color: cs.onSecondaryContainer.withValues(alpha: 0.6))),
+          if (e.isError && widget.onRetry != null)
+            TextButton.icon(
+                style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(0, 28)),
+                onPressed: widget.onRetry,
+                icon: const Icon(Icons.replay, size: 14),
+                label: const Text('Retry',
+                    style: TextStyle(fontSize: 12))),
           if (e.streaming && e.text.isEmpty)
             const SizedBox(
                 height: 16,
@@ -781,6 +885,7 @@ class _Bubble extends StatelessWidget {
                     fontSize: 10,
                     color: cs.onSecondaryContainer.withValues(alpha: 0.5))),
         ]),
+      ),
       ),
     );
   }
