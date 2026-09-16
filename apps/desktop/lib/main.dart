@@ -50,6 +50,8 @@ class _HomeShellState extends State<HomeShell> {
   String? _error;
   int _index = 0;
   int _unread = 0;
+  Map<String, dynamic> _status = const {};
+  StreamSubscription? _statusSub;
   final _visited = <int>{0};
 
   @override
@@ -73,6 +75,12 @@ class _HomeShellState extends State<HomeShell> {
           {'data_dir': dataDir, 'provider': provider});
       if (!mounted) return;
       setState(() => _pai = bridge);
+      _statusSub = bridge.statusStream.listen((st) {
+        if (mounted) setState(() => _status = st);
+      });
+      try {
+        await bridge.status();
+      } catch (_) {}
       _refreshUnread();
     } catch (e) {
       setState(() => _error = 'Core init failed: $e\n'
@@ -96,6 +104,27 @@ class _HomeShellState extends State<HomeShell> {
       _visited.add(i);
     });
     if (i == 3 || _unread > 0) _refreshUnread();
+  }
+
+  @override
+  void dispose() {
+    _statusSub?.cancel();
+    super.dispose();
+  }
+
+  /// Rail-bottom provider health: green when a real model serves chat,
+  /// amber on the echo fallback, grey until status lands.
+  Color _healthColor(ColorScheme cs) {
+    if (_status.isEmpty) return cs.onSurfaceVariant.withValues(alpha: 0.4);
+    return _status['provider'] == 'echo' ? Colors.amber : Colors.greenAccent;
+  }
+
+  String _healthMsg() {
+    if (_status.isEmpty) return 'Provider status unknown';
+    return _status['provider'] == 'echo'
+        ? 'No local model found — using echo fallback. '
+            'The Devices tab shows what is live.'
+        : 'Serving: ${_status['provider']} · ${_status['model']}';
   }
 
   Widget _tab(int i) {
@@ -154,6 +183,21 @@ class _HomeShellState extends State<HomeShell> {
           selectedIndex: _index,
           onDestinationSelected: _select,
           labelType: NavigationRailLabelType.all,
+          trailing: Expanded(
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: Tooltip(
+                  message: _healthMsg(),
+                  child: Icon(Icons.circle,
+                      size: 10,
+                      color: _healthColor(
+                          Theme.of(context).colorScheme)),
+                ),
+              ),
+            ),
+          ),
           destinations: [
             const NavigationRailDestination(
                 icon: Icon(Icons.chat_bubble_outline), label: Text('Chat')),
@@ -799,7 +843,7 @@ class _ApprovalSheet extends StatelessWidget {
   }
 }
 
-class _ConvDrawer extends StatelessWidget {
+class _ConvDrawer extends StatefulWidget {
   const _ConvDrawer({
     required this.convs,
     required this.interrupted,
@@ -820,7 +864,20 @@ class _ConvDrawer extends StatelessWidget {
   final void Function(String id, String mode) onScope;
 
   @override
+  State<_ConvDrawer> createState() => _ConvDrawerState();
+}
+
+class _ConvDrawerState extends State<_ConvDrawer> {
+  String _q = '';
+
+  @override
   Widget build(BuildContext context) {
+    final convs = _q.isEmpty
+        ? widget.convs
+        : widget.convs
+            .where((c) =>
+                '${c['title'] ?? ''}'.toLowerCase().contains(_q))
+            .toList();
     return Drawer(
       child: SafeArea(
         child: ListView(children: [
@@ -832,13 +889,35 @@ class _ConvDrawer extends StatelessWidget {
               IconButton(
                   tooltip: 'New chat',
                   icon: const Icon(Icons.add),
-                  onPressed: () => onNew()),
+                  onPressed: () => widget.onNew()),
               IconButton(
                   tooltip: 'New isolated chat (private memory)',
                   icon: const Icon(Icons.enhanced_encryption_outlined),
-                  onPressed: () => onNew(isolated: true)),
+                  onPressed: () => widget.onNew(isolated: true)),
             ]),
           ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: TextField(
+              decoration: const InputDecoration(
+                hintText: 'Filter chats',
+                prefixIcon: Icon(Icons.search, size: 18),
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (v) =>
+                  setState(() => _q = v.trim().toLowerCase()),
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (convs.isEmpty && widget.convs.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text('No chats match',
+                  style: TextStyle(
+                      color:
+                          Theme.of(context).colorScheme.onSurfaceVariant)),
+            ),
           for (final c in convs)
             ListTile(
               selected: c['active'] == true,
@@ -847,9 +926,10 @@ class _ConvDrawer extends StatelessWidget {
                   : Icons.chat_bubble_outline),
               title: Text('${c['title'] ?? 'Untitled'}',
                   maxLines: 1, overflow: TextOverflow.ellipsis),
-              subtitle: Text('${c['memory']}',
+              subtitle: Text(
+                  '${c['memory']} · ${_fmtTs(c['created_at'])}',
                   style: const TextStyle(fontSize: 11)),
-              onTap: () => onSelect(c['id'] as String),
+              onTap: () => widget.onSelect(c['id'] as String),
               trailing: PopupMenuButton<String>(
                 itemBuilder: (_) => [
                   const PopupMenuItem(value: 'rename', child: Text('Rename')),
@@ -863,12 +943,12 @@ class _ConvDrawer extends StatelessWidget {
                 onSelected: (v) => _menu(context, v, c),
               ),
             ),
-          if (interrupted.isNotEmpty) ...[
+          if (widget.interrupted.isNotEmpty) ...[
             const Divider(),
             const Padding(
                 padding: EdgeInsets.all(16),
                 child: Text('Interrupted runs')),
-            for (final r in interrupted)
+            for (final r in widget.interrupted)
               ListTile(
                 leading: const Icon(Icons.replay),
                 title: Text('${(r['id'] as String).substring(0, 8)} · ${r['state']}'),
@@ -876,7 +956,7 @@ class _ConvDrawer extends StatelessWidget {
                     style: const TextStyle(fontSize: 11)),
                 trailing: IconButton(
                     icon: const Icon(Icons.play_arrow),
-                    onPressed: () => onResume(r['id'] as String)),
+                    onPressed: () => widget.onResume(r['id'] as String)),
               ),
           ],
         ]),
@@ -899,14 +979,14 @@ class _ConvDrawer extends StatelessWidget {
                         child: const Text('Cancel')),
                     FilledButton(
                         onPressed: () {
-                          onRename(c['id'] as String, ctrl.text.trim());
+                          widget.onRename(c['id'] as String, ctrl.text.trim());
                           Navigator.pop(ctx);
                         },
                         child: const Text('Save')),
                   ],
                 ));
       case 'scope':
-        onScope(c['id'] as String,
+        widget.onScope(c['id'] as String,
             c['memory'] == 'isolated' ? 'shared' : 'isolated');
       case 'delete':
         showDialog(
@@ -924,7 +1004,7 @@ class _ConvDrawer extends StatelessWidget {
                             backgroundColor:
                                 Theme.of(ctx).colorScheme.error),
                         onPressed: () {
-                          onDelete(c['id'] as String);
+                          widget.onDelete(c['id'] as String);
                           Navigator.pop(ctx);
                         },
                         child: const Text('Delete')),
@@ -1016,6 +1096,11 @@ class _MemoriesScreenState extends State<MemoriesScreen> {
                               label: Text('${m['privacy']}',
                                   style: const TextStyle(fontSize: 10)),
                               visualDensity: VisualDensity.compact),
+                          if (m['created_at'] != null)
+                            Chip(
+                                label: Text(_fmtTs(m['created_at']),
+                                    style: const TextStyle(fontSize: 10)),
+                                visualDensity: VisualDensity.compact),
                         ]),
                         trailing: IconButton(
                           icon: Icon(Icons.delete_outline, color: cs.error),
@@ -2162,6 +2247,7 @@ class _AppsScreenState extends State<AppsScreen> {
 
 /// '2026-09-15T20:11:03.123Z' → '2026-09-15 20:11' for list subtitles.
 String _fmtTs(dynamic ts) {
+  if (ts == null) return '';
   final t = '$ts';
   return t.length > 16 ? t.substring(0, 16).replaceFirst('T', ' ') : t;
 }
