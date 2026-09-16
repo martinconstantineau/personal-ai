@@ -13,6 +13,7 @@ pai-identity.workspace = true
 pai-inference.workspace = true
 pai-models.workspace = true
 pai-media.workspace = true
+pai-mesh.workspace = true
 pai-memory.workspace = true
 pai-permissions.workspace = true
 pai-tools.workspace = true

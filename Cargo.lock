@@ -1935,6 +1935,7 @@ dependencies = [
  "pai-inference",
  "pai-media",
  "pai-memory",
+ "pai-mesh",
  "pai-models",
  "pai-notify",
  "pai-permissions",

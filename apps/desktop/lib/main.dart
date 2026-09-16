@@ -2578,6 +2578,15 @@ class _MediaScreenState extends State<MediaScreen> {
       builder: (ctx) => AlertDialog(
         title: const Text('Generate audio'),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Text(
+                'Runs on this device, or on a paired mesh peer when it '
+                'advertises media-run.',
+                style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+          ),
           TextField(
             controller: promptCtl,
             autofocus: true,

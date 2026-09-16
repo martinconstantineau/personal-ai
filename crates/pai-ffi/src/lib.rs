@@ -1632,23 +1632,71 @@ pub unsafe extern "C" fn pai_media_gen(
     }
     let secs = req.duration_seconds.unwrap_or(10).clamp(1, 300);
     let dir = std::path::PathBuf::from(&rt.data_dir);
-    let out: std::result::Result<Vec<u8>, String> = rt.rt.block_on(async {
-        let gen = pai_media::providers::detect(&dir, Duration::from_secs(2))
+    // Local audio-gen server first; when none is configured, fall back
+    // to a paired mesh peer advertising `media-run` — same routing the
+    // CLI's `pai audio gen --on any` uses.
+    let out: std::result::Result<(Vec<u8>, DeviceId), String> = rt.rt.block_on(async {
+        if let Some(gen) = pai_media::providers::detect(&dir, Duration::from_secs(2)).await {
+            return gen
+                .generate_audio(&req.prompt, secs)
+                .await
+                .map(|b| (b, rt.device))
+                .map_err(|e| e.to_string());
+        }
+        // Mesh: discover a paired peer, build a tokened relay transport
+        // to it, and let its broker find the media-run worker.
+        let ids = pai_identity::IdentityStore::new(rt.store.clone());
+        let bind = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            pai_mesh::MULTICAST_PORT,
+        );
+        let sock = pai_mesh::bind_listener(bind, Some(pai_mesh::MULTICAST_GROUP))
+            .map_err(|e| e.to_string())?;
+        let found = pai_mesh::discover(&sock, Duration::from_secs(3));
+        let paired =
+            pai_mesh::paired_announcements(&rt.store, &ids, found).map_err(|e| e.to_string())?;
+        let target = paired.first().ok_or_else(|| {
+            "no audio-gen server here and no paired mesh peer announcing".to_string()
+        })?;
+        let agree = pai_sync::crypto::agreement_key(rt.device, &dir).map_err(|e| e.to_string())?;
+        let token = pai_mesh::token_for(&agree.secret, &target.peer);
+        let transport = pai_sync::relay::RelayTransport::new(
+            format!("http://{}", target.relay_addr),
+            Some(token),
+        );
+        let vault = pai_sync::crypto::vault_key(&dir)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no vault key — pair a device first".to_string())?;
+        let client = pai_broker::rpc::BrokerClient::new(&transport, &vault, rt.device);
+        let to = client
+            .find_peer("media-run")
             .await
-            .ok_or_else(|| {
-                "no audio-gen server on this device — see `pai audio status`".to_string()
-            })?;
-        gen.generate_audio(&req.prompt, secs)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no paired device advertises media-run".to_string())?;
+        let payload = serde_json::json!({
+            "prompt": req.prompt, "duration_seconds": secs,
+        })
+        .to_string()
+        .into_bytes();
+        let resp = client
+            .call(to, "media-run", &payload, Duration::from_secs(660))
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        let v: serde_json::Value =
+            serde_json::from_slice(&resp).map_err(|e| format!("bad media-run reply: {e}"))?;
+        let bytes = v["audio_b64"]
+            .as_str()
+            .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+            .ok_or_else(|| "media-run reply missing audio_b64".to_string())?;
+        Ok((bytes, to))
     });
     let mut job = pai_media::jobs::new_job(pai_media::MediaJobKind::TextToAudio, &req.prompt);
     let params = serde_json::json!({"duration_seconds": secs}).to_string();
     let _ = pai_media::jobs::record(&rt.store, &job, Some(&params), Some(rt.device), None);
     match out {
-        Ok(bytes) => {
+        Ok((bytes, worker)) => {
             job.state = pai_media::JobState::Done;
-            job.placement_device = Some(rt.device);
+            job.placement_device = Some(worker);
             let blob = match rt.store.put_blob(&bytes) {
                 Ok(b) => b,
                 Err(e) => {
