@@ -65,6 +65,7 @@ const _railKeys = [
 class _HomeShellState extends State<HomeShell> {
   PaiBridge? _pai;
   String? _error;
+  String _dataDir = '';
   int _index = 0;
   int _unread = 0;
   Map<String, dynamic> _status = const {};
@@ -87,6 +88,7 @@ class _HomeShellState extends State<HomeShell> {
             ? '/data/data/com.example.pai_app/files'
             : '${Directory.current.path}/.pai-data');
     // 'auto' probes llama-server / Ollama / LM Studio, falls back to echo.
+    _dataDir = dataDir;
     final provider = Platform.environment['PAI_PROVIDER'] ?? 'auto';
     try {
       final bridge = await PaiBridge.start(
@@ -100,6 +102,7 @@ class _HomeShellState extends State<HomeShell> {
         await bridge.status();
       } catch (_) {}
       _refreshUnread();
+      _maybeWelcome();
     } catch (e) {
       setState(() => _error = 'Core init failed: $e\n'
           '(build the core: cargo build -p pai-ffi)');
@@ -113,6 +116,86 @@ class _HomeShellState extends State<HomeShell> {
       if (mounted) {
         setState(() => _unread = (r['unread'] as num? ?? 0).toInt());
       }
+    } catch (_) {}
+  }
+
+  /// First run: show the welcome once — a marker file in the data dir
+  /// is enough; no account, nothing leaves the device.
+  void _maybeWelcome() {
+    final marker = File('$_dataDir/.onboarded');
+    if (marker.existsSync()) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _helpDialog(firstRun: true);
+    });
+  }
+
+  /// Feature tour + shortcuts — shown on first run, and reachable any
+  /// time via the rail help button or F1.
+  void _helpDialog({bool firstRun = false}) {
+    final cs = Theme.of(context).colorScheme;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(firstRun ? 'Welcome to Personal AI' : 'Personal AI'),
+        content: SizedBox(
+          width: 440,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text('local-first - private - auditable',
+                style:
+                    TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+            const SizedBox(height: 16),
+            const _FeatureRow(
+                icon: Icons.chat_bubble_outline,
+                title: 'Chat on local models',
+                body: 'llama-server, Ollama, and LM Studio are detected '
+                    'automatically - switch models from Devices.'),
+            const _FeatureRow(
+                icon: Icons.sd_storage_outlined,
+                title: 'Portable model packs',
+                body: 'Install models to a flash drive - plug it into '
+                    'another machine, rescan, serve.'),
+            const _FeatureRow(
+                icon: Icons.music_note_outlined,
+                title: 'Media generation',
+                body: 'Generate audio on this device or a paired mesh '
+                    'peer advertising media-run.'),
+            const _FeatureRow(
+                icon: Icons.policy_outlined,
+                title: 'Audited and permissioned',
+                body: 'Every action lands in Activity; app capabilities '
+                    'live under Permissions.'),
+            const Divider(height: 24),
+            const Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Shortcuts',
+                    style:
+                        TextStyle(fontWeight: FontWeight.w600))),
+            const SizedBox(height: 6),
+            const _ShortcutRow('Ctrl+1-9,0', 'jump to a section'),
+            const _ShortcutRow('Ctrl+K', 'focus the message field'),
+            const _ShortcutRow('Ctrl+N', 'new chat'),
+            const _ShortcutRow('F1', 'this panel'),
+          ]),
+        ),
+        actions: [
+          FilledButton(
+              onPressed: () {
+                if (firstRun) {
+                  Navigator.of(ctx).pop();
+                  _dismissMarker();
+                } else {
+                  Navigator.of(ctx).pop();
+                }
+              },
+              child: Text(firstRun ? 'Get started' : 'Close')),
+        ],
+      ),
+    );
+  }
+
+  void _dismissMarker() {
+    try {
+      File('$_dataDir/.onboarded').writeAsStringSync('seen');
     } catch (_) {}
   }
 
@@ -214,6 +297,7 @@ class _HomeShellState extends State<HomeShell> {
           _select(0);
           _chatKey.currentState?.newConversation();
         },
+        const SingleActivator(LogicalKeyboardKey.f1): _helpDialog,
       },
       child: LayoutBuilder(
         builder: (_, c) {
@@ -258,13 +342,22 @@ class _HomeShellState extends State<HomeShell> {
                         alignment: Alignment.bottomCenter,
                         child: Padding(
                           padding: const EdgeInsets.only(bottom: 14),
-                          child: Tooltip(
+                          child: Column(mainAxisSize: MainAxisSize.min,
+                              children: [
+                            IconButton(
+                                icon: const Icon(Icons.help_outline,
+                                    size: 18),
+                                tooltip: 'About & shortcuts (F1)',
+                                onPressed: _helpDialog),
+                            const SizedBox(height: 6),
+                            Tooltip(
                             message: _healthMsg(),
                             child: Icon(Icons.circle,
                                 size: 10,
                                 color: _healthColor(
                                     Theme.of(context).colorScheme)),
-                          ),
+                            ),
+                          ]),
                         ),
                       ),
                     ),
@@ -2535,6 +2628,58 @@ String _fmtTs(dynamic ts) {
   return t.length > 16 ? t.substring(0, 16).replaceFirst('T', ' ') : t;
 }
 
+
+/// Feature row used by the welcome/help dialog.
+class _FeatureRow extends StatelessWidget {
+  const _FeatureRow(
+      {required this.icon, required this.title, required this.body});
+  final IconData icon;
+  final String title;
+  final String body;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(icon, size: 20, color: cs.primary),
+        const SizedBox(width: 12),
+        Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+              Text(title,
+                  style: const TextStyle(fontWeight: FontWeight.w600)),
+              Text(body,
+                  style: TextStyle(
+                      color: cs.onSurfaceVariant, fontSize: 12)),
+            ])),
+      ]),
+    );
+  }
+}
+
+/// Shortcut row used by the welcome/help dialog.
+class _ShortcutRow extends StatelessWidget {
+  const _ShortcutRow(this.keys, this.action);
+  final String keys;
+  final String action;
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(children: [
+        SizedBox(
+            width: 110,
+            child: Text(keys,
+                style: TextStyle(color: cs.primary, fontSize: 12))),
+        Text(action,
+            style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
+      ]),
+    );
+  }
+}
 
 /// Media — the media_jobs log (local + broker-routed generation work)
 /// plus a local audio-generation action. Remote jobs submitted through
