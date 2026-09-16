@@ -2493,8 +2493,11 @@ class DevicesScreen extends StatefulWidget {
 class _DevicesScreenState extends State<DevicesScreen> {
   Map<String, dynamic>? _detect;
   List<dynamic> _peers = const [];
+  List<dynamic> _models = const [];
   Map<String, dynamic> _status = const {};
   bool _loading = true;
+  bool _scanning = false;
+  String? _serving;
   String? _error;
 
   @override
@@ -2503,19 +2506,56 @@ class _DevicesScreenState extends State<DevicesScreen> {
     _load();
   }
 
+  Future<void> _scan() async {
+    if (_scanning) return;
+    setState(() => _scanning = true);
+    try {
+      final models = await widget.bridge.modelsScan();
+      if (mounted) setState(() => _models = models);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Scan failed: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  Future<void> _serve(String slug) async {
+    if (_serving != null) return;
+    setState(() => _serving = slug);
+    try {
+      final r = await widget.bridge.modelsServe(slug);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(r['error'] != null
+              ? '${r['error']}'
+              : 'Serving $slug — chat switched to it')));
+      await _load();
+    } finally {
+      if (mounted) setState(() => _serving = null);
+    }
+  }
+
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
       final d = await widget.bridge.detect();
       final p = await widget.bridge.peersList();
       Map<String, dynamic> st = const {};
+      List<dynamic> models = const [];
       try {
         st = await widget.bridge.status();
+      } catch (_) {}
+      try {
+        models = await widget.bridge.modelsList();
       } catch (_) {}
       if (!mounted) return;
       setState(() {
         _detect = d;
         _peers = (p['peers'] as List? ?? const []);
+        _models = models;
         _status = st;
         _loading = false;
         _error = d['error'] as String? ?? p['error'] as String?;
@@ -2637,6 +2677,81 @@ class _DevicesScreenState extends State<DevicesScreen> {
                     title: Text(name),
                     subtitle: Text(binaries[name] as String? ?? 'not found',
                         maxLines: 1, overflow: TextOverflow.ellipsis)),
+              const SizedBox(height: 16),
+              Row(children: [
+                Text('Model packs',
+                    style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                IconButton(
+                    icon: _scanning
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child:
+                                CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.sync),
+                    tooltip: 'Rescan drives for pai-models/ packs',
+                    onPressed: _scanning ? null : _scan),
+              ]),
+              const SizedBox(height: 4),
+              if (_models.isEmpty)
+                Card(
+                    child: ListTile(
+                  leading: Icon(Icons.sd_storage_outlined,
+                      color: cs.onSurfaceVariant),
+                  title: const Text('No models installed'),
+                  subtitle: const Text(
+                      '`pai models install <slug> --to D:` builds a portable '
+                      'pack — plug the drive in and rescan.'),
+                ))
+              else
+                for (final m in _models)
+                  Card(
+                      child: ListTile(
+                    leading: Icon(
+                        m['online'] == true
+                            ? Icons.sd_storage
+                            : Icons.sd_storage_outlined,
+                        color: m['online'] == true
+                            ? cs.primary
+                            : cs.onSurfaceVariant),
+                    title: Text('${m['slug']}'),
+                    subtitle: Text([
+                      '${m['family'] ?? ''}',
+                      if (m['quant'] != null) '${m['quant']}',
+                      '${m['size_mb'] ?? '?'} MB',
+                      if (m['path'] != null) '${m['path']}',
+                    ].join(' · '),
+                        maxLines: 2, overflow: TextOverflow.ellipsis),
+                    trailing: m['serving'] == true
+                        ? Chip(
+                            label: Text('serving',
+                                style: TextStyle(
+                                    fontSize: 10, color: cs.primary)),
+                            visualDensity: VisualDensity.compact)
+                        : _serving == m['slug']
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2))
+                            : m['online'] == true
+                                ? TextButton(
+                                    onPressed: () =>
+                                        _serve('${m['slug']}'),
+                                    child: const Text('Serve'))
+                                : Tooltip(
+                                    message:
+                                        'Drive not mounted — plug it in and rescan',
+                                    child: Chip(
+                                        label: Text('offline',
+                                            style: TextStyle(
+                                                fontSize: 10,
+                                                color: cs
+                                                    .onSurfaceVariant)),
+                                        visualDensity:
+                                            VisualDensity.compact)),
+                  )),
               const SizedBox(height: 16),
               Text('Paired devices',
                   style: Theme.of(context).textTheme.titleMedium),

@@ -98,6 +98,29 @@ class PaiBridge {
   Future<Map<String, dynamic>> detect() async =>
       (await _call(_Op.detect)) as Map<String, dynamic>;
 
+  /// Installed/pack models with online+serving status.
+  Future<List<dynamic>> modelsList() async =>
+      (await _call(_Op.modelsList)) as List<dynamic>;
+
+  /// Rescan pai-models/ pack roots (freshly plugged drives), then list.
+  Future<List<dynamic>> modelsScan() async =>
+      (await _call(_Op.modelsScan)) as List<dynamic>;
+
+  /// Serve a model via llama-server, then refresh shared status so the
+  /// header + health dot follow.
+  Future<Map<String, dynamic>> modelsServe(String slug,
+      {int port = 0}) async {
+    final r = (await _call(_Op.modelsServe,
+            arg: jsonEncode({'slug': slug, 'port': port})))
+        as Map<String, dynamic>;
+    if (r['error'] == null) {
+      try {
+        await status();
+      } catch (_) {}
+    }
+    return r;
+  }
+
   Future<Map<String, dynamic>> conversationNew({bool isolated = false}) async =>
       (await _call(_Op.convNew, arg: isolated ? 'isolated' : 'shared'))
           as Map<String, dynamic>;
@@ -330,6 +353,16 @@ class PaiBridge {
             result = {'ok': true};
           case _Op.memories:
             result = client.memories();
+          case _Op.modelsList:
+            result = client.modelsList();
+          case _Op.modelsScan:
+            result = client.modelsScan();
+          case _Op.modelsServe:
+            {
+              final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+              result = client.modelsServe(
+                  a['slug'] as String, (a['port'] as num? ?? 0).toInt());
+            }
           case _Op.audit:
             result = client.audit();
           case _Op.runs:
@@ -455,6 +488,9 @@ enum _Op {
   approve,
   cancel,
   memories,
+  modelsList,
+  modelsScan,
+  modelsServe,
   audit,
   runs,
   conversations,

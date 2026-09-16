@@ -30,6 +30,8 @@ typedef _ShareGrantNative = Pointer<Utf8> Function(
     Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Int64, Pointer<Utf8>);
 typedef _CancelNative = Void Function(Pointer<Void>);
 typedef _DetectNative = Pointer<Utf8> Function();
+typedef _StrIntNative = Pointer<Utf8> Function(
+    Pointer<Void>, Pointer<Utf8>, Int32);
 
 class PaiClient {
   PaiClient._(this._lib, this._handle);
@@ -91,6 +93,13 @@ class PaiClient {
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_send');
   late final _status = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_status');
+  late final _modelsList = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_models_list');
+  late final _modelsScan = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_models_scan');
+  late final _modelsServe = _lib.lookupFunction<_StrIntNative,
+          Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, int)>(
+      'pai_models_serve');
   late final _setProvider = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_set_provider');
   late final _voiceStatus = _lib.lookupFunction<_NoArgNative,
@@ -382,6 +391,25 @@ class PaiClient {
   /// Re-point chat: {server_url?, model?} → {provider, model}.
   Map<String, dynamic> setProvider(String request) =>
       _call1(_setProvider, request);
+
+  /// Known/installed models with pack status:
+  /// [{slug, family, quant, size_mb, capabilities, installed, online, path, serving}].
+  List<dynamic> modelsList() =>
+      _json(_modelsList(_handle)) as List<dynamic>;
+
+  /// Rescan pai-models/ pack roots (newly plugged drives count), then list.
+  List<dynamic> modelsScan() =>
+      _json(_modelsScan(_handle)) as List<dynamic>;
+
+  /// Spawn llama-server for [slug] on [port] and point chat at it.
+  Map<String, dynamic> modelsServe(String slug, int port) {
+    final s = slug.toNativeUtf8();
+    try {
+      return _json(_modelsServe(_handle, s, port)) as Map<String, dynamic>;
+    } finally {
+      malloc.free(s);
+    }
+  }
 
   /// Voice capability probe: {stt, tts, mic, speaker, whisper_url}.
   Map<String, dynamic> voiceStatus() =>

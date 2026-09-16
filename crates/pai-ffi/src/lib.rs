@@ -26,6 +26,7 @@ use pai_inference::{
     EchoProvider, LlamaServerProvider, SpeechToTextProvider, TextToSpeechProvider,
 };
 use pai_memory::{MemoryBackend, MemoryScopeQuery, RecallQuery, SqliteMemory};
+use pai_models::ModelManager;
 use pai_permissions::{all_permissions, Permission, PolicyEngine, PolicyTable};
 use pai_storage::Store;
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,11 @@ pub struct PaiRuntime {
     /// Base URL the chat provider points at — kept so `pai_set_provider`
     /// can rebuild it on a different model/endpoint without re-init.
     server_url: String,
+    /// llama-server child spawned by `pai_models_serve` — killed on free
+    /// and replaced when a different model is served.
+    llama_child: Mutex<Option<std::process::Child>>,
+    /// Slug that child is serving — the Devices screen badges it.
+    serving_slug: Mutex<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -282,6 +288,8 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         email,
         voice,
         server_url,
+        llama_child: Mutex::new(None),
+        serving_slug: Mutex::new(None),
     })
 }
 
@@ -1285,6 +1293,22 @@ pub unsafe extern "C" fn pai_status(handle: *mut PaiRuntime) -> *mut c_char {
     }))
 }
 
+/// Point chat at an OpenAI-compatible endpoint — shared by
+/// `pai_set_provider` and `pai_models_serve`.
+fn apply_provider(rt: &mut PaiRuntime, base_url: &str, model: &str) {
+    rt.server_url = base_url.to_string();
+    rt.def.model = Some(model.to_string());
+    rt.agent.providers.register(Arc::new(
+        LlamaServerProvider::new(base_url, model.to_string())
+            .with_timeout(Duration::from_secs(120)),
+    ));
+    rt.def.provider = "llama-server".into();
+    rt.agent.vision = Some(Arc::new(pai_vision::LlamaVisionProvider::new(
+        base_url,
+        model.to_string(),
+    )));
+}
+
 /// Re-point chat at a different endpoint/model without re-init:
 /// `{"server_url"?, "model"?}`. Rebuilds the llama-server provider
 /// and vision adapter so the next send uses them. Returns the resolved
@@ -1315,16 +1339,9 @@ pub unsafe extern "C" fn pai_set_provider(
     if let Some(m) = cfg.model {
         rt.def.model = Some(m);
     }
+    let url = rt.server_url.clone();
     let model = rt.def.model.clone().unwrap_or_default();
-    rt.agent.providers.register(Arc::new(
-        LlamaServerProvider::new(&rt.server_url, model.clone())
-            .with_timeout(Duration::from_secs(120)),
-    ));
-    rt.def.provider = "llama-server".into();
-    rt.agent.vision = Some(Arc::new(pai_vision::LlamaVisionProvider::new(
-        &rt.server_url,
-        model,
-    )));
+    apply_provider(rt, &url, &model);
     let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
     e.device = Some(rt.device);
     e.detail = serde_json::json!({
@@ -1332,6 +1349,155 @@ pub unsafe extern "C" fn pai_set_provider(
     let _ = rt.audit.record(&e);
     to_c(serde_json::json!({
         "provider": rt.def.provider, "model": rt.def.model}))
+}
+
+/// Serialize the models table for the Devices screen — marks each row
+/// online/offline by whether its file exists right now (a pack on an
+/// unplugged drive lists offline) and `serving` for the managed
+/// llama-server child.
+fn models_json(
+    rt: &PaiRuntime,
+    rows: Vec<(Model, bool, Option<std::path::PathBuf>)>,
+) -> serde_json::Value {
+    let serving = rt.serving_slug.lock().unwrap().clone();
+    serde_json::json!(rows
+        .iter()
+        .map(|(m, installed, path)| {
+            serde_json::json!({
+                "slug": m.slug,
+                "family": m.family,
+                "provider": m.provider,
+                "quant": m.quantization,
+                "size_mb": m.size_bytes / 1_000_000,
+                "context": m.context_length,
+                "capabilities": m.capabilities,
+                "installed": installed,
+                "online": path.as_ref().map(|p| p.exists()).unwrap_or(false),
+                "path": path.as_ref().map(|p| p.display().to_string()),
+                "serving": serving.as_deref() == Some(m.slug.as_str()),
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
+/// Known models: everything the registry has seen — installed locally,
+/// adopted from a pack, or catalog-only. `[{slug, ..., online, serving}]`.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_models_list(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    let mgr = ModelManager::new(rt.store.clone(), std::path::Path::new(&rt.data_dir));
+    match mgr.list() {
+        Ok(rows) => to_c(models_json(rt, rows)),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Rescan mounted `pai-models/` pack roots — a freshly plugged drive
+/// counts — adopt anything found, then return the list. This is the
+/// plug-and-play path: copy a pack onto a flash drive on one device,
+/// plug it into another, scan, serve.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_models_scan(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    let mgr = ModelManager::new(rt.store.clone(), std::path::Path::new(&rt.data_dir));
+    match mgr.scan().and_then(|_| mgr.list()) {
+        Ok(rows) => to_c(models_json(rt, rows)),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Serve an installed or pack-resident model via `llama-server` and
+/// point chat at it. `slug` resolves through `locate()` — recorded path
+/// first, pack roots on remapped drive letters after. `port` <= 0
+/// defaults to 8090. Returns `{serving, url, provider, model}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `slug` is NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_models_serve(
+    handle: *mut PaiRuntime,
+    slug: *const c_char,
+    port: i32,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let slug = match read_str(slug) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let port = if port > 0 { port as u16 } else { 8090 };
+    let mgr = ModelManager::new(rt.store.clone(), std::path::Path::new(&rt.data_dir));
+    let path = match mgr.locate(&slug) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return to_c(serde_json::json!({
+                "error": format!("{slug} not found — is its drive plugged in?")
+            }))
+        }
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let bin = match pai_inference::find_in_path("llama-server") {
+        Some(b) => b,
+        None => {
+            return to_c(serde_json::json!({
+                "error": "llama-server not on PATH — install llama.cpp"
+            }))
+        }
+    };
+    if let Some(mut c) = rt.llama_child.lock().unwrap().take() {
+        let _ = c.kill();
+    }
+    let mut child = match std::process::Command::new(&bin)
+        .args([
+            "-m",
+            &path.to_string_lossy(),
+            "--port",
+            &port.to_string(),
+            "--host",
+            "127.0.0.1",
+        ])
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return to_c(serde_json::json!({
+                "error": format!("spawn llama-server: {e}")
+            }))
+        }
+    };
+    let url = format!("http://127.0.0.1:{port}");
+    let outcome: std::result::Result<(), String> = rt.rt.block_on(async {
+        for _ in 0..45 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if let Ok(Some(status)) = child.try_wait() {
+                return Err(format!("llama-server exited early: {status}"));
+            }
+            if pai_inference::detect_endpoints(Duration::from_millis(400))
+                .await
+                .iter()
+                .any(|e| e.base_url == url)
+            {
+                return Ok(());
+            }
+        }
+        Err("llama-server did not come up in 45s".into())
+    });
+    if let Err(e) = outcome {
+        let _ = child.kill();
+        return to_c(serde_json::json!({"error": e}));
+    }
+    *rt.llama_child.lock().unwrap() = Some(child);
+    *rt.serving_slug.lock().unwrap() = Some(slug.to_string());
+    apply_provider(rt, &url, &slug);
+    let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+    e.device = Some(rt.device);
+    e.detail = serde_json::json!({"served_model": slug, "url": url});
+    let _ = rt.audit.record(&e);
+    to_c(serde_json::json!({
+        "serving": slug, "url": url,
+        "provider": "llama-server", "model": slug}))
 }
 
 /// Voice capability probe: `{stt, tts, mic, speaker, whisper_url}`.
@@ -2109,6 +2275,10 @@ pub unsafe extern "C" fn pai_free_string(s: *mut c_char) {
 #[no_mangle]
 pub unsafe extern "C" fn pai_free(handle: *mut PaiRuntime) {
     if !handle.is_null() {
-        drop(Box::from_raw(handle));
+        let rt = Box::from_raw(handle);
+        if let Some(mut c) = rt.llama_child.lock().unwrap().take() {
+            let _ = c.kill();
+        }
+        drop(rt);
     }
 }
