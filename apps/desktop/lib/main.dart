@@ -17,38 +17,25 @@ class PaiApp extends StatelessWidget {
               seedColor: const Color(0xFF6C5CE7), brightness: Brightness.dark),
           useMaterial3: true,
         ),
-        home: const ChatScreen(),
+        home: const HomeShell(),
       );
 }
 
-/// One chat transcript row. `streaming` marks the in-flight assistant reply.
-class _Entry {
-  _Entry({required this.role, this.text = '', this.sub = '', this.streaming = false});
-  final String role; // you | ai | system
-  String text;
-  String sub;
-  bool streaming;
-  bool isError = false;
-}
-
-class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key});
+/// App shell — one shared `PaiBridge`, a labeled rail for every surface,
+/// and lazy tab construction (each screen builds on first visit, keeps
+/// state after).
+class HomeShell extends StatefulWidget {
+  const HomeShell({super.key});
   @override
-  State<ChatScreen> createState() => _ChatScreenState();
+  State<HomeShell> createState() => _HomeShellState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
-  final _input = TextEditingController();
-  final _scroll = ScrollController();
+class _HomeShellState extends State<HomeShell> {
   PaiBridge? _pai;
   String? _error;
-  bool _sending = false;
-  bool _listening = false;
-  bool _speakReplies = false;
-  Map<String, dynamic> _voice = const {};
-  final _entries = <_Entry>[];
-  List<dynamic> _convs = const [];
-  List<dynamic> _interrupted = const [];
+  int _index = 0;
+  int _unread = 0;
+  final _visited = <int>{0};
 
   @override
   void initState() {
@@ -71,6 +58,165 @@ class _ChatScreenState extends State<ChatScreen> {
           {'data_dir': dataDir, 'provider': provider});
       if (!mounted) return;
       setState(() => _pai = bridge);
+      _refreshUnread();
+    } catch (e) {
+      setState(() => _error = 'Core init failed: $e\n'
+          '(build the core: cargo build -p pai-ffi)');
+    }
+  }
+
+  Future<void> _refreshUnread() async {
+    if (_pai == null) return;
+    try {
+      final r = await _pai!.notifyList(unreadOnly: true);
+      if (mounted) {
+        setState(() => _unread = (r['unread'] as num? ?? 0).toInt());
+      }
+    } catch (_) {}
+  }
+
+  void _select(int i) {
+    setState(() {
+      _index = i;
+      _visited.add(i);
+    });
+    if (i == 3 || _unread > 0) _refreshUnread();
+  }
+
+  Widget _tab(int i) {
+    if (!_visited.contains(i)) return const SizedBox.shrink();
+    final pai = _pai!;
+    switch (i) {
+      case 0:
+        return ChatScreen(bridge: pai);
+      case 1:
+        return AppsScreen(bridge: pai);
+      case 2:
+        return DevicesScreen(bridge: pai);
+      case 3:
+        return NotificationsScreen(bridge: pai, onChanged: _refreshUnread);
+      case 4:
+        return MemoriesScreen(bridge: pai);
+      case 5:
+        return DocumentsScreen(bridge: pai);
+      case 6:
+        return EmailScreen(bridge: pai);
+      case 7:
+        return ActivityScreen(bridge: pai);
+      case 8:
+        return PoliciesScreen(bridge: pai);
+      default:
+        return const SizedBox.shrink();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    if (_pai == null) {
+      return Scaffold(
+          body: Center(
+              child: _error != null
+                  ? Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(_error!,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: cs.error)))
+                  : const Column(mainAxisSize: MainAxisSize.min, children: [
+                      CircularProgressIndicator(),
+                      SizedBox(height: 16),
+                      Text('Starting core…'),
+                    ])));
+    }
+    return Scaffold(
+      body: Row(children: [
+        NavigationRail(
+          selectedIndex: _index,
+          onDestinationSelected: _select,
+          labelType: NavigationRailLabelType.all,
+          destinations: [
+            const NavigationRailDestination(
+                icon: Icon(Icons.chat_bubble_outline), label: Text('Chat')),
+            const NavigationRailDestination(
+                icon: Icon(Icons.apps_outlined), label: Text('Apps')),
+            const NavigationRailDestination(
+                icon: Icon(Icons.devices_outlined), label: Text('Devices')),
+            NavigationRailDestination(
+                icon: Badge.count(
+                    count: _unread,
+                    isLabelVisible: _unread > 0,
+                    child: const Icon(Icons.notifications_outlined)),
+                label: const Text('Alerts')),
+            const NavigationRailDestination(
+                icon: Icon(Icons.psychology_outlined), label: Text('Memories')),
+            const NavigationRailDestination(
+                icon: Icon(Icons.description_outlined),
+                label: Text('Documents')),
+            const NavigationRailDestination(
+                icon: Icon(Icons.mail_outline), label: Text('Email')),
+            const NavigationRailDestination(
+                icon: Icon(Icons.receipt_long_outlined),
+                label: Text('Activity')),
+            const NavigationRailDestination(
+                icon: Icon(Icons.policy_outlined), label: Text('Permissions')),
+          ],
+        ),
+        const VerticalDivider(width: 1),
+        Expanded(
+            child: IndexedStack(
+                index: _index, children: List.generate(9, _tab))),
+      ]),
+    );
+  }
+}
+
+/// One chat transcript row. `streaming` marks the in-flight assistant reply.
+class _Entry {
+  _Entry({required this.role, this.text = '', this.sub = '', this.streaming = false});
+  final String role; // you | ai | system
+  String text;
+  String sub;
+  bool streaming;
+  bool isError = false;
+}
+
+class ChatScreen extends StatefulWidget {
+  const ChatScreen({super.key, required this.bridge});
+  final PaiBridge? bridge;
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  final _input = TextEditingController();
+  final _scroll = ScrollController();
+  PaiBridge? get _pai => widget.bridge;
+  bool _ready = false;
+  String? _error;
+  bool _sending = false;
+  bool _listening = false;
+  bool _speakReplies = false;
+  Map<String, dynamic> _voice = const {};
+  final _entries = <_Entry>[];
+  List<dynamic> _convs = const [];
+  List<dynamic> _interrupted = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    if (_pai != null) _onReady();
+  }
+
+  @override
+  void didUpdateWidget(ChatScreen old) {
+    super.didUpdateWidget(old);
+    if (old.bridge == null && _pai != null) _onReady();
+  }
+
+  Future<void> _onReady() async {
+    if (_ready) return;
+    _ready = true;
+    try {
       await _loadHistory();
       await _refreshConvs();
       final runs = await _pai!.runs();
@@ -78,8 +224,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final voice = await _pai!.voiceStatus();
       if (mounted) setState(() => _voice = voice);
     } catch (e) {
-      setState(() => _error = 'Core init failed: $e\n'
-          '(build the core: cargo build -p pai-ffi)');
+      if (mounted) setState(() => _error = 'Load failed: $e');
     }
   }
 
@@ -188,7 +333,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 offset: _input.text.length);
           } else {
             _error =
-                'heard you, but whisper-server is not configured — see `pai voice status`';
+                'Heard you, but whisper-server is not configured — see `pai voice status`';
           }
         });
       }
@@ -305,46 +450,6 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: () =>
                   setState(() => _speakReplies = !_speakReplies),
             ),
-          IconButton(
-            icon: const Icon(Icons.psychology_outlined),
-            tooltip: 'Memories',
-            onPressed: _pai == null
-                ? null
-                : () => Navigator.of(context).push(MaterialPageRoute(
-                    builder: (_) => MemoriesScreen(bridge: _pai!))),
-          ),
-          IconButton(
-            icon: const Icon(Icons.description_outlined),
-            tooltip: 'Documents',
-            onPressed: _pai == null
-                ? null
-                : () => Navigator.of(context).push(MaterialPageRoute(
-                    builder: (_) => DocumentsScreen(bridge: _pai!))),
-          ),
-          IconButton(
-            icon: const Icon(Icons.mail_outline),
-            tooltip: 'Email',
-            onPressed: _pai == null
-                ? null
-                : () => Navigator.of(context).push(MaterialPageRoute(
-                    builder: (_) => EmailScreen(bridge: _pai!))),
-          ),
-          IconButton(
-            icon: const Icon(Icons.policy_outlined),
-            tooltip: 'Permissions',
-            onPressed: _pai == null
-                ? null
-                : () => Navigator.of(context).push(MaterialPageRoute(
-                    builder: (_) => PoliciesScreen(bridge: _pai!))),
-          ),
-          IconButton(
-            icon: const Icon(Icons.apps_outlined),
-            tooltip: 'Apps',
-            onPressed: _pai == null
-                ? null
-                : () => Navigator.of(context).push(MaterialPageRoute(
-                    builder: (_) => AppsScreen(bridge: _pai!))),
-          ),
         ],
       ),
       drawer: _pai == null
@@ -406,8 +511,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 onSubmitted: (_) => _send(),
                 decoration: InputDecoration(
                   hintText: _pai == null
-                      ? 'waiting for core…'
-                      : 'message — try "remember that I like tea"',
+                      ? 'Waiting for core…'
+                      : 'Message — try "remember that I like tea"',
                   border: const OutlineInputBorder(),
                   isDense: true,
                 ),
@@ -478,6 +583,12 @@ class _Bubble extends StatelessWidget {
                 color: cs.onSecondaryContainer.withValues(alpha: 0.6)),
           ),
           if (e.text.isNotEmpty || !e.streaming) Text(e.text),
+          if (e.isError && e.text.contains('provider'))
+            Text(
+                'Check the provider endpoint — the Devices tab shows what\'s live',
+                style: TextStyle(
+                    fontSize: 10,
+                    color: cs.onSecondaryContainer.withValues(alpha: 0.6))),
           if (e.streaming && e.text.isEmpty)
             const SizedBox(
                 height: 16,
@@ -523,7 +634,7 @@ class _ApprovalSheet extends StatelessWidget {
           const SizedBox(height: 8),
           Wrap(spacing: 6, children: [
             Chip(
-              label: Text('risk: ${req['risk']}',
+              label: Text('Risk: ${req['risk']}',
                   style: const TextStyle(fontSize: 11)),
               visualDensity: VisualDensity.compact,
             ),
@@ -718,7 +829,7 @@ class _MemoriesScreenState extends State<MemoriesScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _items.isEmpty
-              ? const Center(child: Text('nothing remembered yet'))
+              ? const Center(child: Text('Nothing remembered yet.'))
               : ListView.builder(
                   itemCount: _items.length,
                   itemBuilder: (_, i) {
@@ -897,7 +1008,7 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                       controller: _searchCtrl,
                       decoration: const InputDecoration(
                           labelText: 'Search sections',
-                          hintText: 'keyword or phrase'),
+                          hintText: 'Keyword or phrase'),
                       onSubmitted: (_) => _search(),
                     ),
                   ),
@@ -917,7 +1028,7 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                         dense: true,
                         leading: Text('[D${i + 1}]',
                             style: TextStyle(color: cs.primary)),
-                        title: Text('${h['title'] ?? "untitled"} §${h['section']}',
+                        title: Text('${h['title'] ?? 'Untitled'} §${h['section']}',
                             style: const TextStyle(fontSize: 12)),
                         subtitle: Text('${h['snippet']}',
                             maxLines: 2, overflow: TextOverflow.ellipsis),
@@ -929,7 +1040,7 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
               Expanded(
                 child: _items.isEmpty
                     ? const Center(
-                        child: Text('no documents ingested yet'))
+                        child: Text('No documents yet — ingest a file to search it.'))
                     : ListView.builder(
                         itemCount: _items.length,
                         itemBuilder: (_, i) {
@@ -937,7 +1048,7 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                           return ListTile(
                             leading: const Icon(Icons.article_outlined),
                             title:
-                                Text('${d['title'] ?? "untitled"}'),
+                                Text('${d['title'] ?? 'Untitled'}'),
                             subtitle: Text(
                                 '${d['mime']}  •  ${d['sections']} sections'),
                             trailing: IconButton(
@@ -1006,7 +1117,7 @@ class _EmailScreenState extends State<EmailScreen> {
     showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
-              title: Text(msg['subject'] ?? '(no subject)'),
+              title: Text(msg['subject'] ?? '(No subject)'),
               content: SingleChildScrollView(
                   child: Text(msg['body_text'] ?? '(empty)')),
               actions: [
@@ -1113,7 +1224,7 @@ class _EmailScreenState extends State<EmailScreen> {
                                     true
                                 ? Icons.mark_email_read_outlined
                                 : Icons.mark_email_unread_outlined),
-                            title: Text(m['subject'] ?? '(no subject)',
+                            title: Text(m['subject'] ?? '(No subject)',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis),
                             subtitle: Text(
@@ -1284,7 +1395,7 @@ class _AppsScreenState extends State<AppsScreen> {
           controller: ctrl,
           autofocus: true,
           decoration: const InputDecoration(
-              labelText: 'Arguments', hintText: 'space-separated'),
+              labelText: 'Arguments', hintText: 'Space-separated'),
           onSubmitted: (_) =>
               Navigator.pop(ctx, ctrl.text.trim().split(RegExp(r'\s+'))
                   .where((s) => s.isNotEmpty).toList()),
@@ -1312,7 +1423,7 @@ class _AppsScreenState extends State<AppsScreen> {
     final list = (peers['peers'] as List?) ?? const [];
     if (list.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('No paired devices — `pai pair` first')));
+          content: Text('No paired devices — run `pai pair offer` on one and `pai pair accept` on the other')));
       return;
     }
     final to = await showModalBottomSheet<String>(
@@ -1323,7 +1434,7 @@ class _AppsScreenState extends State<AppsScreen> {
           children: [
             const ListTile(
                 title: Text('Migrate to…'),
-                subtitle: Text('Moves the app + its live data')),
+                subtitle: Text('Moves the app and its live data')),
             for (final p in list)
               ListTile(
                 leading: const Icon(Icons.devices),
@@ -1412,7 +1523,7 @@ class _AppsScreenState extends State<AppsScreen> {
     final err = r['error'];
     if (err != null) {
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('share failed: $err')));
+          .showSnackBar(SnackBar(content: Text('Share failed: $err')));
       return;
     }
     await showDialog<void>(
@@ -1457,7 +1568,7 @@ class _AppsScreenState extends State<AppsScreen> {
                     maxLines: 4,
                     decoration: const InputDecoration(
                         labelText: 'Parent token JSON',
-                        hintText: 'paste the token file contents'),
+                        hintText: 'Paste the token file contents'),
                     onChanged: (v) => setD(() {
                       parentJson = v;
                       try {
@@ -1471,7 +1582,7 @@ class _AppsScreenState extends State<AppsScreen> {
                     }),
                   ),
                   if (parentJson.isNotEmpty && parent == null)
-                    const Text('not a token JSON',
+                    const Text('Not a token JSON',
                         style: TextStyle(color: Colors.redAccent)),
                   if (parent != null)
                     Text('app ${parent!['app_id']} — may delegate '
@@ -1581,7 +1692,7 @@ class _AppsScreenState extends State<AppsScreen> {
                     }),
                   ),
                   if (tokenJson.isNotEmpty && token == null)
-                    const Text('not a token JSON',
+                    const Text('Not a token JSON',
                         style: TextStyle(color: Colors.redAccent)),
                   if (token != null)
                     Text('app ${token!['app_id']} — '
@@ -1774,7 +1885,7 @@ class _AppsScreenState extends State<AppsScreen> {
               ? const Center(
                   child: Text(
                       'No apps installed — `pai deploy <dir>` on any\n'
-                      'paired device syncs packages here.',
+                      'paired device syncs them here.',
                       textAlign: TextAlign.center))
               : ListView.builder(
                   itemCount: _apps.length,
@@ -1828,6 +1939,349 @@ class _AppsScreenState extends State<AppsScreen> {
                     );
                   },
                 ),
+    );
+  }
+}
+
+/// '2026-09-15T20:11:03.123Z' → '2026-09-15 20:11' for list subtitles.
+String _fmtTs(dynamic ts) {
+  final t = '$ts';
+  return t.length > 16 ? t.substring(0, 16).replaceFirst('T', ' ') : t;
+}
+
+/// Devices — this machine's detected inference endpoints + binaries, and
+/// the paired peer devices workloads can be routed to.
+class DevicesScreen extends StatefulWidget {
+  const DevicesScreen({super.key, required this.bridge});
+  final PaiBridge bridge;
+  @override
+  State<DevicesScreen> createState() => _DevicesScreenState();
+}
+
+class _DevicesScreenState extends State<DevicesScreen> {
+  Map<String, dynamic>? _detect;
+  List<dynamic> _peers = const [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final d = await widget.bridge.detect();
+      final p = await widget.bridge.peersList();
+      if (!mounted) return;
+      setState(() {
+        _detect = d;
+        _peers = (p['peers'] as List? ?? const []);
+        _loading = false;
+        _error = d['error'] as String? ?? p['error'] as String?;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = '$e';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final endpoints =
+        (_detect?['endpoints'] as List? ?? const []);
+    final binaries =
+        (_detect?['binaries'] as Map?)?.cast<String, dynamic>() ?? const {};
+    return Scaffold(
+      appBar: AppBar(title: const Text('Devices'), actions: [
+        IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+      ]),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(padding: const EdgeInsets.all(12), children: [
+              if (_error != null)
+                Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child:
+                        Text(_error!, style: TextStyle(color: cs.error))),
+              Text('This device',
+                  style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 4),
+              if (endpoints.isEmpty)
+                Card(
+                    child: ListTile(
+                  leading: Icon(Icons.cloud_off_outlined,
+                      color: cs.onSurfaceVariant),
+                  title: const Text('No local inference endpoints'),
+                  subtitle: const Text(
+                      'Start llama-server, Ollama, or LM Studio — chat uses the echo stub until then.'),
+                ))
+              else
+                for (final e in endpoints)
+                  Card(
+                      child: ListTile(
+                    leading: Icon(Icons.bolt,
+                        color: cs.primary),
+                    title: Text('${e['provider']} · ${e['base_url']}'),
+                    subtitle: Text(
+                        '${(e['models'] as List? ?? const []).length} model(s) reported'),
+                  )),
+              const SizedBox(height: 4),
+              for (final name in ['llama-server', 'ollama', 'lms'])
+                ListTile(
+                    dense: true,
+                    leading: Icon(
+                        binaries[name] != null
+                            ? Icons.check_circle_outline
+                            : Icons.highlight_off,
+                        size: 18,
+                        color: binaries[name] != null
+                            ? cs.primary
+                            : cs.onSurfaceVariant),
+                    title: Text(name),
+                    subtitle: Text(binaries[name] as String? ?? 'not found',
+                        maxLines: 1, overflow: TextOverflow.ellipsis)),
+              const SizedBox(height: 16),
+              Text('Paired devices',
+                  style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 4),
+              if (_peers.isEmpty)
+                Card(
+                    child: ListTile(
+                  leading: Icon(Icons.phonelink_off_outlined,
+                      color: cs.onSurfaceVariant),
+                  title: const Text('No paired devices'),
+                  subtitle: const Text(
+                      'Pair another machine with `pai pair` — media jobs and app runs can then route to it.'),
+                ))
+              else
+                for (final p in _peers)
+                  Card(
+                      child: ListTile(
+                    leading: const Icon(Icons.devices),
+                    title: Text('${p['name']}'),
+                    subtitle: Text(
+                        '${p['platform']} · ${(p['id'] as String).substring(0, 8)}'),
+                  )),
+            ]),
+    );
+  }
+}
+
+
+
+/// Alerts — agent-raised notifications (reminders, watch hits, proactive
+/// notes). Tapping marks read; read-state syncs to peers.
+class NotificationsScreen extends StatefulWidget {
+  const NotificationsScreen(
+      {super.key, required this.bridge, this.onChanged});
+  final PaiBridge bridge;
+  final VoidCallback? onChanged;
+  @override
+  State<NotificationsScreen> createState() => _NotificationsScreenState();
+}
+
+class _NotificationsScreenState extends State<NotificationsScreen> {
+  List<dynamic> _items = const [];
+  bool _unreadOnly = false;
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final r = await widget.bridge.notifyList(unreadOnly: _unreadOnly);
+      if (!mounted) return;
+      setState(() {
+        _items = (r['notifications'] as List? ?? const []);
+        _loading = false;
+        _error = r['error'] as String?;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = '$e';
+        });
+      }
+    }
+  }
+
+  Future<void> _markRead(Map<String, dynamic> n) async {
+    if (n['read_at'] != null) return;
+    await widget.bridge.notifyMarkRead(n['id'] as String);
+    widget.onChanged?.call();
+    _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Notifications'), actions: [
+        TextButton.icon(
+            onPressed: () => setState(() {
+                  _unreadOnly = !_unreadOnly;
+                  _load();
+                }),
+            icon: Icon(
+                _unreadOnly
+                    ? Icons.filter_alt
+                    : Icons.filter_alt_off_outlined,
+                size: 18),
+            label: Text(_unreadOnly ? 'Unread' : 'All')),
+        IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+      ]),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(
+                  child:
+                      Text(_error!, style: TextStyle(color: cs.error)))
+              : _items.isEmpty
+                  ? Center(
+                      child: Text(
+                          _unreadOnly
+                              ? 'No unread notifications'
+                              : 'Nothing yet — the agent posts reminders and proactive notes here.',
+                          style: TextStyle(color: cs.onSurfaceVariant)))
+                  : ListView.builder(
+                      itemCount: _items.length,
+                      itemBuilder: (ctx, i) {
+                        final n = _items[i] as Map<String, dynamic>;
+                        final unread = n['read_at'] == null;
+                        return ListTile(
+                          leading: Icon(
+                              unread
+                                  ? Icons.circle
+                                  : Icons.circle_outlined,
+                              size: 12,
+                              color: unread
+                                  ? cs.primary
+                                  : cs.onSurfaceVariant),
+                          title: Text('${n['title'] ?? ''}',
+                              style: TextStyle(
+                                  fontWeight: unread
+                                      ? FontWeight.w600
+                                      : FontWeight.normal)),
+                          subtitle: Text(
+                              '${n['body'] ?? ''}\n${n['source'] ?? ''} · ${_fmtTs(n['created_at'])}',
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis),
+                          isThreeLine: true,
+                          onTap: () => _markRead(n),
+                        );
+                      }),
+    );
+  }
+}
+
+/// Activity — the audit log: every permission-gated op, deploy, share,
+/// migration, and run, with its outcome.
+class ActivityScreen extends StatefulWidget {
+  const ActivityScreen({super.key, required this.bridge});
+  final PaiBridge bridge;
+  @override
+  State<ActivityScreen> createState() => _ActivityScreenState();
+}
+
+class _ActivityScreenState extends State<ActivityScreen> {
+  List<dynamic> _events = const [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final r = await widget.bridge.audit();
+      if (!mounted) return;
+      setState(() {
+        _events = r;
+        _loading = false;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = '$e';
+        });
+      }
+    }
+  }
+
+  IconData _iconFor(String outcome) => switch (outcome) {
+        'ok' => Icons.check_circle_outline,
+        'denied' => Icons.block,
+        'error' => Icons.error_outline,
+        _ => Icons.info_outline,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Activity'), actions: [
+        IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+      ]),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(
+                  child:
+                      Text(_error!, style: TextStyle(color: cs.error)))
+              : _events.isEmpty
+                  ? Center(
+                      child: Text('Nothing yet — every permission-gated action is logged here.',
+                          style: TextStyle(color: cs.onSurfaceVariant)))
+                  : ListView.builder(
+                      itemCount: _events.length,
+                      itemBuilder: (ctx, i) {
+                        final e = _events[i] as Map<String, dynamic>;
+                        final outcome = '${e['outcome'] ?? ''}';
+                        final tool = e['tool'];
+                        final detail = e['detail'];
+                        return ListTile(
+                          dense: true,
+                          leading: Icon(_iconFor(outcome),
+                              size: 18,
+                              color: outcome == 'ok'
+                                  ? cs.primary
+                                  : cs.error),
+                          title: Text(
+                              '${e['kind'] ?? 'event'}${tool != null ? ' · $tool' : ''}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis),
+                          subtitle: Text(
+                              [
+                                if (detail != null &&
+                                    '$detail' != '{}' &&
+                                    '$detail' != 'null')
+                                  '$detail',
+                                _fmtTs(e['at']),
+                              ].join(' · '),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis),
+                        );
+                      }),
     );
   }
 }

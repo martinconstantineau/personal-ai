@@ -583,6 +583,44 @@ guest read/write handles are all shipped and pushed.
   op only (guests can't burn your GPU). Image/video jobs share the
   table + op when those providers land.
 
+## What's next (candidate slices, unordered)
+
+The PRD's named tracks are all shipped. These are the documented
+follow-ups — each builds on shipped infrastructure:
+
+- **Packaged audio backend** — a reference `POST /generate` wrapper
+  (FastAPI + MusicGen / stable-audio.cpp) so `pai audio gen` works
+  out of the box. The provider boundary is already stable; this is
+  packaging, not protocol work.
+- **Media UI** — a Media screen in the Flutter app: submit prompts,
+  watch `media_jobs` progress, play/store artifacts, cancel queued
+  jobs. The job table + blob store are queryable today; only the
+  FFI surface + widgets are missing.
+- **Placement visualization** — a Devices screen showing paired
+  devices, advertised capabilities (`bcap` announcements), live
+  `DeviceLoad` (battery/thermal/RAM), and per-device place weights.
+  `broker devices` already exposes this data over CLI.
+- **Provider health surface** — a Settings/Providers screen probing
+  each configured provider (llama-server, whisper, piper, audio-gen)
+  and showing reachable/error state, so a `HTTP 400` in chat points
+  at the misconfigured endpoint instead of a bare error bubble.
+- **Image/video generation adapters** — `MediaJobKind` +
+  `ModelCapability` + the `media-run` op already carry them; only
+  the provider adapters are missing (stable-diffusion.cpp,
+  diffusers-onnx are the declared targets).
+- **Flash-drive model packs** — the pack format is format-agnostic
+  and `pai models install --to E:\` works; the missing UX is
+  plug-and-play detection (scan removable drives on insert, offer to
+  load packs).
+- **Stable app names** — `app.user.devices` DNS layer on top of
+  `pai serve` (Tailscale/hosts-file integration). The CGI gateway +
+  placement-aware forwarding already make URLs location-stable.
+- **Voice loop** — mic capture → whisper → agent → piper reply is
+  half-wired (mic probe + dictate path exist); a continuous
+  hands-free mode is a UI/UX slice, not new plumbing.
+- **Mobile ↔ desktop parity** — the same `lib/main.dart` builds for
+  Android; verify media jobs, app install, and share flows on-device.
+
 ## Known technical debt (tracked, not hidden)
 
 | Item | Why it's deferred | Exit |
