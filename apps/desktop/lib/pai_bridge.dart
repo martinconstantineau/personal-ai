@@ -289,6 +289,28 @@ class PaiBridge {
             'in_reply_to': ?inReplyTo,
           }))) as Map<String, dynamic>;
 
+  /// Configure the mail account in-app: writes email.json and stores the
+  /// password in the OS keystore (never in the file). Pass an empty
+  /// [smtpHost] for drafts-only mode.
+  Future<Map<String, dynamic>> emailConfigure(
+          {required String host,
+          int port = 993,
+          required String user,
+          String? password,
+          String? smtpHost,
+          int smtpPort = 465,
+          String smtpTls = 'tls'}) async =>
+      (await _call(_Op.emailConfigure,
+          arg: jsonEncode({
+            'host': host,
+            'port': port,
+            'user': user,
+            'password': ?password,
+            'smtp': (smtpHost == null || smtpHost.isEmpty)
+                ? null
+                : {'host': smtpHost, 'port': smtpPort, 'tls': smtpTls},
+          }))) as Map<String, dynamic>;
+
   /// Voice ops — `{stt, tts, mic, speaker}` probe; `voiceListen` blocks up
   /// to [maxSecs] in the worker isolate; `voiceSay` plays on the host
   /// speaker ({ok, played} or {ok, played:false, wav_b64}).
@@ -508,6 +530,8 @@ class PaiBridge {
             result = client.emailDraft(req.arg!);
           case _Op.emailSend:
             result = client.emailSend(req.arg!);
+          case _Op.emailConfigure:
+            result = client.emailConfigure(req.arg!);
           case _Op.notifyList:
             result = client.notifyList(unreadOnly: req.arg == 'unread');
           case _Op.notifyMarkRead:
@@ -633,6 +657,7 @@ enum _Op {
   emailRead,
   emailDraft,
   emailSend,
+  emailConfigure,
   notifyList,
   notifyMarkRead,
   status,

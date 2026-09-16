@@ -33,7 +33,7 @@ use pai_storage::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -69,7 +69,7 @@ pub struct PaiRuntime {
     /// need name/platform/pubkey, not just the id.
     device_rec: pai_core::Device,
     documents: Arc<pai_documents::DocumentStore>,
-    email: Option<Arc<dyn pai_connector_email::EmailProvider>>,
+    email: RwLock<Option<Arc<dyn pai_connector_email::EmailProvider>>>,
     /// Detected voice providers (whisper-server STT / piper TTS) — None
     /// when neither is configured. Mic/speaker probes are cheap enough
     /// to answer live in `pai_voice_status`.
@@ -313,7 +313,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         device: device.id,
         device_rec: device,
         documents,
-        email,
+        email: RwLock::new(email),
         voice,
         server_url,
         llama_child: Mutex::new(None),
@@ -1065,8 +1065,9 @@ pub unsafe extern "C" fn pai_email_search(
     query_json: *const c_char,
 ) -> *mut c_char {
     let rt = &mut *handle;
-    let Some(email) = &rt.email else {
-        return email_err();
+    let email = match rt.email.read().ok().and_then(|g| g.clone()) {
+        Some(e) => e,
+        None => return email_err(),
     };
     let q = match query_json {
         q if q.is_null() => pai_connector_email::EmailSearch {
@@ -1091,8 +1092,9 @@ pub unsafe extern "C" fn pai_email_search(
 #[no_mangle]
 pub unsafe extern "C" fn pai_email_read(handle: *mut PaiRuntime, id: *const c_char) -> *mut c_char {
     let rt = &mut *handle;
-    let Some(email) = &rt.email else {
-        return email_err();
+    let email = match rt.email.read().ok().and_then(|g| g.clone()) {
+        Some(e) => e,
+        None => return email_err(),
     };
     let id = match read_str(id) {
         Ok(s) => s.to_string(),
@@ -1113,8 +1115,9 @@ pub unsafe extern "C" fn pai_email_draft(
     draft_json: *const c_char,
 ) -> *mut c_char {
     let rt = &mut *handle;
-    let Some(email) = &rt.email else {
-        return email_err();
+    let email = match rt.email.read().ok().and_then(|g| g.clone()) {
+        Some(e) => e,
+        None => return email_err(),
     };
     let draft: pai_connector_email::Draft = match read_str(draft_json)
         .map_err(|e| e.to_string())
@@ -1139,8 +1142,9 @@ pub unsafe extern "C" fn pai_email_send(
     draft_json: *const c_char,
 ) -> *mut c_char {
     let rt = &mut *handle;
-    let Some(email) = &rt.email else {
-        return email_err();
+    let email = match rt.email.read().ok().and_then(|g| g.clone()) {
+        Some(e) => e,
+        None => return email_err(),
     };
     let draft: pai_connector_email::Draft = match read_str(draft_json)
         .map_err(|e| e.to_string())
@@ -1153,6 +1157,98 @@ pub unsafe extern "C" fn pai_email_send(
         Ok(()) => to_c(serde_json::json!({"sent": true})),
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+/// Configure the IMAP/SMTP account in-app: writes `email.json`, stores the
+/// password in the OS keystore (`email:<user>` — never in the file), and
+/// hot-swaps the live provider so no restart is needed.
+/// `config_json`: {host, port?, user, password?, mailbox?,
+///   drafts_mailbox?, archive_mailbox?, smtp?: {host, port?, tls?}}
+/// # Safety
+/// `handle` must come from `pai_init`; `config_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_email_configure(
+    handle: *mut PaiRuntime,
+    config_json: *const c_char,
+) -> *mut c_char {
+    #[derive(Deserialize)]
+    struct SmtpIn {
+        host: String,
+        port: Option<u16>,
+        tls: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct CfgIn {
+        host: String,
+        port: Option<u16>,
+        user: String,
+        password: Option<String>,
+        mailbox: Option<String>,
+        drafts_mailbox: Option<String>,
+        archive_mailbox: Option<String>,
+        smtp: Option<SmtpIn>,
+    }
+    let rt = &mut *handle;
+    let c: CfgIn = match read_str(config_json)
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+    {
+        Ok(c) => c,
+        Err(e) => return to_c(serde_json::json!({"error": e})),
+    };
+    if c.host.trim().is_empty() || c.user.trim().is_empty() {
+        return to_c(serde_json::json!({"error": "host and user are required"}));
+    }
+    let smtp = match c.smtp {
+        Some(s) if !s.host.trim().is_empty() => {
+            let tls = match s.tls.as_deref().unwrap_or("tls") {
+                "tls" => pai_connector_email::SmtpTls::Tls,
+                "starttls" => pai_connector_email::SmtpTls::StartTls,
+                "none" => pai_connector_email::SmtpTls::None,
+                other => {
+                    return to_c(serde_json::json!({
+                        "error": format!("bad smtp tls {other:?} — tls|starttls|none")
+                    }));
+                }
+            };
+            Some(pai_connector_email::SmtpConfig {
+                host: s.host,
+                port: s.port.unwrap_or(465),
+                tls,
+                user: None,
+            })
+        }
+        _ => None,
+    };
+    let has_smtp = smtp.is_some();
+    let cfg = pai_connector_email::ImapConfig {
+        host: c.host,
+        port: c.port.unwrap_or(993),
+        user: c.user.clone(),
+        mailbox: c.mailbox.unwrap_or_else(|| "INBOX".into()),
+        drafts_mailbox: c.drafts_mailbox.unwrap_or_else(|| "[Gmail]/Drafts".into()),
+        archive_mailbox: c
+            .archive_mailbox
+            .unwrap_or_else(|| "[Gmail]/All Mail".into()),
+        smtp,
+        oauth: None,
+    };
+    if let Err(e) = cfg.save(std::path::Path::new(&rt.data_dir)) {
+        return to_c(serde_json::json!({"error": e.to_string()}));
+    }
+    let has_password = match c.password {
+        Some(pw) if !pw.is_empty() => pai_connector_email::imap::store_password(&c.user, &pw),
+        _ => false,
+    };
+    if let Ok(mut g) = rt.email.write() {
+        *g = Some(Arc::new(pai_connector_email::ImapProvider::new(cfg)));
+    }
+    let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+    e.device = Some(rt.device);
+    e.detail = serde_json::json!({"email": c.user, "smtp": has_smtp});
+    let _ = rt.audit.record(&e);
+    to_c(serde_json::json!({
+        "configured": true, "user": c.user, "password_stored": has_password}))
 }
 
 // ---------------------------------------------------------------------------

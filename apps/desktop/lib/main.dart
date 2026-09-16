@@ -1927,6 +1927,111 @@ class _EmailScreenState extends State<EmailScreen> {
             ));
   }
 
+  Future<void> _configure() async {
+    final hostCtl = TextEditingController(text: 'imap.gmail.com');
+    final portCtl = TextEditingController(text: '993');
+    final userCtl = TextEditingController();
+    final passCtl = TextEditingController();
+    final smtpHostCtl = TextEditingController(text: 'smtp.gmail.com');
+    final smtpPortCtl = TextEditingController(text: '465');
+    String smtpTls = 'tls';
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+            builder: (ctx, setD) => AlertDialog(
+                    title: const Text('Mail account'),
+                    content: SizedBox(
+                        width: 440,
+                        child: SingleChildScrollView(
+                            child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                              TextField(
+                                  controller: hostCtl,
+                                  autofocus: true,
+                                  decoration: const InputDecoration(
+                                      labelText: 'IMAP host')),
+                              TextField(
+                                  controller: portCtl,
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(
+                                      labelText: 'IMAP port')),
+                              TextField(
+                                  controller: userCtl,
+                                  decoration: const InputDecoration(
+                                      labelText: 'Email address')),
+                              TextField(
+                                  controller: passCtl,
+                                  obscureText: true,
+                                  decoration: const InputDecoration(
+                                      labelText:
+                                          'Password (app password for Gmail/Outlook)',
+                                      helperText:
+                                          'Stored in the OS keystore — never in a file')),
+                              const Divider(height: 24),
+                              TextField(
+                                  controller: smtpHostCtl,
+                                  decoration: const InputDecoration(
+                                      labelText:
+                                          'SMTP host (empty = drafts only)')),
+                              TextField(
+                                  controller: smtpPortCtl,
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(
+                                      labelText: 'SMTP port')),
+                              DropdownButtonFormField<String>(
+                                  initialValue: smtpTls,
+                                  decoration: const InputDecoration(
+                                      labelText: 'SMTP security'),
+                                  items: const [
+                                    DropdownMenuItem(
+                                        value: 'tls', child: Text('TLS')),
+                                    DropdownMenuItem(
+                                        value: 'starttls',
+                                        child: Text('STARTTLS')),
+                                    DropdownMenuItem(
+                                        value: 'none',
+                                        child: Text('None')),
+                                  ],
+                                  onChanged: (v) =>
+                                      setD(() => smtpTls = v ?? 'tls')),
+                            ]))),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(false),
+                          child: const Text('Cancel')),
+                      FilledButton(
+                          onPressed: () => Navigator.of(ctx).pop(true),
+                          child: const Text('Save')),
+                    ])));
+    if (ok != true || !mounted) return;
+    final r = await widget.bridge.emailConfigure(
+        host: hostCtl.text.trim(),
+        port: int.tryParse(portCtl.text.trim()) ?? 993,
+        user: userCtl.text.trim(),
+        password: passCtl.text.isEmpty ? null : passCtl.text,
+        smtpHost: smtpHostCtl.text.trim(),
+        smtpPort: int.tryParse(smtpPortCtl.text.trim()) ?? 465,
+        smtpTls: smtpTls);
+    hostCtl.dispose();
+    portCtl.dispose();
+    userCtl.dispose();
+    passCtl.dispose();
+    smtpHostCtl.dispose();
+    smtpPortCtl.dispose();
+    if (!mounted) return;
+    if (r['error'] != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('${r['error']}')));
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r['password_stored'] == true
+            ? 'Account configured — password saved to the OS keystore'
+            : 'Account configured — set PAI_EMAIL_PASSWORD or re-save with a password')));
+    _search();
+  }
+
   Future<void> _compose(
       {String to = '', String subject = '', String? inReplyTo}) async {
     final toCtrl = TextEditingController(text: to);
@@ -1996,6 +2101,10 @@ class _EmailScreenState extends State<EmailScreen> {
             title: const Text('Email'),
             actions: [
               IconButton(
+                  icon: const Icon(Icons.settings_outlined),
+                  tooltip: 'Configure account',
+                  onPressed: _configure),
+              IconButton(
                   icon: const Icon(Icons.edit_outlined),
                   tooltip: 'New draft',
                   onPressed: () => _compose()),
@@ -2027,6 +2136,10 @@ class _EmailScreenState extends State<EmailScreen> {
                           style: TextStyle(
                               color:
                                   Theme.of(context).colorScheme.error))),
+                  if (_error!.contains('not configured'))
+                    TextButton(
+                        onPressed: _configure,
+                        child: const Text('Set up')),
                   TextButton(
                       onPressed: _search, child: const Text('Retry')),
                 ])),

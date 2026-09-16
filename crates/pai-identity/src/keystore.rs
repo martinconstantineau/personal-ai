@@ -7,6 +7,12 @@
 const SERVICE: &str = "personal-ai";
 
 fn entry(name: &str) -> Option<keyring::Entry> {
+    // Escape hatch for tests and hosts with a broken/full credential
+    // vault: PAI_KEYSTORE_OFF=1 makes every op report "no keystore", so
+    // callers use their 0600-file fallbacks under data_dir.
+    if std::env::var_os("PAI_KEYSTORE_OFF").is_some() {
+        return None;
+    }
     match keyring::Entry::new(SERVICE, name) {
         Ok(e) => Some(e),
         Err(e) => {

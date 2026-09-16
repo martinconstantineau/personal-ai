@@ -91,6 +91,9 @@ class PaiClient {
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_draft');
   late final _emailSend = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_email_send');
+  late final _emailConfigure = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_email_configure');
   late final _status = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_status');
   late final _modelsList = _lib.lookupFunction<_NoArgNative,
@@ -338,6 +341,12 @@ class PaiClient {
   /// {sent: true} or {error: ...} when no smtp block is configured.
   Map<String, dynamic> emailSend(String draftJson) =>
       _call1(_emailSend, draftJson);
+
+  /// Configure the IMAP/SMTP account: {host, port?, user, password?,
+  /// smtp?: {host, port?, tls?}}. Writes email.json, stores the password
+  /// in the OS keystore, and hot-swaps the provider — no restart needed.
+  Map<String, dynamic> emailConfigure(String configJson) =>
+      _call1(_emailConfigure, configJson);
 
   /// Notification inbox: {notifications: [...], unread: n}. Rows sync
   /// across paired devices.
