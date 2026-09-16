@@ -438,6 +438,50 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Attach → transcribe an audio file via whisper-server; the text
+  /// lands in the input for review.
+  Future<void> _attachTranscribe() async {
+    if (_pai == null) return;
+    final ctrl = TextEditingController();
+    final path = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              title: const Text('Transcribe audio file'),
+              content: TextField(
+                  controller: ctrl,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                      hintText: r'C:\path\to\audio.wav'),
+                  onSubmitted: (v) => Navigator.pop(ctx, v)),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Cancel')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(ctx, ctrl.text),
+                    child: const Text('Transcribe')),
+              ],
+            ));
+    final p = path?.trim() ?? '';
+    if (p.isEmpty || !mounted) return;
+    final r = await _pai!.voiceTranscribe(p);
+    if (!mounted) return;
+    if (r['error'] != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('${r['error']}')));
+      return;
+    }
+    final text = (r['text'] as String? ?? '').trim();
+    if (text.isNotEmpty) {
+      setState(() {
+        _input.text =
+            _input.text.isEmpty ? text : '${_input.text} $text';
+        _input.selection =
+            TextSelection.collapsed(offset: _input.text.length);
+      });
+    }
+  }
+
   /// Push-to-talk: capture one utterance, drop the transcript into the
   /// input field for review (the user still presses send).
   Future<void> _listen() async {
@@ -722,6 +766,14 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             const SizedBox(width: 8),
+            IconButton(
+              icon: const Icon(Icons.attach_file),
+              tooltip: _voice['stt'] == true
+                  ? 'Transcribe an audio file'
+                  : 'Transcribe an audio file (needs whisper-server)',
+              onPressed:
+                  (_pai == null || _sending) ? null : _attachTranscribe,
+            ),
             IconButton(
               icon: _listening
                   ? const SizedBox(
@@ -1557,10 +1609,10 @@ class _EmailScreenState extends State<EmailScreen> {
     final toCtrl = TextEditingController(text: to);
     final subjCtrl = TextEditingController(text: subject);
     final bodyCtrl = TextEditingController();
-    final ok = await showDialog<bool>(
+    final ok = await showDialog<String>(
         context: context,
         builder: (ctx) => AlertDialog(
-              title: const Text('New draft'),
+              title: const Text('New message'),
               content: SizedBox(
                   width: 480,
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -1577,24 +1629,41 @@ class _EmailScreenState extends State<EmailScreen> {
                   ])),
               actions: [
                 TextButton(
-                    onPressed: () => Navigator.of(ctx).pop(false),
+                    onPressed: () => Navigator.of(ctx).pop(),
                     child: const Text('Cancel')),
-                FilledButton(
-                    onPressed: () => Navigator.of(ctx).pop(true),
+                TextButton(
+                    onPressed: () => Navigator.of(ctx).pop('draft'),
                     child: const Text('Save draft')),
+                FilledButton.icon(
+                    onPressed: () => Navigator.of(ctx).pop('send'),
+                    icon: const Icon(Icons.send, size: 16),
+                    label: const Text('Send')),
               ],
             ));
-    if (ok != true) return;
-    final r = await widget.bridge.emailDraft(
-        to: [toCtrl.text.trim()],
-        subject: subjCtrl.text.trim(),
-        body: bodyCtrl.text,
-        inReplyTo: inReplyTo);
+    if (ok == null) return;
+    final recipients = toCtrl.text
+        .split(',')
+        .map((a) => a.trim())
+        .where((a) => a.isNotEmpty)
+        .toList();
+    final r = ok == 'send'
+        ? await widget.bridge.emailSend(
+            to: recipients,
+            subject: subjCtrl.text.trim(),
+            body: bodyCtrl.text,
+            inReplyTo: inReplyTo)
+        : await widget.bridge.emailDraft(
+            to: recipients,
+            subject: subjCtrl.text.trim(),
+            body: bodyCtrl.text,
+            inReplyTo: inReplyTo);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(r['error'] != null
             ? '${r['error']}'
-            : 'Draft saved (${r['draft_id']})')));
+            : ok == 'send'
+                ? 'Sent'
+                : 'Draft saved (${r['draft_id']})')));
   }
 
   @override
