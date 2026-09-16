@@ -228,12 +228,14 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         allowed_roots: vec![inbox],
     };
 
-    // Active conversation: restored, or a fresh one.
+    // Active conversation: explicit restore, else the most recent chat,
+    // else a fresh one — avoids spawning an empty 'Untitled' per launch.
     let conversation = cfg
         .conversation
         .as_deref()
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .map(ConversationId)
+        .or_else(|| conversations.list().ok()?.first().map(|c| c.id))
         .unwrap_or_else(|| {
             conversations
                 .create(
@@ -463,6 +465,14 @@ pub unsafe extern "C" fn pai_send(handle: *mut PaiRuntime, message: *const c_cha
         Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
     };
     let _guard = rt.send_lock.lock().unwrap();
+
+    // The active conversation may have been deleted — lazily start a
+    // fresh shared one rather than writing into a dangling id.
+    if rt.conversations.get(rt.conversation).is_err() {
+        if let Ok(c) = rt.conversations.create(rt.session, MemoryIsolation::Shared) {
+            rt.conversation = c.id;
+        }
+    }
 
     let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let emit = emit_fn(rt, events.clone());
@@ -716,13 +726,10 @@ pub unsafe extern "C" fn pai_conversation_delete(
     };
     match rt.conversations.delete(cid) {
         Ok(()) => {
-            if rt.conversation == cid {
-                // Fall back to a fresh shared conversation.
-                if let Ok(c) = rt.conversations.create(rt.session, MemoryIsolation::Shared) {
-                    rt.conversation = c.id;
-                }
-            }
-            to_c(serde_json::json!({"ok": true}))
+            // Leave rt.conversation stale — pai_send lazily creates a
+            // fresh conversation the next time it points at a deleted
+            // one, so no phantom empty chat appears in the drawer.
+            to_c(serde_json::json!({"ok": true, "was_active": rt.conversation == cid}))
         }
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
     }

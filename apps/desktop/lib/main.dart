@@ -309,6 +309,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _sending = false;
     });
     _scrollDown();
+    // A fresh conversation may have been created lazily by the send —
+    // keep the drawer listing honest.
+    _refreshConvs();
     if (_speakReplies && ai.text.isNotEmpty && !ai.isError) {
       // Fire-and-forget: playback happens on the host speaker inside the
       // worker isolate; failures surface as a banner, not a crash.
@@ -483,9 +486,22 @@ class _ChatScreenState extends State<ChatScreen> {
                 await _refreshConvs();
               },
               onDelete: (id) async {
-                await _pai!.conversationDelete(id);
+                final messenger = ScaffoldMessenger.of(context);
+                final navigator = Navigator.of(context);
+                final r = await _pai!.conversationDelete(id);
+                if (!mounted) return;
+                final err = r['error'] as String?;
+                if (err != null) {
+                  setState(() => _error = 'Delete failed: $err');
+                  return;
+                }
+                if (r['was_active'] == true) setState(_entries.clear);
                 await _refreshConvs();
                 await _loadHistory();
+                if (!mounted) return;
+                navigator.maybePop();
+                messenger.showSnackBar(
+                    const SnackBar(content: Text('Chat deleted')));
               },
               onScope: (id, mode) async {
                 await _pai!.conversationSetMemory(id, mode);
@@ -507,12 +523,26 @@ class _ChatScreenState extends State<ChatScreen> {
         Expanded(
           child: _entries.isEmpty
               ? Center(
-                  child: Text(
-                    _pai == null
-                        ? (_error == null ? 'starting…' : '')
-                        : 'local-first · private · auditable',
-                    style: TextStyle(color: cs.onSurfaceVariant),
-                  ))
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.forum_outlined,
+                        size: 40, color: cs.onSurfaceVariant),
+                    const SizedBox(height: 12),
+                    Text(
+                      _pai == null
+                          ? (_error == null ? 'Starting the core…' : '')
+                          : 'No messages yet — ask anything.',
+                      style: TextStyle(color: cs.onSurfaceVariant),
+                    ),
+                    if (_pai != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text('local-first · private · auditable',
+                            style: TextStyle(
+                                fontSize: 11,
+                                color: cs.onSurfaceVariant
+                                    .withValues(alpha: 0.7))),
+                      ),
+                  ]))
               : ListView.builder(
                   controller: _scroll,
                   padding: const EdgeInsets.all(12),
@@ -834,20 +864,40 @@ class _MemoriesScreenState extends State<MemoriesScreen> {
     _load();
   }
 
+  String? _error;
+
   Future<void> _load() async {
-    final items = await widget.bridge.memories();
-    if (mounted) setState(() { _items = items; _loading = false; });
+    try {
+      final items = await widget.bridge.memories();
+      if (mounted) {
+        setState(() { _items = items; _loading = false; _error = null; });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() { _loading = false; _error = '$e'; });
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Memories')),
+      appBar: AppBar(title: const Text('Memories'), actions: [
+        IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+      ]),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _items.isEmpty
-              ? const Center(child: Text('Nothing remembered yet.'))
+          : _error != null
+              ? Center(
+                  child: Text(_error!, style: TextStyle(color: cs.error)))
+              : _items.isEmpty
+                  ? Center(
+                      child: Text(
+                          'Nothing remembered yet — tell the agent '
+                          'something worth keeping.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: cs.onSurfaceVariant)))
               : ListView.builder(
                   itemCount: _items.length,
                   itemBuilder: (_, i) {
@@ -943,9 +993,19 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
     super.dispose();
   }
 
+  String? _error;
+
   Future<void> _load() async {
-    final items = await widget.bridge.docs();
-    if (mounted) setState(() { _items = items; _loading = false; });
+    try {
+      final items = await widget.bridge.docs();
+      if (mounted) {
+        setState(() { _items = items; _loading = false; _error = null; });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() { _loading = false; _error = '$e'; });
+      }
+    }
   }
 
   Future<void> _ingest() async {
@@ -999,6 +1059,11 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : Column(children: [
+              if (_error != null)
+                Padding(
+                    padding: const EdgeInsets.all(8),
+                    child:
+                        Text(_error!, style: TextStyle(color: cs.error))),
               Padding(
                 padding: const EdgeInsets.all(12),
                 child: Row(children: [
@@ -1232,10 +1297,20 @@ class _EmailScreenState extends State<EmailScreen> {
           Expanded(
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
-                  : ListView.builder(
-                      itemCount: _hits.length,
-                      itemBuilder: (ctx, i) {
-                        final m = _hits[i] as Map<String, dynamic>;
+                  : _hits.isEmpty && _error == null
+                      ? Center(
+                          child: Text(
+                              _searchCtrl.text.trim().isEmpty
+                                  ? 'Inbox is empty'
+                                  : 'No mail matches that search',
+                              style: TextStyle(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant)))
+                      : ListView.builder(
+                          itemCount: _hits.length,
+                          itemBuilder: (ctx, i) {
+                            final m = _hits[i] as Map<String, dynamic>;
                         return ListTile(
                             leading: Icon((m['flags'] as List?)
                                         ?.contains('\\Seen') ==
@@ -1250,7 +1325,7 @@ class _EmailScreenState extends State<EmailScreen> {
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis),
                             onTap: () => _open(m));
-                      })),
+                          })),
         ]));
   }
 }
@@ -1298,31 +1373,40 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
       appBar: AppBar(title: const Text('Permissions')),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : ListView.builder(
-              itemCount: _rows.length,
-              itemBuilder: (_, i) {
-                final r = _rows[i];
-                return ListTile(
-                  title: Text('${r['permission']}',
-                      style: const TextStyle(
-                          fontFamily: 'monospace', fontSize: 13)),
-                  trailing: DropdownButton<String>(
-                    value: '${r['policy']}',
-                    underline: const SizedBox.shrink(),
-                    items: _policies
-                        .map((p) => DropdownMenuItem(
-                            value: p, child: Text(_labels[p] ?? p)))
-                        .toList(),
-                    onChanged: (v) async {
-                      if (v == null) return;
-                      await widget.bridge
-                          .setPolicy('${r['permission']}', v);
-                      await _load();
-                    },
-                  ),
-                );
-              },
-            ),
+          : ListView(children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                child: Text(
+                    'What the agent may do without asking — '
+                    'changes apply immediately.',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context)
+                            .colorScheme
+                            .onSurfaceVariant)),
+              ),
+              for (final r in _rows) _policyRow(r),
+            ]),
+    );
+  }
+
+  Widget _policyRow(dynamic r) {
+    return ListTile(
+      title: Text('${r['permission']}',
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+      trailing: DropdownButton<String>(
+        value: '${r['policy']}',
+        underline: const SizedBox.shrink(),
+        items: _policies
+            .map((p) =>
+                DropdownMenuItem(value: p, child: Text(_labels[p] ?? p)))
+            .toList(),
+        onChanged: (v) async {
+          if (v == null) return;
+          await widget.bridge.setPolicy('${r['permission']}', v);
+          await _load();
+        },
+      ),
     );
   }
 }
@@ -1441,7 +1525,7 @@ class _AppsScreenState extends State<AppsScreen> {
     final list = (peers['peers'] as List?) ?? const [];
     if (list.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('No paired devices — run `pai pair offer` on one and `pai pair accept` on the other')));
+          content: Text('No paired devices — run pai pair offer on one and pai pair accept on the other')));
       return;
     }
     final to = await showModalBottomSheet<String>(
@@ -1471,8 +1555,8 @@ class _AppsScreenState extends State<AppsScreen> {
     final err = r['error'];
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(err != null
-            ? 'migrate failed: $err'
-            : 'migrating — ships on next sync push')));
+            ? 'Migration failed: $err'
+            : 'Migration queued — the app moves on the next sync')));
     _load();
   }
 
@@ -1915,7 +1999,7 @@ class _AppsScreenState extends State<AppsScreen> {
                       leading: const Icon(Icons.widgets_outlined),
                       title: Text('${a['name']}'),
                       subtitle: Text(
-                          '$id · v${a['version']} · ${a['runtime']} · '
+                          '${id.length > 8 ? id.substring(0, 8) : id} · v${a['version']} · ${a['runtime']} · '
                           '${_placement(a)}',
                           style: const TextStyle(
                               fontFamily: 'monospace', fontSize: 12)),
@@ -2194,7 +2278,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Notifications'), actions: [
+      appBar: AppBar(title: const Text('Alerts'), actions: [
         TextButton.icon(
             onPressed: () => setState(() {
                   _unreadOnly = !_unreadOnly;
