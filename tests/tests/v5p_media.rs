@@ -27,8 +27,7 @@ unsafe fn init() -> *mut PaiRuntime {
 
 unsafe fn json(p: *mut std::ffi::c_char) -> serde_json::Value {
     assert!(!p.is_null());
-    let v: serde_json::Value =
-        serde_json::from_str(CStr::from_ptr(p).to_str().unwrap()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(p).to_str().unwrap()).unwrap();
     pai_free_string(p);
     v
 }
@@ -48,8 +47,7 @@ fn media_gen_without_server_fails_and_records() {
     unsafe {
         let h = init();
         let req = CString::new(
-            serde_json::json!({"prompt": "test tone", "duration_seconds": 1})
-                .to_string(),
+            serde_json::json!({"prompt": "test tone", "duration_seconds": 1}).to_string(),
         )
         .unwrap();
         let v = json(pai_media_gen(h, req.as_ptr()));
@@ -93,8 +91,7 @@ fn sync_now_dir_without_vault_errors() {
         let h = init();
         let dir = tmpdir().join("sync-target");
         let req = CString::new(
-            serde_json::json!({"dir": dir.to_string_lossy(), "mode": "push"})
-                .to_string(),
+            serde_json::json!({"dir": dir.to_string_lossy(), "mode": "push"}).to_string(),
         )
         .unwrap();
         let v = json(pai_sync_now(h, req.as_ptr()));
@@ -108,10 +105,7 @@ fn sync_now_dir_without_vault_errors() {
 fn media_gen_rejects_empty_prompt() {
     unsafe {
         let h = init();
-        let req = CString::new(
-            serde_json::json!({"prompt": "   "}).to_string(),
-        )
-        .unwrap();
+        let req = CString::new(serde_json::json!({"prompt": "   "}).to_string()).unwrap();
         let v = json(pai_media_gen(h, req.as_ptr()));
         assert!(v["error"].as_str().unwrap().contains("empty prompt"));
         pai_free(h);

@@ -27,8 +27,7 @@ unsafe fn init() -> *mut PaiRuntime {
 
 unsafe fn json(p: *mut std::ffi::c_char) -> serde_json::Value {
     assert!(!p.is_null());
-    let v: serde_json::Value =
-        serde_json::from_str(CStr::from_ptr(p).to_str().unwrap()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(p).to_str().unwrap()).unwrap();
     pai_free_string(p);
     v
 }

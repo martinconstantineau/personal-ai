@@ -3068,6 +3068,18 @@ class _DevicesScreenState extends State<DevicesScreen> {
           SimpleDialogOption(
             onPressed: () {
               Navigator.pop(ctx);
+              _pairFolder();
+            },
+            child: const ListTile(
+                leading: Icon(Icons.folder_shared),
+                title: Text('Exchange via sync folder'),
+                subtitle: Text(
+                    'Publish and process pairing files in the configured '
+                    'shared folder - run the same step on the other device')),
+          ),
+          SimpleDialogOption(
+            onPressed: () {
+              Navigator.pop(ctx);
               _pairOffer();
             },
             child: const ListTile(
@@ -3142,6 +3154,38 @@ class _DevicesScreenState extends State<DevicesScreen> {
     _load();
   }
 
+  /// Pairing through the configured shared sync folder - publishes our
+  /// offer, accepts pending offers, completes accepts addressed to us.
+  /// The same step on the other device finishes the exchange.
+  Future<void> _pairFolder() async {
+    final r = await widget.bridge.pairFolder();
+    if (!mounted) return;
+    _load();
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(_pairFolderSummary(r))));
+  }
+
+  String _pairFolderSummary(Map<String, dynamic> r) {
+    if (r['error'] != null) return 'Folder pairing failed: ${r['error']}';
+    final accepted = (r['accepted'] as List? ?? const []);
+    final completed = (r['completed'] as List? ?? const []);
+    final rejected = (r['rejected'] as List? ?? const []);
+    final parts = <String>['Offer published'];
+    if (accepted.isNotEmpty) {
+      parts.add('accepted ${accepted.join(', ')}');
+    }
+    if (completed.isNotEmpty) {
+      parts.add('paired with ${completed.join(', ')}');
+    }
+    if (rejected.isNotEmpty) {
+      parts.add('${rejected.length} file(s) rejected');
+    }
+    if (accepted.isEmpty && completed.isEmpty) {
+      parts.add('run the same step on the other device to finish');
+    }
+    return parts.join(' - ');
+  }
+
   /// One-field path prompt; null on cancel.
   Future<String?> _pathPrompt(
       String title, String initial, String label) async {
@@ -3176,9 +3220,23 @@ class _DevicesScreenState extends State<DevicesScreen> {
   /// a relay URL. The choice persists under sync.* meta, so a second
   /// run needs no args.
   Future<void> _syncDialog() async {
-    var transport = 'lan';
+    final st = await widget.bridge.syncStatus();
+    if (!mounted) return;
+    var transport = st['lan'] == true
+        ? 'lan'
+        : st['dir'] != null
+            ? 'dir'
+            : st['relay'] != null
+                ? 'relay'
+                : 'lan';
     var mode = 'run';
-    final pathCtl = TextEditingController();
+    var auto = (st['auto_minutes'] as num?)?.toInt() ?? 0;
+    final pathCtl = TextEditingController(
+        text: transport == 'dir'
+            ? '${st['dir'] ?? ''}'
+            : transport == 'relay'
+                ? '${st['relay'] ?? ''}'
+                : '');
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -3222,6 +3280,24 @@ class _DevicesScreenState extends State<DevicesScreen> {
                       border: const OutlineInputBorder()),
                 ),
               ],
+              const SizedBox(height: 12),
+              DropdownButtonFormField<int>(
+                initialValue: auto,
+                decoration: const InputDecoration(
+                    labelText: 'Auto-sync',
+                    helperText:
+                        'Background syncs on this target while the app runs',
+                    border: OutlineInputBorder()),
+                items: const [
+                  DropdownMenuItem(value: 0, child: Text('Off')),
+                  DropdownMenuItem(
+                      value: 5, child: Text('Every 5 minutes')),
+                  DropdownMenuItem(
+                      value: 15, child: Text('Every 15 minutes')),
+                  DropdownMenuItem(value: 60, child: Text('Hourly')),
+                ],
+                onChanged: (v) => setD(() => auto = v ?? 0),
+              ),
             ]),
           ),
           actions: [
@@ -3251,7 +3327,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
         dir: dir,
         relay: relay,
         token: token,
-        lan: transport == 'lan');
+        lan: transport == 'lan',
+        autoMinutes: auto);
     if (!mounted) return;
     setState(() => _syncing = false);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(

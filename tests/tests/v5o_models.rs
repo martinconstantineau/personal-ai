@@ -28,8 +28,7 @@ unsafe fn init() -> *mut PaiRuntime {
 
 unsafe fn json(p: *mut std::ffi::c_char) -> serde_json::Value {
     assert!(!p.is_null());
-    let v: serde_json::Value =
-        serde_json::from_str(CStr::from_ptr(p).to_str().unwrap()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(p).to_str().unwrap()).unwrap();
     pai_free_string(p);
     v
 }
@@ -70,10 +69,8 @@ fn catalog_lists_builtin_models() {
 fn install_unknown_slug_errors() {
     unsafe {
         let h = init();
-        let req = CString::new(
-            serde_json::json!({"slug": "no-such-model-xyz"}).to_string(),
-        )
-        .unwrap();
+        let req =
+            CString::new(serde_json::json!({"slug": "no-such-model-xyz"}).to_string()).unwrap();
         let v = json(pai_models_install(h, req.as_ptr()));
         assert!(v["error"].as_str().unwrap().contains("no-such-model"));
         pai_free(h);

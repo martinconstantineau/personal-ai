@@ -273,6 +273,13 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
                 .unwrap_or_default()
         });
 
+    spawn_sync_scheduler(
+        store.clone(),
+        cfg.data_dir.clone(),
+        device.id,
+        audit.clone(),
+    );
+
     Ok(PaiRuntime {
         rt,
         agent,
@@ -1601,11 +1608,218 @@ pub unsafe extern "C" fn pai_models_install(
     }
 }
 
+/// Resolved sync request — explicit args override the saved `sync.*`
+/// target inside `run_sync`.
+struct SyncArgs {
+    mode: String,
+    dir: Option<String>,
+    relay: Option<String>,
+    token: Option<String>,
+    lan: bool,
+}
+
+/// Shared sync path for `pai_sync_now` and the auto-sync scheduler:
+/// resolve the transport (explicit args → saved `sync.*` meta), run the
+/// engine under `executor`, audit the outcome. Returns a JSON value.
+fn run_sync(
+    executor: &tokio::runtime::Runtime,
+    store: &Arc<Store>,
+    data_dir: &str,
+    device: DeviceId,
+    audit: &Arc<pai_audit::AuditLog>,
+    args: &SyncArgs,
+) -> serde_json::Value {
+    let meta = |k: &str| store.meta_get(&format!("sync.{k}")).ok().flatten();
+    let lan = args.lan || meta("lan").as_deref() == Some("1");
+    let dir = args.dir.clone().or_else(|| meta("dir"));
+    let relay = args.relay.clone().or_else(|| meta("relay"));
+    let token = args.token.clone().or_else(|| meta("token"));
+    let transport: Box<dyn pai_sync::SyncTransport> = if lan {
+        // Mesh discovery — paired peer announcing its relay on the LAN.
+        let ids = pai_identity::IdentityStore::new(store.clone());
+        let bind = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            pai_mesh::MULTICAST_PORT,
+        );
+        let sock = match pai_mesh::bind_listener(bind, Some(pai_mesh::MULTICAST_GROUP)) {
+            Ok(s) => s,
+            Err(e) => return serde_json::json!({"error": e.to_string()}),
+        };
+        let found = pai_mesh::discover(&sock, Duration::from_secs(3));
+        let paired = match pai_mesh::paired_announcements(store, &ids, found) {
+            Ok(p) => p,
+            Err(e) => return serde_json::json!({"error": e.to_string()}),
+        };
+        let Some(target) = paired.first() else {
+            return serde_json::json!({
+                "error": "no paired mesh peer announcing — \
+                          run `pai sync serve --announce` on it"
+            });
+        };
+        let agree = match pai_sync::crypto::agreement_key(device, std::path::Path::new(data_dir)) {
+            Ok(a) => a,
+            Err(e) => return serde_json::json!({"error": e.to_string()}),
+        };
+        let token = pai_mesh::token_for(&agree.secret, &target.peer);
+        Box::new(pai_sync::relay::RelayTransport::new(
+            format!("http://{}", target.relay_addr),
+            Some(token),
+        ))
+    } else if let Some(d) = dir.clone() {
+        match pai_sync::FolderTransport::new(d.into()) {
+            Ok(t) => Box::new(t),
+            Err(e) => return serde_json::json!({"error": e.to_string()}),
+        }
+    } else if let Some(r) = relay.clone() {
+        Box::new(pai_sync::relay::RelayTransport::new(r, token))
+    } else {
+        return serde_json::json!({
+            "error": "no sync target — pass lan:true, a dir, or a relay"
+        });
+    };
+    // Persist the choice so the next call needs no args.
+    let _ = store.meta_set("sync.lan", if lan { "1" } else { "0" });
+    if let Some(d) = &dir {
+        let _ = store.meta_set("sync.dir", d);
+    }
+    if let Some(r) = &relay {
+        let _ = store.meta_set("sync.relay", r);
+    }
+    let vault = match pai_sync::crypto::vault_key(std::path::Path::new(data_dir)) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return serde_json::json!({
+                "error": "no vault key — pair a device first (pai pair)"
+            })
+        }
+        Err(e) => return serde_json::json!({"error": e.to_string()}),
+    };
+    let eng = pai_sync::engine::SyncEngine::new(
+        transport,
+        store.clone(),
+        vault,
+        device,
+        std::path::Path::new(data_dir),
+    );
+    let out = executor.block_on(async {
+        match args.mode.as_str() {
+            "push" => eng.push().await,
+            "pull" => eng.pull().await,
+            _ => eng.run().await,
+        }
+    });
+    match out {
+        Ok(o) => {
+            let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+            e.device = Some(device);
+            e.detail = serde_json::json!({
+                "sync": args.mode, "pushed": o.pushed, "pulled": o.pulled});
+            let _ = audit.record(&e);
+            serde_json::json!({
+                "pushed": o.pushed, "pulled": o.pulled, "skipped": o.skipped})
+        }
+        Err(e) => serde_json::json!({"error": e.to_string()}),
+    }
+}
+
+/// Auto-sync loop: every minute, if `sync.auto_minutes` meta is set and
+/// `sync.last_auto` is older than that interval, run a `run` sync on the
+/// saved target. `last_auto` is stamped before the attempt so a failing
+/// target backs off for the full interval instead of retrying at 60s.
+fn spawn_sync_scheduler(
+    store: Arc<Store>,
+    data_dir: String,
+    device: DeviceId,
+    audit: Arc<pai_audit::AuditLog>,
+) {
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+            let auto: u64 = store
+                .meta_get("sync.auto_minutes")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            if auto == 0 {
+                continue;
+            }
+            let now_s = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last: u64 = store
+                .meta_get("sync.last_auto")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            if now_s.saturating_sub(last) < auto.saturating_mul(60) {
+                continue;
+            }
+            let _ = store.meta_set("sync.last_auto", &now_s.to_string());
+            let _ = run_sync(
+                &rt,
+                &store,
+                &data_dir,
+                device,
+                &audit,
+                &SyncArgs {
+                    mode: "run".into(),
+                    dir: None,
+                    relay: None,
+                    token: None,
+                    lan: false,
+                },
+            );
+        }
+    });
+}
+
+/// Persisted sync configuration + readiness: `{lan, dir, relay,
+/// token_set, auto_minutes, last_auto, peers, has_vault}` — the Devices
+/// screen prefills its dialog and badges the schedule from this.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_sync_status(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    let meta = |k: &str| rt.store.meta_get(&format!("sync.{k}")).ok().flatten();
+    let peers = pai_sync::pair::list_peers(&rt.store)
+        .map(|p| p.len())
+        .unwrap_or(0);
+    let has_vault = matches!(
+        pai_sync::crypto::vault_key(std::path::Path::new(&rt.data_dir)),
+        Ok(Some(_))
+    );
+    to_c(serde_json::json!({
+        "lan": meta("lan").as_deref() == Some("1"),
+        "dir": meta("dir"),
+        "relay": meta("relay"),
+        "token_set": meta("token").is_some(),
+        "auto_minutes": meta("auto_minutes")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0),
+        "last_auto": meta("last_auto")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0),
+        "peers": peers,
+        "has_vault": has_vault,
+    }))
+}
+
 /// One-shot sync: `json` is `{"mode": "push"|"pull"|"run",
-/// "dir"?, "relay"?, "token"?, "lan"?}`. With no transport args the
-/// last-used target (saved under `sync.*` meta keys) applies. `lan`
-/// discovers a paired mesh peer — zero config on the same network.
-/// Returns `{pushed, pulled, skipped, via}`.
+/// "dir"?, "relay"?, "token"?, "lan"?, "auto_minutes"?}`. With no
+/// transport args the last-used target (saved under `sync.*` meta keys)
+/// applies. `lan` discovers a paired mesh peer — zero config on the
+/// same network. `auto_minutes` (0 = off) schedules background syncs.
+/// Returns `{pushed, pulled, skipped}`.
 /// # Safety
 /// `handle` must come from `pai_init`; `json` is NUL-terminated UTF-8.
 #[no_mangle]
@@ -1627,105 +1841,30 @@ pub unsafe extern "C" fn pai_sync_now(handle: *mut PaiRuntime, json: *const c_ch
         token: Option<String>,
         #[serde(default)]
         lan: bool,
+        #[serde(default)]
+        auto_minutes: Option<u64>,
     }
     let req: Req = match serde_json::from_str(&raw) {
         Ok(r) => r,
         Err(e) => return to_c(serde_json::json!({"error": format!("bad JSON: {e}")})),
     };
-    // Transport: explicit args win; otherwise the saved sync.* target.
-    let meta = |k: &str| rt.store.meta_get(&format!("sync.{k}")).ok().flatten();
-    let lan = req.lan || meta("lan").as_deref() == Some("1");
-    let dir = req.dir.or_else(|| meta("dir"));
-    let relay = req.relay.or_else(|| meta("relay"));
-    let token = req.token.or_else(|| meta("token"));
-    let transport: Box<dyn pai_sync::SyncTransport> = if lan {
-        // Mesh discovery — paired peer announcing its relay on the LAN.
-        let ids = pai_identity::IdentityStore::new(rt.store.clone());
-        let bind = std::net::SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            pai_mesh::MULTICAST_PORT,
-        );
-        let sock = match pai_mesh::bind_listener(bind, Some(pai_mesh::MULTICAST_GROUP)) {
-            Ok(s) => s,
-            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
-        };
-        let found = pai_mesh::discover(&sock, Duration::from_secs(3));
-        let paired = match pai_mesh::paired_announcements(&rt.store, &ids, found) {
-            Ok(p) => p,
-            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
-        };
-        let Some(target) = paired.first() else {
-            return to_c(serde_json::json!({
-                "error": "no paired mesh peer announcing — \
-                          run `pai sync serve --announce` on it"
-            }));
-        };
-        let agree =
-            match pai_sync::crypto::agreement_key(rt.device, std::path::Path::new(&rt.data_dir)) {
-                Ok(a) => a,
-                Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
-            };
-        let token = pai_mesh::token_for(&agree.secret, &target.peer);
-        Box::new(pai_sync::relay::RelayTransport::new(
-            format!("http://{}", target.relay_addr),
-            Some(token),
-        ))
-    } else if let Some(d) = dir.clone() {
-        match pai_sync::FolderTransport::new(d.into()) {
-            Ok(t) => Box::new(t),
-            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
-        }
-    } else if let Some(r) = relay.clone() {
-        Box::new(pai_sync::relay::RelayTransport::new(r, token))
-    } else {
-        return to_c(serde_json::json!({
-            "error": "no sync target — pass lan:true, a dir, or a relay"
-        }));
-    };
-    // Persist the choice so the next call needs no args.
-    let _ = rt.store.meta_set("sync.lan", if lan { "1" } else { "0" });
-    if let Some(d) = &dir {
-        let _ = rt.store.meta_set("sync.dir", d);
+    if let Some(m) = req.auto_minutes {
+        let _ = rt.store.meta_set("sync.auto_minutes", &m.to_string());
     }
-    if let Some(r) = &relay {
-        let _ = rt.store.meta_set("sync.relay", r);
-    }
-    let vault = match pai_sync::crypto::vault_key(std::path::Path::new(&rt.data_dir)) {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            return to_c(serde_json::json!({
-                "error": "no vault key — pair a device first (pai pair)"
-            }))
-        }
-        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
-    };
-    let eng = pai_sync::engine::SyncEngine::new(
-        transport,
-        rt.store.clone(),
-        vault,
+    to_c(run_sync(
+        &rt.rt,
+        &rt.store,
+        &rt.data_dir,
         rt.device,
-        std::path::Path::new(&rt.data_dir),
-    );
-    let mode = req.mode.as_deref().unwrap_or("run");
-    let out = rt.rt.block_on(async {
-        match mode {
-            "push" => eng.push().await,
-            "pull" => eng.pull().await,
-            _ => eng.run().await,
-        }
-    });
-    match out {
-        Ok(o) => {
-            let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
-            e.device = Some(rt.device);
-            e.detail = serde_json::json!({
-                "sync": mode, "pushed": o.pushed, "pulled": o.pulled});
-            let _ = rt.audit.record(&e);
-            to_c(serde_json::json!({
-                "pushed": o.pushed, "pulled": o.pulled, "skipped": o.skipped}))
-        }
-        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
-    }
+        &rt.audit,
+        &SyncArgs {
+            mode: req.mode.unwrap_or_else(|| "run".into()),
+            dir: req.dir,
+            relay: req.relay,
+            token: req.token,
+            lan: req.lan,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1842,6 +1981,108 @@ pub unsafe extern "C" fn pai_pair_complete(
         to_c(serde_json::json!({"paired": name}))
     })
     .unwrap_or_else(|e| to_c(serde_json::json!({"error": e.to_string()})))
+}
+
+/// Pairing over the configured shared sync folder — one call performs
+/// the whole exchange step that's currently possible:
+/// publishes `offer-<id>.pai` under `<sync.dir>/pairing/`, accepts any
+/// offers from devices we aren't already paired with (writing
+/// `accept-<offerer>-<us>.pai` back), and completes any accepts
+/// addressed to us. Two presses — one per device — finish the pair.
+/// The folder is the channel the user controls; nothing new is trusted.
+/// Returns `{published, accepted: [names], completed: [names],
+/// rejected: [files]}`.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_pair_folder(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    let Some(dir) = rt.store.meta_get("sync.dir").ok().flatten() else {
+        return to_c(serde_json::json!({
+            "error": "no shared folder configured — set one under Sync now"
+        }));
+    };
+    let pdir = std::path::Path::new(&dir).join("pairing");
+    if let Err(e) = std::fs::create_dir_all(&pdir) {
+        return to_c(serde_json::json!({"error": e.to_string()}));
+    }
+    let data_dir = std::path::Path::new(&rt.data_dir);
+    let ids = pai_identity::IdentityStore::new(rt.store.clone());
+    let our_id = rt.device.to_string();
+    let known: std::collections::HashSet<String> = pai_sync::pair::list_peers(&rt.store)
+        .map(|ps| ps.into_iter().map(|p| p.device_id.to_string()).collect())
+        .unwrap_or_default();
+    let mut accepted: Vec<String> = Vec::new();
+    let mut completed: Vec<String> = Vec::new();
+    let mut rejected: Vec<String> = Vec::new();
+    let out = (|| -> Result<()> {
+        let agree = pai_sync::crypto::agreement_key(rt.device, data_dir)?;
+        let offer =
+            pai_sync::pair::make_offer(&rt.device_rec, &agree, &ids, &data_dir.join("keys"))?;
+        pai_sync::pair::write_message(&offer, &pdir.join(format!("offer-{our_id}.pai")))?;
+        for entry in std::fs::read_dir(&pdir).map_err(pai_storage::store_err)? {
+            let entry = entry.map_err(pai_storage::store_err)?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&format!("accept-{our_id}-")) {
+                match pai_sync::pair::read_message(&entry.path()).and_then(|m| {
+                    if known.contains(&m.device_id) {
+                        return Err(Error::InvalidInput("already paired".into()));
+                    }
+                    pai_sync::pair::complete_pairing(&rt.store, &m, &agree, data_dir)
+                        .map(|_| m.name)
+                }) {
+                    Ok(n) => completed.push(n),
+                    Err(e) if e.to_string().contains("already paired") => {}
+                    Err(_) => rejected.push(name),
+                }
+            } else if name.starts_with("offer-") {
+                match pai_sync::pair::read_message(&entry.path()).and_then(|m| {
+                    if m.device_id == our_id || known.contains(&m.device_id) {
+                        return Err(Error::InvalidInput("skip".into()));
+                    }
+                    pai_sync::pair::accept_offer(
+                        &rt.store,
+                        &m,
+                        &rt.device_rec,
+                        &agree,
+                        &ids,
+                        &data_dir.join("keys"),
+                        data_dir,
+                    )
+                    .and_then(|a| {
+                        pai_sync::pair::write_message(
+                            &a,
+                            &pdir.join(format!("accept-{}-{our_id}.pai", m.device_id)),
+                        )
+                        .map(|_| m.name)
+                    })
+                }) {
+                    Ok(n) => accepted.push(n),
+                    Err(e) if e.to_string().contains("skip") => {}
+                    Err(_) => rejected.push(name),
+                }
+            }
+        }
+        Ok(())
+    })();
+    match out {
+        Ok(()) => {
+            if !accepted.is_empty() || !completed.is_empty() {
+                let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+                e.device = Some(rt.device);
+                e.detail = serde_json::json!({
+                    "pair_folder": &pdir,
+                    "accepted": accepted, "completed": completed});
+                let _ = rt.audit.record(&e);
+            }
+            to_c(serde_json::json!({
+                "published": our_id,
+                "accepted": accepted,
+                "completed": completed,
+                "rejected": rejected}))
+        }
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
 }
 
 // ---------------------------------------------------------------------------

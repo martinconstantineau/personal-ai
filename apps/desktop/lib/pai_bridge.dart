@@ -150,12 +150,14 @@ class PaiBridge {
 
   /// One-shot sync — `lan` discovers a paired mesh peer; `dir`/`relay`
   /// targets persist under `sync.*` meta so later calls need no args.
+  /// `autoMinutes` (0 = off) schedules background syncs on the target.
   Future<Map<String, dynamic>> syncNow(
       {String mode = 'run',
       String? dir,
       String? relay,
       String? token,
-      bool lan = false}) async =>
+      bool lan = false,
+      int? autoMinutes}) async =>
       (await _call(_Op.syncNow,
           arg: jsonEncode({
             'mode': mode,
@@ -163,8 +165,14 @@ class PaiBridge {
             'relay': ?relay,
             'token': ?token,
             'lan': lan,
+            'auto_minutes': ?autoMinutes,
           })))
           as Map<String, dynamic>;
+
+  /// Persisted sync config + readiness — {lan, dir, relay, token_set,
+  /// auto_minutes, last_auto, peers, has_vault}.
+  Future<Map<String, dynamic>> syncStatus() async =>
+      (await _call(_Op.syncStatus)) as Map<String, dynamic>;
 
   /// Pairing step 1 (this device offers): write offer.pai to [out].
   Future<Map<String, dynamic>> pairOffer(String out) async =>
@@ -181,6 +189,11 @@ class PaiBridge {
   /// Pairing step 3 (offerer completes): adopt the vault key.
   Future<Map<String, dynamic>> pairComplete(String accept) async =>
       (await _call(_Op.pairComplete, arg: accept)) as Map<String, dynamic>;
+
+  /// Pairing exchange through the configured shared sync folder —
+  /// publishes our offer, accepts pending offers, completes accepts.
+  Future<Map<String, dynamic>> pairFolder() async =>
+      (await _call(_Op.pairFolder)) as Map<String, dynamic>;
 
   /// Write a finished job's result blob to `dest`.
   Future<Map<String, dynamic>> mediaExport(String jobId, String dest) async =>
@@ -552,6 +565,10 @@ class PaiBridge {
                 a['offer'] as String, a['out'] as String);
           case _Op.pairComplete:
             result = client.pairComplete(req.arg!);
+          case _Op.syncStatus:
+            result = client.syncStatus();
+          case _Op.pairFolder:
+            result = client.pairFolder();
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -625,9 +642,11 @@ enum _Op {
   mediaGen,
   mediaExport,
   syncNow,
+  syncStatus,
   pairOffer,
   pairAccept,
   pairComplete,
+  pairFolder,
 }
 
 class _InitError {

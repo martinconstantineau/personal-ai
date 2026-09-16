@@ -27,8 +27,7 @@ unsafe fn init(dir: &std::path::Path) -> *mut PaiRuntime {
 
 unsafe fn json(p: *mut std::ffi::c_char) -> serde_json::Value {
     assert!(!p.is_null());
-    let v: serde_json::Value =
-        serde_json::from_str(CStr::from_ptr(p).to_str().unwrap()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(CStr::from_ptr(p).to_str().unwrap()).unwrap();
     pai_free_string(p);
     v
 }
@@ -66,8 +65,7 @@ fn pair_offer_accept_complete_end_to_end() {
         // with "vault key".
         let shared = tmpdir("shared");
         let req = CString::new(
-            serde_json::json!({"dir": shared.to_string_lossy(), "mode": "push"})
-                .to_string(),
+            serde_json::json!({"dir": shared.to_string_lossy(), "mode": "push"}).to_string(),
         )
         .unwrap();
         let v = json(pai_sync_now(a, req.as_ptr()));
@@ -78,6 +76,94 @@ fn pair_offer_accept_complete_end_to_end() {
 
         pai_free(a);
         pai_free(b);
+    }
+}
+
+/// The folder exchange: two runtimes share a sync dir; alternating
+/// `pai_pair_folder` calls walk the whole offer/accept/complete dance —
+/// no manual file shuffling.
+#[test]
+fn pair_folder_exchange_end_to_end() {
+    unsafe {
+        let dir_a = tmpdir("fa");
+        let dir_b = tmpdir("fb");
+        let shared = tmpdir("fshared");
+        let a = init(&dir_a);
+        let b = init(&dir_b);
+
+        // Configure sync.dir on both — a sync_now with a dir persists
+        // the target even though the run itself fails pre-pairing.
+        for h in [a, b] {
+            let req =
+                CString::new(serde_json::json!({"dir": shared.to_string_lossy()}).to_string())
+                    .unwrap();
+            let _ = json(pai_sync_now(h, req.as_ptr()));
+        }
+
+        // Round 1: A publishes its offer.
+        let v = json(pai_pair_folder(a));
+        assert_eq!(v["accepted"].as_array().unwrap().len(), 0, "{v}");
+        assert_eq!(v["completed"].as_array().unwrap().len(), 0, "{v}");
+
+        // Round 2: B publishes, finds A's offer, writes an accept.
+        let v = json(pai_pair_folder(b));
+        assert!(v["error"].is_null(), "{v}");
+        assert_eq!(v["accepted"].as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(v["completed"].as_array().unwrap().len(), 0, "{v}");
+
+        // Round 3: A completes B's accept (adopts B's vault) and
+        // answers B's offer with an accept.
+        let v = json(pai_pair_folder(a));
+        assert_eq!(v["completed"].as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(v["accepted"].as_array().unwrap().len(), 1, "{v}");
+
+        // Round 4: crossed offers resolve — B already recorded A as a
+        // peer at accept time, so completing A's accept is a no-op (and
+        // would conflict anyway: both already live in B's vault).
+        let v = json(pai_pair_folder(b));
+        assert_eq!(v["completed"].as_array().unwrap().len(), 0, "{v}");
+
+        // Re-running is quiet: existing peers are skipped.
+        let v = json(pai_pair_folder(a));
+        assert_eq!(v["completed"].as_array().unwrap().len(), 0, "{v}");
+        assert_eq!(v["accepted"].as_array().unwrap().len(), 0, "{v}");
+
+        // Status: both report a peer + a vault.
+        for h in [a, b] {
+            let st = json(pai_sync_status(h));
+            assert_eq!(st["peers"].as_u64().unwrap(), 1, "{st}");
+            assert_eq!(st["has_vault"].as_bool().unwrap(), true, "{st}");
+            assert_eq!(
+                st["dir"].as_str().unwrap(),
+                shared.to_string_lossy(),
+                "{st}"
+            );
+        }
+
+        // auto_minutes persists through sync_now and shows in status.
+        let req =
+            CString::new(serde_json::json!({"auto_minutes": 15u64, "mode": "push"}).to_string())
+                .unwrap();
+        let v = json(pai_sync_now(a, req.as_ptr()));
+        assert!(v["error"].is_null(), "paired folder sync: {v}");
+        let st = json(pai_sync_status(a));
+        assert_eq!(st["auto_minutes"].as_u64().unwrap(), 15, "{st}");
+
+        pai_free(a);
+        pai_free(b);
+    }
+}
+
+#[test]
+fn pair_folder_without_sync_dir_errors() {
+    unsafe {
+        let h = init(&tmpdir("nofolder"));
+        let v = json(pai_pair_folder(h));
+        assert!(
+            v["error"].as_str().unwrap().contains("shared folder"),
+            "{v}"
+        );
+        pai_free(h);
     }
 }
 

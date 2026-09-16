@@ -118,6 +118,10 @@ class PaiClient {
       'pai_pair_complete');
   late final _syncNow = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_sync_now');
+  late final _syncStatus = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_sync_status');
+  late final _pairFolder = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_pair_folder');
   late final _mediaList = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_media_list');
   late final _mediaGen = _lib.lookupFunction<_SendNative,
@@ -465,10 +469,20 @@ class PaiClient {
       _call1(_pairComplete, acceptPath);
 
   /// One-shot sync — `requestJson` is
-  /// `{mode?, dir?, relay?, token?, lan?}`; empty uses the saved target.
-  /// Blocking — worker isolate only.
+  /// `{mode?, dir?, relay?, token?, lan?, auto_minutes?}`; empty uses
+  /// the saved target. Blocking — worker isolate only.
   Map<String, dynamic> syncNow(String requestJson) =>
       _call1(_syncNow, requestJson);
+
+  /// Persisted sync config + readiness: `{lan, dir, relay, token_set,
+  /// auto_minutes, last_auto, peers, has_vault}`.
+  Map<String, dynamic> syncStatus() =>
+      _json(_syncStatus(_handle)) as Map<String, dynamic>;
+
+  /// Pairing exchange through the configured shared sync folder —
+  /// publishes our offer, accepts offers, completes accepts.
+  Map<String, dynamic> pairFolder() =>
+      _json(_pairFolder(_handle)) as Map<String, dynamic>;
 
   /// Media job log, newest first — local and broker-routed rows.
   List<dynamic> mediaList() =>
