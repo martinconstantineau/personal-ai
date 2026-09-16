@@ -18,6 +18,7 @@ apps/desktop/linux/flutter/ephemeral/
 
 # Local data / models (never commit user data or model weights)
 data/
+.pai-data/
 models/
 *.gguf
 *.onnx

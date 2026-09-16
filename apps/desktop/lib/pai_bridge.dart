@@ -126,9 +126,9 @@ class PaiBridge {
           {String? query, String? from, String? label, bool unreadOnly = false, int limit = 20}) async =>
       (await _call(_Op.emailSearch,
           arg: jsonEncode({
-            if (query != null) 'query': query,
-            if (from != null) 'from': from,
-            if (label != null) 'label': label,
+            'query': ?query,
+            'from': ?from,
+            'label': ?label,
             'unread_only': unreadOnly,
             'limit': limit,
           }))) as Map<String, dynamic>;
@@ -146,7 +146,7 @@ class PaiBridge {
             'cc': cc.map((a) => {'address': a}).toList(),
             'subject': subject,
             'body': body,
-            if (inReplyTo != null) 'in_reply_to': inReplyTo,
+            'in_reply_to': ?inReplyTo,
           }))) as Map<String, dynamic>;
 
   /// Send immediately via SMTP — same args as [emailDraft]. {sent:true}
@@ -163,7 +163,7 @@ class PaiBridge {
             'cc': cc.map((a) => {'address': a}).toList(),
             'subject': subject,
             'body': body,
-            if (inReplyTo != null) 'in_reply_to': inReplyTo,
+            'in_reply_to': ?inReplyTo,
           }))) as Map<String, dynamic>;
 
   /// Voice ops — `{stt, tts, mic, speaker}` probe; `voiceListen` blocks up
@@ -228,6 +228,10 @@ class PaiBridge {
 
   Future<Map<String, dynamic>> shareRevoke(String tokenId) async =>
       (await _call(_Op.shareRevoke, arg: tokenId)) as Map<String, dynamic>;
+
+  /// Resolved provider/model + device — the chat header line.
+  Future<Map<String, dynamic>> status() async =>
+      (await _call(_Op.status)) as Map<String, dynamic>;
 
   Future<Map<String, dynamic>> voiceStatus() async =>
       (await _call(_Op.voiceStatus)) as Map<String, dynamic>;
@@ -351,6 +355,8 @@ class PaiBridge {
             result = client.notifyList(unreadOnly: req.arg == 'unread');
           case _Op.notifyMarkRead:
             result = client.notifyMarkRead(req.arg!);
+          case _Op.status:
+            result = client.status();
           case _Op.voiceStatus:
             result = client.voiceStatus();
           case _Op.voiceListen:
@@ -443,6 +449,7 @@ enum _Op {
   emailSend,
   notifyList,
   notifyMarkRead,
+  status,
   voiceStatus,
   voiceListen,
   voiceListenStream,

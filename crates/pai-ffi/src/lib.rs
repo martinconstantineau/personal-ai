@@ -140,7 +140,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
                 let ep = &found[0];
                 server_url = ep.base_url.clone();
                 if model.is_none() {
-                    model = ep.models.first().cloned();
+                    model = pai_inference::pick_chat_model(&ep.models);
                 }
                 provider_name = "llama-server".into();
             }
@@ -1257,6 +1257,21 @@ pub unsafe extern "C" fn pai_apps_run(
 
 fn voice_err(msg: &str) -> *mut c_char {
     to_c(serde_json::json!({"error": msg}))
+}
+
+/// What the runtime resolved: `{provider, model, device, data_dir}` —
+/// the chat header's "who am I talking to" line.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_status(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    to_c(serde_json::json!({
+        "provider": rt.def.provider,
+        "model": rt.def.model,
+        "device": rt.device.to_string(),
+        "data_dir": rt.data_dir,
+    }))
 }
 
 /// Voice capability probe: `{stt, tts, mic, speaker, whisper_url}`.

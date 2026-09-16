@@ -1139,7 +1139,7 @@ async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
                 eprintln!("auto: using {} at {}", ep.provider, ep.base_url);
                 server_url = ep.base_url.clone();
                 if model.is_none() {
-                    model = ep.models.first().cloned();
+                    model = pai_inference::pick_chat_model(&ep.models);
                 }
                 provider_name = "llama-server".into();
             }

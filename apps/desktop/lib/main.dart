@@ -197,6 +197,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _listening = false;
   bool _speakReplies = false;
   Map<String, dynamic> _voice = const {};
+  Map<String, dynamic> _status = const {};
   final _entries = <_Entry>[];
   List<dynamic> _convs = const [];
   List<dynamic> _interrupted = const [];
@@ -223,6 +224,8 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) setState(() => _interrupted = runs);
       final voice = await _pai!.voiceStatus();
       if (mounted) setState(() => _voice = voice);
+      final status = await _pai!.status();
+      if (mounted) setState(() => _status = status);
     } catch (e) {
       if (mounted) setState(() => _error = 'Load failed: $e');
     }
@@ -431,7 +434,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Personal AI'),
+        title: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Personal AI'),
+              if (_status.isNotEmpty)
+                Text(
+                  '${_status['provider']}'
+                  '${_status['model'] != null ? ' · ${_status['model']}' : ''}',
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                ),
+            ]),
         actions: [
           if (_sending)
             IconButton(
@@ -1961,6 +1975,7 @@ class DevicesScreen extends StatefulWidget {
 class _DevicesScreenState extends State<DevicesScreen> {
   Map<String, dynamic>? _detect;
   List<dynamic> _peers = const [];
+  Map<String, dynamic> _status = const {};
   bool _loading = true;
   String? _error;
 
@@ -1975,10 +1990,15 @@ class _DevicesScreenState extends State<DevicesScreen> {
     try {
       final d = await widget.bridge.detect();
       final p = await widget.bridge.peersList();
+      Map<String, dynamic> st = const {};
+      try {
+        st = await widget.bridge.status();
+      } catch (_) {}
       if (!mounted) return;
       setState(() {
         _detect = d;
         _peers = (p['peers'] as List? ?? const []);
+        _status = st;
         _loading = false;
         _error = d['error'] as String? ?? p['error'] as String?;
       });
@@ -2026,12 +2046,40 @@ class _DevicesScreenState extends State<DevicesScreen> {
               else
                 for (final e in endpoints)
                   Card(
-                      child: ListTile(
-                    leading: Icon(Icons.bolt,
-                        color: cs.primary),
-                    title: Text('${e['provider']} · ${e['base_url']}'),
-                    subtitle: Text(
-                        '${(e['models'] as List? ?? const []).length} model(s) reported'),
+                      child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(children: [
+                            Icon(Icons.bolt, color: cs.primary, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(
+                                child: Text(
+                                    '${e['provider']} · ${e['base_url']}',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleSmall)),
+                          ]),
+                          const SizedBox(height: 8),
+                          Wrap(spacing: 6, runSpacing: 6, children: [
+                            for (final m
+                                in (e['models'] as List? ?? const []))
+                              _ModelChip(
+                                name: '$m',
+                                serving: m == _status['model'],
+                                chatPick: m == e['chat_model'],
+                                embedOnly: (e['embed_only'] as List? ??
+                                        const [])
+                                    .contains(m),
+                              ),
+                            if ((e['models'] as List? ?? const []).isEmpty)
+                              Text('No models reported',
+                                  style: TextStyle(
+                                      color: cs.onSurfaceVariant,
+                                      fontSize: 12)),
+                          ]),
+                        ]),
                   )),
               const SizedBox(height: 4),
               for (final name in ['llama-server', 'ollama', 'lms'])
@@ -2282,6 +2330,59 @@ class _ActivityScreenState extends State<ActivityScreen> {
                               overflow: TextOverflow.ellipsis),
                         );
                       }),
+    );
+  }
+}
+
+/// A reported model name on an inference endpoint, annotated with how
+/// the runtime treats it: [serving] = the model chat is actually using,
+/// [chatPick] = what auto-detect would choose, [embedOnly] = embedding-
+/// only (cannot serve chat completions).
+class _ModelChip extends StatelessWidget {
+  const _ModelChip(
+      {required this.name,
+      required this.serving,
+      required this.chatPick,
+      required this.embedOnly});
+  final String name;
+  final bool serving;
+  final bool chatPick;
+  final bool embedOnly;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tag = serving
+        ? 'serving'
+        : chatPick
+            ? 'chat'
+            : embedOnly
+                ? 'embeddings'
+                : null;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: serving
+            ? cs.primaryContainer
+            : embedOnly
+                ? cs.surfaceContainerHighest
+                : cs.secondaryContainer.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Text(name,
+            style: TextStyle(
+                fontSize: 12,
+                color: embedOnly ? cs.onSurfaceVariant : null)),
+        if (tag != null) ...[
+          const SizedBox(width: 5),
+          Text(tag,
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  color: serving ? cs.primary : cs.onSurfaceVariant)),
+        ],
+      ]),
     );
   }
 }

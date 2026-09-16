@@ -784,6 +784,10 @@ pub struct DetectedEndpoint {
     pub base_url: String,
     /// Models the endpoint reports via `/v1/models` (may be empty).
     pub models: Vec<String>,
+    /// The model auto-detection would hand to chat (embed-only skipped).
+    pub chat_model: Option<String>,
+    /// Subset of `models` that look embedding-only — can't serve chat.
+    pub embed_only: Vec<String>,
 }
 
 /// Probe every candidate's `/v1/models` concurrently; return the live ones.
@@ -802,7 +806,7 @@ pub async fn detect_endpoints(timeout: Duration) -> Vec<DetectedEndpoint> {
                 return None;
             }
             let body: serde_json::Value = resp.json().await.ok()?;
-            let models = body["data"]
+            let models: Vec<String> = body["data"]
                 .as_array()
                 .map(|arr| {
                     arr.iter()
@@ -810,10 +814,18 @@ pub async fn detect_endpoints(timeout: Duration) -> Vec<DetectedEndpoint> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let chat_model = pick_chat_model(&models);
+            let embed_only = models
+                .iter()
+                .filter(|m| is_embedding_model(m))
+                .cloned()
+                .collect();
             Some(DetectedEndpoint {
                 provider: name.to_string(),
                 base_url: url.to_string(),
                 models,
+                chat_model,
+                embed_only,
             })
         }
     });
@@ -822,6 +834,30 @@ pub async fn detect_endpoints(timeout: Duration) -> Vec<DetectedEndpoint> {
         .into_iter()
         .flatten()
         .collect()
+}
+
+/// Pick a chat-capable model from an endpoint's reported list.
+/// Embedding-only models (nomic-embed, bge, gte, e5, all-minilm, …)
+/// answer `/v1/models` but 400 on `/v1/chat/completions`, so a naive
+/// `models.first()` can hand chat to a model that can't chat.
+/// Heuristic: does this model name look embedding/rerank-only? Such
+/// models answer `/v1/models` but 400 on `/v1/chat/completions`.
+pub fn is_embedding_model(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("embed")
+        || n.contains("rerank")
+        || n.starts_with("bge-")
+        || n.starts_with("gte-")
+        || n.starts_with("e5-")
+        || n.contains("minilm")
+}
+
+pub fn pick_chat_model(models: &[String]) -> Option<String> {
+    models
+        .iter()
+        .find(|m| !is_embedding_model(m))
+        .or_else(|| models.first())
+        .cloned()
 }
 
 /// Locate an executable on PATH (handles `.exe` on Windows). Returns the
@@ -870,5 +906,24 @@ mod tests {
     #[test]
     fn trust_levels_order() {
         assert!(TrustLevel::Policy > TrustLevel::Untrusted);
+    }
+
+    #[test]
+    fn pick_chat_model_skips_embedders() {
+        let models = vec![
+            "nomic-embed-text:latest".into(),
+            "qwen2.5:0.5b".into(),
+        ];
+        assert_eq!(
+            pick_chat_model(&models).as_deref(),
+            Some("qwen2.5:0.5b")
+        );
+        // All-embedding list still yields something rather than nothing.
+        let embed_only = vec!["bge-m3:latest".into(), "nomic-embed-text".into()];
+        assert_eq!(
+            pick_chat_model(&embed_only).as_deref(),
+            Some("bge-m3:latest")
+        );
+        assert_eq!(pick_chat_model(&[]), None);
     }
 }
