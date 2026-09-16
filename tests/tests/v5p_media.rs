@@ -77,6 +77,34 @@ fn media_export_missing_job_errors() {
 }
 
 #[test]
+fn sync_now_without_target_errors() {
+    unsafe {
+        let h = init();
+        let req = CString::new("{}").unwrap();
+        let v = json(pai_sync_now(h, req.as_ptr()));
+        assert!(v["error"].as_str().unwrap().contains("no sync target"));
+        pai_free(h);
+    }
+}
+
+#[test]
+fn sync_now_dir_without_vault_errors() {
+    unsafe {
+        let h = init();
+        let dir = tmpdir().join("sync-target");
+        let req = CString::new(
+            serde_json::json!({"dir": dir.to_string_lossy(), "mode": "push"})
+                .to_string(),
+        )
+        .unwrap();
+        let v = json(pai_sync_now(h, req.as_ptr()));
+        // Fresh temp dir → never paired → no vault key.
+        assert!(v["error"].as_str().unwrap().contains("vault key"));
+        pai_free(h);
+    }
+}
+
+#[test]
 fn media_gen_rejects_empty_prompt() {
     unsafe {
         let h = init();

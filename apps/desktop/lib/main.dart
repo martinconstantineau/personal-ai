@@ -3043,6 +3043,97 @@ class _DevicesScreenState extends State<DevicesScreen> {
     await _load();
   }
 
+  bool _syncing = false;
+
+  /// Sync-target dialog — LAN (zero-config mesh), a shared folder, or
+  /// a relay URL. The choice persists under sync.* meta, so a second
+  /// run needs no args.
+  Future<void> _syncDialog() async {
+    var transport = 'lan';
+    var mode = 'run';
+    final pathCtl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('Sync now'),
+          content: SizedBox(
+            width: 420,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'lan', label: Text('This LAN')),
+                  ButtonSegment(
+                      value: 'dir', label: Text('Shared folder')),
+                  ButtonSegment(value: 'relay', label: Text('Relay')),
+                ],
+                selected: {transport},
+                onSelectionChanged: (v) =>
+                    setD(() => transport = v.first),
+              ),
+              const SizedBox(height: 12),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'run', label: Text('Both')),
+                  ButtonSegment(value: 'push', label: Text('Push')),
+                  ButtonSegment(value: 'pull', label: Text('Pull')),
+                ],
+                selected: {mode},
+                onSelectionChanged: (v) => setD(() => mode = v.first),
+              ),
+              if (transport != 'lan') ...[
+                const SizedBox(height: 12),
+                TextField(
+                  controller: pathCtl,
+                  decoration: InputDecoration(
+                      labelText: transport == 'dir'
+                          ? 'Shared folder path'
+                          : 'Relay URL (and token, url#token)',
+                      hintText: transport == 'dir'
+                          ? r'X:\pai-sync or \\nas\pai-sync'
+                          : 'http://host:port',
+                      border: const OutlineInputBorder()),
+                ),
+              ],
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Sync')),
+          ],
+        ),
+      ),
+    );
+    final path = pathCtl.text.trim();
+    pathCtl.dispose();
+    if (ok != true || !mounted) return;
+    String? dir, relay, token;
+    if (transport == 'dir') dir = path;
+    if (transport == 'relay') {
+      final parts = path.split('#');
+      relay = parts.first;
+      if (parts.length > 1) token = parts[1];
+    }
+    setState(() => _syncing = true);
+    final r = await widget.bridge.syncNow(
+        mode: mode,
+        dir: dir,
+        relay: relay,
+        token: token,
+        lan: transport == 'lan');
+    if (!mounted) return;
+    setState(() => _syncing = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r['error'] != null
+            ? 'Sync failed: ${r['error']}'
+            : 'Synced - pushed ${r['pushed']}, pulled ${r['pulled']}, '
+                'skipped ${r['skipped']}')));
+  }
+
   /// Catalog picker + destination — `dest` empty installs internally,
   /// a path like `D:\pai-models` writes a portable pack onto that
   /// drive (the file is copied, not re-downloaded, when the model is
@@ -3321,6 +3412,28 @@ class _DevicesScreenState extends State<DevicesScreen> {
                     subtitle: Text(
                         '${p['platform']} · ${(p['id'] as String).substring(0, 8)}'),
                   )),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: _syncing
+                    ? const Padding(
+                        padding: EdgeInsets.all(8),
+                        child: Row(mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2)),
+                              SizedBox(width: 10),
+                              Text('Syncing…'),
+                            ]),
+                      )
+                    : FilledButton.tonalIcon(
+                        icon: const Icon(Icons.sync, size: 18),
+                        label: const Text('Sync now'),
+                        onPressed: _syncDialog),
+              ),
             ]),
     );
   }

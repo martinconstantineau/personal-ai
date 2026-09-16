@@ -148,6 +148,24 @@ class PaiBridge {
               {'prompt': prompt, 'duration_seconds': seconds})))
           as Map<String, dynamic>;
 
+  /// One-shot sync — `lan` discovers a paired mesh peer; `dir`/`relay`
+  /// targets persist under `sync.*` meta so later calls need no args.
+  Future<Map<String, dynamic>> syncNow(
+      {String mode = 'run',
+      String? dir,
+      String? relay,
+      String? token,
+      bool lan = false}) async =>
+      (await _call(_Op.syncNow,
+          arg: jsonEncode({
+            'mode': mode,
+            'dir': ?dir,
+            'relay': ?relay,
+            'token': ?token,
+            'lan': lan,
+          })))
+          as Map<String, dynamic>;
+
   /// Write a finished job's result blob to `dest`.
   Future<Map<String, dynamic>> mediaExport(String jobId, String dest) async =>
       (await _call(_Op.mediaExport,
@@ -508,6 +526,8 @@ class PaiBridge {
             final a = jsonDecode(req.arg!) as Map<String, dynamic>;
             result = client.mediaExport(
                 a['id'] as String, a['dest'] as String);
+          case _Op.syncNow:
+            result = client.syncNow(req.arg ?? '{}');
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -580,6 +600,7 @@ enum _Op {
   mediaList,
   mediaGen,
   mediaExport,
+  syncNow,
 }
 
 class _InitError {

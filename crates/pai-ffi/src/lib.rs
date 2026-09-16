@@ -1583,6 +1583,133 @@ pub unsafe extern "C" fn pai_models_install(
     }
 }
 
+/// One-shot sync: `json` is `{"mode": "push"|"pull"|"run",
+/// "dir"?, "relay"?, "token"?, "lan"?}`. With no transport args the
+/// last-used target (saved under `sync.*` meta keys) applies. `lan`
+/// discovers a paired mesh peer — zero config on the same network.
+/// Returns `{pushed, pulled, skipped, via}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `json` is NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_sync_now(handle: *mut PaiRuntime, json: *const c_char) -> *mut c_char {
+    let rt = &mut *handle;
+    let raw = match read_str(json) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    #[derive(serde::Deserialize)]
+    struct Req {
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        dir: Option<String>,
+        #[serde(default)]
+        relay: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        lan: bool,
+    }
+    let req: Req = match serde_json::from_str(&raw) {
+        Ok(r) => r,
+        Err(e) => return to_c(serde_json::json!({"error": format!("bad JSON: {e}")})),
+    };
+    // Transport: explicit args win; otherwise the saved sync.* target.
+    let meta = |k: &str| rt.store.meta_get(&format!("sync.{k}")).ok().flatten();
+    let lan = req.lan || meta("lan").as_deref() == Some("1");
+    let dir = req.dir.or_else(|| meta("dir"));
+    let relay = req.relay.or_else(|| meta("relay"));
+    let token = req.token.or_else(|| meta("token"));
+    let transport: Box<dyn pai_sync::SyncTransport> = if lan {
+        // Mesh discovery — paired peer announcing its relay on the LAN.
+        let ids = pai_identity::IdentityStore::new(rt.store.clone());
+        let bind = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            pai_mesh::MULTICAST_PORT,
+        );
+        let sock = match pai_mesh::bind_listener(bind, Some(pai_mesh::MULTICAST_GROUP)) {
+            Ok(s) => s,
+            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+        };
+        let found = pai_mesh::discover(&sock, Duration::from_secs(3));
+        let paired = match pai_mesh::paired_announcements(&rt.store, &ids, found) {
+            Ok(p) => p,
+            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+        };
+        let Some(target) = paired.first() else {
+            return to_c(serde_json::json!({
+                "error": "no paired mesh peer announcing — \
+                          run `pai sync serve --announce` on it"
+            }));
+        };
+        let agree =
+            match pai_sync::crypto::agreement_key(rt.device, std::path::Path::new(&rt.data_dir)) {
+                Ok(a) => a,
+                Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+            };
+        let token = pai_mesh::token_for(&agree.secret, &target.peer);
+        Box::new(pai_sync::relay::RelayTransport::new(
+            format!("http://{}", target.relay_addr),
+            Some(token),
+        ))
+    } else if let Some(d) = dir.clone() {
+        match pai_sync::FolderTransport::new(d.into()) {
+            Ok(t) => Box::new(t),
+            Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+        }
+    } else if let Some(r) = relay.clone() {
+        Box::new(pai_sync::relay::RelayTransport::new(r, token))
+    } else {
+        return to_c(serde_json::json!({
+            "error": "no sync target — pass lan:true, a dir, or a relay"
+        }));
+    };
+    // Persist the choice so the next call needs no args.
+    let _ = rt.store.meta_set("sync.lan", if lan { "1" } else { "0" });
+    if let Some(d) = &dir {
+        let _ = rt.store.meta_set("sync.dir", d);
+    }
+    if let Some(r) = &relay {
+        let _ = rt.store.meta_set("sync.relay", r);
+    }
+    let vault = match pai_sync::crypto::vault_key(std::path::Path::new(&rt.data_dir)) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return to_c(serde_json::json!({
+                "error": "no vault key — pair a device first (pai pair)"
+            }))
+        }
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let eng = pai_sync::engine::SyncEngine::new(
+        transport,
+        rt.store.clone(),
+        vault,
+        rt.device,
+        std::path::Path::new(&rt.data_dir),
+    );
+    let mode = req.mode.as_deref().unwrap_or("run");
+    let out = rt.rt.block_on(async {
+        match mode {
+            "push" => eng.push().await,
+            "pull" => eng.pull().await,
+            _ => eng.run().await,
+        }
+    });
+    match out {
+        Ok(o) => {
+            let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+            e.device = Some(rt.device);
+            e.detail = serde_json::json!({
+                "sync": mode, "pushed": o.pushed, "pulled": o.pulled});
+            let _ = rt.audit.record(&e);
+            to_c(serde_json::json!({
+                "pushed": o.pushed, "pulled": o.pulled, "skipped": o.skipped}))
+        }
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Media jobs — local audio generation + the shared job log. Remote
 // broker-routed jobs recorded by the CLI/broker also appear in

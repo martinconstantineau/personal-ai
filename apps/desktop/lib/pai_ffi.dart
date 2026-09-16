@@ -107,6 +107,8 @@ class PaiClient {
   late final _modelsInstall = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
       'pai_models_install');
+  late final _syncNow = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_sync_now');
   late final _mediaList = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_media_list');
   late final _mediaGen = _lib.lookupFunction<_SendNative,
@@ -431,6 +433,12 @@ class PaiClient {
   /// Blocking (downloads are large) — worker isolate only.
   Map<String, dynamic> modelsInstall(String requestJson) =>
       _call1(_modelsInstall, requestJson);
+
+  /// One-shot sync — `requestJson` is
+  /// `{mode?, dir?, relay?, token?, lan?}`; empty uses the saved target.
+  /// Blocking — worker isolate only.
+  Map<String, dynamic> syncNow(String requestJson) =>
+      _call1(_syncNow, requestJson);
 
   /// Media job log, newest first — local and broker-routed rows.
   List<dynamic> mediaList() =>
