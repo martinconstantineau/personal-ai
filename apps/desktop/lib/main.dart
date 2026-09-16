@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'pai_bridge.dart';
 
 void main() => runApp(const PaiApp());
@@ -30,6 +31,19 @@ class HomeShell extends StatefulWidget {
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
+
+/// Ctrl+1..9 jump straight to a rail destination.
+const _railKeys = [
+  LogicalKeyboardKey.digit1,
+  LogicalKeyboardKey.digit2,
+  LogicalKeyboardKey.digit3,
+  LogicalKeyboardKey.digit4,
+  LogicalKeyboardKey.digit5,
+  LogicalKeyboardKey.digit6,
+  LogicalKeyboardKey.digit7,
+  LogicalKeyboardKey.digit8,
+  LogicalKeyboardKey.digit9,
+];
 
 class _HomeShellState extends State<HomeShell> {
   PaiBridge? _pai;
@@ -129,9 +143,14 @@ class _HomeShellState extends State<HomeShell> {
                       Text('Starting core…'),
                     ])));
     }
-    return Scaffold(
-      body: Row(children: [
-        NavigationRail(
+    return CallbackShortcuts(
+      bindings: {
+        for (var i = 0; i < _railKeys.length; i++)
+          SingleActivator(_railKeys[i], control: true): () => _select(i),
+      },
+      child: Scaffold(
+        body: Row(children: [
+          NavigationRail(
           selectedIndex: _index,
           onDestinationSelected: _select,
           labelType: NavigationRailLabelType.all,
@@ -166,15 +185,18 @@ class _HomeShellState extends State<HomeShell> {
         Expanded(
             child: IndexedStack(
                 index: _index, children: List.generate(9, _tab))),
-      ]),
+        ]),
+      ),
     );
   }
 }
 
 /// One chat transcript row. `streaming` marks the in-flight assistant reply.
 class _Entry {
-  _Entry({required this.role, this.text = '', this.sub = '', this.streaming = false});
+  _Entry({required this.role, this.text = '', this.sub = '', this.streaming = false, DateTime? at})
+      : at = at ?? DateTime.now();
   final String role; // you | ai | system
+  final DateTime at;
   String text;
   String sub;
   bool streaming;
@@ -260,7 +282,11 @@ class _ChatScreenState extends State<ChatScreen> {
         .where((c) => c is Map && c['type'] == 'text')
         .map((c) => c['text'] as String? ?? '')
         .join('');
-    return _Entry(role: role == 'user' ? 'you' : 'ai', text: text);
+    DateTime? at;
+    if (m['created_at'] is String) {
+      at = DateTime.tryParse(m['created_at'] as String)?.toLocal();
+    }
+    return _Entry(role: role == 'user' ? 'you' : 'ai', text: text, at: at);
   }
 
   void _scrollDown() {
@@ -533,7 +559,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           : 'No messages yet — ask anything.',
                       style: TextStyle(color: cs.onSurfaceVariant),
                     ),
-                    if (_pai != null)
+                    if (_pai != null) ...[
                       Padding(
                         padding: const EdgeInsets.only(top: 4),
                         child: Text('local-first · private · auditable',
@@ -542,6 +568,25 @@ class _ChatScreenState extends State<ChatScreen> {
                                 color: cs.onSurfaceVariant
                                     .withValues(alpha: 0.7))),
                       ),
+                      const SizedBox(height: 16),
+                      Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          alignment: WrapAlignment.center,
+                          children: [
+                            for (final s in const [
+                              'Remember that I like tea',
+                              'What can you do?',
+                              'Summarize my recent activity',
+                            ])
+                              ActionChip(
+                                  label: Text(s),
+                                  onPressed: () {
+                                    _input.text = s;
+                                    _send();
+                                  }),
+                          ]),
+                    ],
                   ]))
               : ListView.builder(
                   controller: _scroll,
@@ -556,6 +601,9 @@ class _ChatScreenState extends State<ChatScreen> {
             Expanded(
               child: TextField(
                 controller: _input,
+                maxLines: null,
+                textInputAction: TextInputAction.send,
+                onChanged: (_) => setState(() {}),
                 onSubmitted: (_) => _send(),
                 decoration: InputDecoration(
                   hintText: _pai == null
@@ -590,13 +638,54 @@ class _ChatScreenState extends State<ChatScreen> {
                   : _listen,
             ),
             IconButton.filled(
-                onPressed: _send, icon: const Icon(Icons.send)),
+                tooltip: 'Send',
+                onPressed:
+                    (_pai == null || _sending || _input.text.trim().isEmpty)
+                        ? null
+                        : _send,
+                icon: const Icon(Icons.send)),
           ]),
         ),
       ]),
     );
   }
 }
+
+/// Shared skeleton rows shown while a list screen loads.
+Widget _listSkeleton(BuildContext context) {
+  final c = Theme.of(context)
+      .colorScheme
+      .surfaceContainerHighest
+      .withValues(alpha: 0.45);
+  return ListView(padding: const EdgeInsets.all(12), children: [
+    for (var i = 0; i < 5; i++)
+      Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          height: 56,
+          decoration: BoxDecoration(
+              color: c, borderRadius: BorderRadius.circular(10))),
+  ]);
+}
+
+/// Shared error block with a Retry action.
+Widget _errorView(BuildContext context, String err, VoidCallback onRetry) {
+  final cs = Theme.of(context).colorScheme;
+  return Center(
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+    Icon(Icons.error_outline, color: cs.error, size: 32),
+    const SizedBox(height: 8),
+    Text(err, style: TextStyle(color: cs.error)),
+    const SizedBox(height: 12),
+    TextButton.icon(
+        onPressed: onRetry,
+        icon: const Icon(Icons.refresh, size: 16),
+        label: const Text('Retry')),
+  ]));
+}
+
+/// "HH:MM" for bubble labels.
+String _fmtHm(DateTime t) =>
+    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
 class _Bubble extends StatelessWidget {
   const _Bubble({required this.entry});
@@ -624,7 +713,7 @@ class _Bubble extends StatelessWidget {
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(
-            isYou ? 'you' : isSys ? 'event' : 'ai',
+            '${isYou ? 'You' : isSys ? 'Event' : 'Assistant'} · ${_fmtHm(e.at)}',
             style: TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.w600,
@@ -887,10 +976,9 @@ class _MemoriesScreenState extends State<MemoriesScreen> {
         IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
       ]),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? _listSkeleton(context)
           : _error != null
-              ? Center(
-                  child: Text(_error!, style: TextStyle(color: cs.error)))
+              ? _errorView(context, _error!, _load)
               : _items.isEmpty
                   ? Center(
                       child: Text(
@@ -1057,13 +1145,21 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('Documents')),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? _listSkeleton(context)
           : Column(children: [
               if (_error != null)
                 Padding(
-                    padding: const EdgeInsets.all(8),
-                    child:
-                        Text(_error!, style: TextStyle(color: cs.error))),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 4),
+                    child: Row(children: [
+                      Icon(Icons.error_outline, size: 16, color: cs.error),
+                      const SizedBox(width: 6),
+                      Expanded(
+                          child: Text(_error!,
+                              style: TextStyle(color: cs.error))),
+                      TextButton(
+                          onPressed: _load, child: const Text('Retry')),
+                    ])),
               Padding(
                 padding: const EdgeInsets.all(12),
                 child: Row(children: [
@@ -1290,13 +1386,24 @@ class _EmailScreenState extends State<EmailScreen> {
                   onSubmitted: (_) => _search())),
           if (_error != null)
             Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(_error!,
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.error))),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                child: Row(children: [
+                  Icon(Icons.error_outline,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.error),
+                  const SizedBox(width: 6),
+                  Expanded(
+                      child: Text(_error!,
+                          style: TextStyle(
+                              color:
+                                  Theme.of(context).colorScheme.error))),
+                  TextButton(
+                      onPressed: _search, child: const Text('Retry')),
+                ])),
           Expanded(
               child: _loading
-                  ? const Center(child: CircularProgressIndicator())
+                  ? _listSkeleton(context)
                   : _hits.isEmpty && _error == null
                       ? Center(
                           child: Text(
@@ -1372,7 +1479,7 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('Permissions')),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? _listSkeleton(context)
           : ListView(children: [
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
@@ -1423,6 +1530,7 @@ class _AppsScreenState extends State<AppsScreen> {
   String _device = '';
   bool _loading = true;
   String? _running;
+  String? _error;
 
   @override
   void initState() {
@@ -1431,13 +1539,18 @@ class _AppsScreenState extends State<AppsScreen> {
   }
 
   Future<void> _load() async {
-    final r = await widget.bridge.appsList();
-    if (mounted) {
-      setState(() {
-        _apps = (r['apps'] as List?) ?? const [];
-        _device = '${r['device'] ?? ''}';
-        _loading = false;
-      });
+    try {
+      final r = await widget.bridge.appsList();
+      if (mounted) {
+        setState(() {
+          _apps = (r['apps'] as List?) ?? const [];
+          _device = '${r['device'] ?? ''}';
+          _loading = false;
+          _error = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _loading = false; _error = '$e'; });
     }
   }
 
@@ -1982,13 +2095,15 @@ class _AppsScreenState extends State<AppsScreen> {
             onPressed: _grants),
       ]),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _apps.isEmpty
-              ? const Center(
-                  child: Text(
-                      'No apps installed — `pai deploy <dir>` on any\n'
-                      'paired device syncs them here.',
-                      textAlign: TextAlign.center))
+          ? _listSkeleton(context)
+          : _error != null
+              ? _errorView(context, _error!, _load)
+              : _apps.isEmpty
+                  ? const Center(
+                      child: Text(
+                          'No apps installed — `pai deploy <dir>` on any\n'
+                          'paired device syncs them here.',
+                          textAlign: TextAlign.center))
               : ListView.builder(
                   itemCount: _apps.length,
                   itemBuilder: (_, i) {
@@ -2122,13 +2237,25 @@ class _DevicesScreenState extends State<DevicesScreen> {
         IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
       ]),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? _listSkeleton(context)
           : ListView(padding: const EdgeInsets.all(12), children: [
               if (_error != null)
                 Padding(
                     padding: const EdgeInsets.only(bottom: 8),
-                    child:
-                        Text(_error!, style: TextStyle(color: cs.error))),
+                    child: Row(children: [
+                      Icon(Icons.error_outline,
+                          size: 16,
+                          color: Theme.of(context).colorScheme.error),
+                      const SizedBox(width: 6),
+                      Expanded(
+                          child: Text(_error!,
+                              style: TextStyle(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .error))),
+                      TextButton(
+                          onPressed: _load, child: const Text('Retry')),
+                    ])),
               Text('This device',
                   style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 4),
@@ -2293,11 +2420,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
       ]),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? _listSkeleton(context)
           : _error != null
-              ? Center(
-                  child:
-                      Text(_error!, style: TextStyle(color: cs.error)))
+              ? _errorView(context, _error!, _load)
               : _items.isEmpty
                   ? Center(
                       child: Text(
@@ -2390,11 +2515,9 @@ class _ActivityScreenState extends State<ActivityScreen> {
         IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
       ]),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? _listSkeleton(context)
           : _error != null
-              ? Center(
-                  child:
-                      Text(_error!, style: TextStyle(color: cs.error)))
+              ? _errorView(context, _error!, _load)
               : _events.isEmpty
                   ? Center(
                       child: Text('Nothing yet — every permission-gated action is logged here.',
