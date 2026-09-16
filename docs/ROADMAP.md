@@ -583,35 +583,53 @@ guest read/write handles are all shipped and pushed.
   op only (guests can't burn your GPU). Image/video jobs share the
   table + op when those providers land.
 
+## V5n — app-surface completion (done)
+
+The Flutter app now surfaces the full FFI surface end-to-end:
+
+- **Media UI** (`6de76de`) — Media rail destination: submit prompts,
+  watch job state chips, export artifacts; `f5eaea0` routes generation
+  to paired mesh peers announcing `media-run` when no local
+  audio-gen server exists.
+- **Devices screen** — live provider endpoints + binaries, model packs
+  (install to a drive / rescan / serve — `81bb1e1`, `eaab745`), paired
+  devices, share grants.
+- **Provider health** — rail health dot (green serving / amber echo /
+  grey loading) with a status tooltip; Devices lists every detected
+  endpoint.
+- **Pairing over FFI** (`2c7ea5e`) — offer/accept/complete file
+  exchange; `ffda95d` adds exchange-via-shared-folder (one button per
+  device) and `pai_init` now reuses the persisted device identity.
+- **Sync in-app** (`2a48557`, `ffda95d`) — Sync-now dialog (LAN /
+  shared folder / relay, push/pull/both), persisted targets, and an
+  auto-sync scheduler (`sync.auto_minutes` meta).
+- **Slash commands** (`9c2cac3`) — `/verb [arg]` in the chat input
+  with live autocomplete.
+- **Responsive shell** (`4699c7f`) — bottom nav < 640px, icon rail to
+  1120px, labeled rail above.
+- **Onboarding + help** (`54d15a1`) — first-run welcome, F1 / `?`
+  anywhere.
+- **A11y pass** (`d8bd318`) — labels on all icon buttons, contrast-safe
+  health dot, skeleton/loading announcements, transcript landmark,
+  live-region command suggestions.
+
 ## What's next (candidate slices, unordered)
 
-The PRD's named tracks are all shipped. These are the documented
-follow-ups — each builds on shipped infrastructure:
-
+- **Removable-drive watch** — model packs are install/scan/serve in
+  the app; the remaining plug-and-play piece is noticing a newly
+  mounted `X:\pai-models` root without pressing Rescan (poll drive
+  letters, or WM_DEVICECHANGE on Windows).
 - **Packaged audio backend** — a reference `POST /generate` wrapper
   (FastAPI + MusicGen / stable-audio.cpp) so `pai audio gen` works
   out of the box. The provider boundary is already stable; this is
   packaging, not protocol work.
-- **Media UI** — a Media screen in the Flutter app: submit prompts,
-  watch `media_jobs` progress, play/store artifacts, cancel queued
-  jobs. The job table + blob store are queryable today; only the
-  FFI surface + widgets are missing.
-- **Placement visualization** — a Devices screen showing paired
-  devices, advertised capabilities (`bcap` announcements), live
-  `DeviceLoad` (battery/thermal/RAM), and per-device place weights.
-  `broker devices` already exposes this data over CLI.
-- **Provider health surface** — a Settings/Providers screen probing
-  each configured provider (llama-server, whisper, piper, audio-gen)
-  and showing reachable/error state, so a `HTTP 400` in chat points
-  at the misconfigured endpoint instead of a bare error bubble.
 - **Image/video generation adapters** — `MediaJobKind` +
   `ModelCapability` + the `media-run` op already carry them; only
   the provider adapters are missing (stable-diffusion.cpp,
   diffusers-onnx are the declared targets).
-- **Flash-drive model packs** — the pack format is format-agnostic
-  and `pai models install --to E:\` works; the missing UX is
-  plug-and-play detection (scan removable drives on insert, offer to
-  load packs).
+- **Placement visualization** — Devices shows peers today; the deeper
+  view (advertised `bcap` capabilities, live `DeviceLoad`, per-device
+  place weights) is `broker devices` data without an FFI surface yet.
 - **Stable app names** — `app.user.devices` DNS layer on top of
   `pai serve` (Tailscale/hosts-file integration). The CGI gateway +
   placement-aware forwarding already make URLs location-stable.
@@ -620,6 +638,12 @@ follow-ups — each builds on shipped infrastructure:
   hands-free mode is a UI/UX slice, not new plumbing.
 - **Mobile ↔ desktop parity** — the same `lib/main.dart` builds for
   Android; verify media jobs, app install, and share flows on-device.
+- **QR pairing** — offer/accept already travel as small signed files;
+  a QR render+scan path would help mobile. Blocked on this host:
+  camera plugins need Developer Mode (symlinks).
+- **Screen-reader smoke test** — the a11y pass labeled everything to
+  platform conventions; a real Narrator/NVDA walk-through is worth a
+  dedicated session.
 
 ## Known technical debt (tracked, not hidden)
 
