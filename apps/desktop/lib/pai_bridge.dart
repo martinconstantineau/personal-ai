@@ -32,6 +32,11 @@ class PaiBridge {
   final _statusCtl = StreamController<Map<String, dynamic>>.broadcast();
   Stream<Map<String, dynamic>> get statusStream => _statusCtl.stream;
 
+  /// Out-of-band UI events from the runtime (kind `ui:*`) — e.g. the
+  /// drive watcher firing `ui:model_packs` when a pack root mounts.
+  final _uiEvents = StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get uiEvents => _uiEvents.stream;
+
   /// Spawns the worker isolate and initializes the Rust runtime inside it.
   static Future<PaiBridge> start(Map<String, dynamic> config) async {
     final ready = ReceivePort();
@@ -48,11 +53,19 @@ class PaiBridge {
     replies.listen((msg) {
       final (id, value) = msg as (int, dynamic);
       final p = bridge._pending[id];
-      if (p == null) return;
       if (value is Map && value['_event'] != null) {
         final decoded = jsonDecode(value['_event'] as String);
-        if (decoded is Map<String, dynamic>) p.events?.add(decoded);
+        if (decoded is Map<String, dynamic>) {
+          // `ui:` kinds are runtime-originated UI events — broadcast to
+          // screens rather than whichever call happens to be pending.
+          if ('${decoded['kind']}'.startsWith('ui:')) {
+            bridge._uiEvents.add(decoded);
+          } else {
+            p?.events?.add(decoded);
+          }
+        }
       } else {
+        if (p == null) return;
         bridge._pending.remove(id);
         p.completer.complete(value);
         p.events?.close();

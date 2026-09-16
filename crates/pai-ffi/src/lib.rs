@@ -279,6 +279,8 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         device.id,
         audit.clone(),
     );
+    let event_cb: Arc<Mutex<Option<(PaiEventCallback, usize)>>> = Arc::new(Mutex::new(None));
+    spawn_drive_watcher(store.clone(), cfg.data_dir.clone(), event_cb.clone());
 
     Ok(PaiRuntime {
         rt,
@@ -304,7 +306,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         conversation,
         send_lock: Mutex::new(()),
         pending: Arc::new(Mutex::new(HashMap::new())),
-        event_cb: Arc::new(Mutex::new(None)),
+        event_cb,
         cancel: Arc::new(Mutex::new(CancelToken::default())),
         store,
         data_dir: cfg.data_dir.clone(),
@@ -1778,6 +1780,63 @@ fn spawn_sync_scheduler(
                     lan: false,
                 },
             );
+        }
+    });
+}
+
+/// Removable-drive watch: every 4s re-probes `pack_roots()`. When the
+/// set changes (flash drive mounted or removed) the registry is
+/// re-scanned so newly-mounted packs are adopted, an Alerts row records
+/// newly-appearing roots, and a `ui:model_packs` event wakes the
+/// Devices screen — plug-and-play without a Rescan press.
+fn spawn_drive_watcher(
+    store: Arc<Store>,
+    data_dir: String,
+    event_cb: Arc<Mutex<Option<(PaiEventCallback, usize)>>>,
+) {
+    std::thread::spawn(move || {
+        let mut last = pai_models::pack_roots();
+        loop {
+            std::thread::sleep(Duration::from_secs(4));
+            let now = pai_models::pack_roots();
+            if now == last {
+                continue;
+            }
+            let new_roots: Vec<_> = now.iter().filter(|r| !last.contains(r)).cloned().collect();
+            last = now.clone();
+            let scanned = ModelManager::new(store.clone(), std::path::Path::new(&data_dir))
+                .scan()
+                .map(|v| v.len())
+                .unwrap_or(0);
+            if !new_roots.is_empty() {
+                let names = new_roots
+                    .iter()
+                    .map(|r| r.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = pai_notify::store::publish(
+                    &store,
+                    "Model pack detected",
+                    &format!(
+                        "New pai-models root {names} — {scanned} model(s) known. \
+                         Serve one from Devices."
+                    ),
+                    "models",
+                    SyncScope::DeviceLocal,
+                );
+            }
+            if let Some((f, ud)) = *event_cb.lock().unwrap() {
+                let v = serde_json::json!({
+                    "kind": "ui:model_packs",
+                    "roots": now.iter()
+                        .map(|r| r.display().to_string())
+                        .collect::<Vec<_>>(),
+                    "scanned": scanned,
+                });
+                if let Ok(cs) = CString::new(v.to_string()) {
+                    f(cs.as_ptr(), ud as *mut std::ffi::c_void);
+                }
+            }
         }
     });
 }

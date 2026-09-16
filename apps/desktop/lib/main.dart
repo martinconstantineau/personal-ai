@@ -104,6 +104,7 @@ class _HomeShellState extends State<HomeShell> {
   int _unread = 0;
   Map<String, dynamic> _status = const {};
   StreamSubscription? _statusSub;
+  StreamSubscription? _uiSub;
   final _visited = <int>{0};
   final _chatKey = GlobalKey<_ChatScreenState>();
 
@@ -131,6 +132,9 @@ class _HomeShellState extends State<HomeShell> {
       setState(() => _pai = bridge);
       _statusSub = bridge.statusStream.listen((st) {
         if (mounted) setState(() => _status = st);
+      });
+      _uiSub = bridge.uiEvents.listen((ev) {
+        if (ev['kind'] == 'ui:model_packs' && mounted) _refreshUnread();
       });
       try {
         await bridge.status();
@@ -245,6 +249,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void dispose() {
     _statusSub?.cancel();
+    _uiSub?.cancel();
     super.dispose();
   }
 
@@ -3134,11 +3139,29 @@ class _DevicesScreenState extends State<DevicesScreen> {
   bool _scanning = false;
   String? _serving;
   String? _error;
+  StreamSubscription<Map<String, dynamic>>? _packSub;
 
   @override
   void initState() {
     super.initState();
     _load();
+    // The runtime's drive watcher rescans on mount/unmount and pushes
+    // `ui:model_packs` — refresh the list live instead of waiting for
+    // a manual Rescan.
+    _packSub = widget.bridge.uiEvents.listen((ev) {
+      if (ev['kind'] != 'ui:model_packs' || !mounted) return;
+      _load();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              'Model storage changed — ${ev['scanned']} model(s) known'),
+          duration: const Duration(seconds: 3)));
+    });
+  }
+
+  @override
+  void dispose() {
+    _packSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _scan() async {
