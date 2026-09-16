@@ -166,6 +166,22 @@ class PaiBridge {
           })))
           as Map<String, dynamic>;
 
+  /// Pairing step 1 (this device offers): write offer.pai to [out].
+  Future<Map<String, dynamic>> pairOffer(String out) async =>
+      (await _call(_Op.pairOffer, arg: out)) as Map<String, dynamic>;
+
+  /// Pairing step 2 (the other device accepts): offer file in, sealed
+  /// accept file out.
+  Future<Map<String, dynamic>> pairAccept(
+          String offer, String out) async =>
+      (await _call(_Op.pairAccept,
+          arg: jsonEncode({'offer': offer, 'out': out})))
+          as Map<String, dynamic>;
+
+  /// Pairing step 3 (offerer completes): adopt the vault key.
+  Future<Map<String, dynamic>> pairComplete(String accept) async =>
+      (await _call(_Op.pairComplete, arg: accept)) as Map<String, dynamic>;
+
   /// Write a finished job's result blob to `dest`.
   Future<Map<String, dynamic>> mediaExport(String jobId, String dest) async =>
       (await _call(_Op.mediaExport,
@@ -528,6 +544,14 @@ class PaiBridge {
                 a['id'] as String, a['dest'] as String);
           case _Op.syncNow:
             result = client.syncNow(req.arg ?? '{}');
+          case _Op.pairOffer:
+            result = client.pairOffer(req.arg!);
+          case _Op.pairAccept:
+            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
+            result = client.pairAccept(
+                a['offer'] as String, a['out'] as String);
+          case _Op.pairComplete:
+            result = client.pairComplete(req.arg!);
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -601,6 +625,9 @@ enum _Op {
   mediaGen,
   mediaExport,
   syncNow,
+  pairOffer,
+  pairAccept,
+  pairComplete,
 }
 
 class _InitError {

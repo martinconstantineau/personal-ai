@@ -107,6 +107,15 @@ class PaiClient {
   late final _modelsInstall = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
       'pai_models_install');
+  late final _pairOffer = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
+      'pai_pair_offer');
+  late final _pairAccept = _lib.lookupFunction<_ThreeStrNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>(
+      'pai_pair_accept');
+  late final _pairComplete = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>(
+      'pai_pair_complete');
   late final _syncNow = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_sync_now');
   late final _mediaList = _lib.lookupFunction<_NoArgNative,
@@ -433,6 +442,27 @@ class PaiClient {
   /// Blocking (downloads are large) — worker isolate only.
   Map<String, dynamic> modelsInstall(String requestJson) =>
       _call1(_modelsInstall, requestJson);
+
+  /// Write a pairing offer file to [out] — hand it to the other device.
+  Map<String, dynamic> pairOffer(String out) => _call1(_pairOffer, out);
+
+  /// Accept the offer at [offerPath]; writes the sealed accept file to
+  /// [outPath] — return it to the offering device.
+  Map<String, dynamic> pairAccept(String offerPath, String outPath) {
+    final a = offerPath.toNativeUtf8();
+    final b = outPath.toNativeUtf8();
+    try {
+      return _json(_pairAccept(_handle, a, b)) as Map<String, dynamic>;
+    } finally {
+      malloc.free(a);
+      malloc.free(b);
+    }
+  }
+
+  /// Complete pairing on the offerer with the accept file — installs
+  /// the shared vault key.
+  Map<String, dynamic> pairComplete(String acceptPath) =>
+      _call1(_pairComplete, acceptPath);
 
   /// One-shot sync — `requestJson` is
   /// `{mode?, dir?, relay?, token?, lan?}`; empty uses the saved target.

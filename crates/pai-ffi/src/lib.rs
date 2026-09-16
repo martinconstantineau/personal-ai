@@ -65,6 +65,9 @@ pub struct PaiRuntime {
     store: Arc<Store>,
     data_dir: String,
     device: DeviceId,
+    /// Full device record — pairing ops (`make_offer`, `accept_offer`)
+    /// need name/platform/pubkey, not just the id.
+    device_rec: pai_core::Device,
     documents: Arc<pai_documents::DocumentStore>,
     email: Option<Arc<dyn pai_connector_email::EmailProvider>>,
     /// Detected voice providers (whisper-server STT / piper TTS) — None
@@ -123,15 +126,29 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| Error::Other(e.to_string()))?;
 
     let ids = pai_identity::IdentityStore::new(store.clone());
-    let user = ids.create_user(cfg.user_name.as_deref().unwrap_or("user"))?;
+    // Reuse the persisted identity — a fresh user/device per launch
+    // would make pairing ephemeral and audit rows untrustworthy.
+    let user = match store.with_conn(|c| {
+        c.query_row("SELECT id FROM users LIMIT 1", [], |r| {
+            r.get::<_, String>(0)
+        })
+    }) {
+        Ok(id) => ids.get_user(UserId(
+            uuid::Uuid::parse_str(&id).map_err(|e| Error::Storage(format!("users.id: {e}")))?,
+        ))?,
+        Err(_) => ids.create_user(cfg.user_name.as_deref().unwrap_or("user"))?,
+    };
     let key_dir = data_dir.join("keys");
-    let device = ids.register_device(
-        user.id,
-        cfg.device_name.as_deref().unwrap_or("this-device"),
-        current_platform(),
-        pai_identity::probe_capabilities(),
-        &key_dir,
-    )?;
+    let device = match ids.list_devices(user.id)?.into_iter().next() {
+        Some(d) => d,
+        None => ids.register_device(
+            user.id,
+            cfg.device_name.as_deref().unwrap_or("this-device"),
+            current_platform(),
+            pai_identity::probe_capabilities(),
+            &key_dir,
+        )?,
+    };
 
     let audit = Arc::new(pai_audit::AuditLog::new(store.clone()));
     let conversations = Arc::new(ConversationStore::new(store.clone()));
@@ -285,6 +302,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         store,
         data_dir: cfg.data_dir.clone(),
         device: device.id,
+        device_rec: device,
         documents,
         email,
         voice,
@@ -1708,6 +1726,122 @@ pub unsafe extern "C" fn pai_sync_now(handle: *mut PaiRuntime, json: *const c_ch
         }
         Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pairing — the file-based three-step flow (offer → accept → complete)
+// that installs the shared vault key on both devices.
+
+/// Create a pairing offer file: `offer.pai` written to `out`. Send it to
+/// the other device (flash drive, shared folder, message) — it carries
+/// only public keys and a signature.
+/// # Safety
+/// `handle` must come from `pai_init`; `out` is NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_pair_offer(
+    handle: *mut PaiRuntime,
+    out: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let out = match read_str(out) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let dir = std::path::Path::new(&rt.data_dir);
+    let ids = pai_identity::IdentityStore::new(rt.store.clone());
+    (|| -> Result<()> {
+        let agree = pai_sync::crypto::agreement_key(rt.device, dir)?;
+        let m = pai_sync::pair::make_offer(&rt.device_rec, &agree, &ids, &dir.join("keys"))?;
+        pai_sync::pair::write_message(&m, std::path::Path::new(&out))
+    })()
+    .map(|()| {
+        let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+        e.device = Some(rt.device);
+        e.detail = serde_json::json!({"pair_offer": out});
+        let _ = rt.audit.record(&e);
+        to_c(serde_json::json!({
+            "offer": out, "device": rt.device_rec.name}))
+    })
+    .unwrap_or_else(|e| to_c(serde_json::json!({"error": e.to_string()})))
+}
+
+/// Accept a pairing offer: verifies the signature, records the offerer
+/// as a peer, and writes `accept.pai` (vault key sealed to them) to
+/// `out`. Return it to the offering device to finish.
+/// # Safety
+/// `handle` must come from `pai_init`; paths are NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_pair_accept(
+    handle: *mut PaiRuntime,
+    offer: *const c_char,
+    out: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let offer_p = match read_str(offer) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let out_p = match read_str(out) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let dir = std::path::Path::new(&rt.data_dir);
+    let ids = pai_identity::IdentityStore::new(rt.store.clone());
+    (|| -> Result<String> {
+        let offer = pai_sync::pair::read_message(std::path::Path::new(&offer_p))?;
+        let agree = pai_sync::crypto::agreement_key(rt.device, dir)?;
+        let m = pai_sync::pair::accept_offer(
+            &rt.store,
+            &offer,
+            &rt.device_rec,
+            &agree,
+            &ids,
+            &dir.join("keys"),
+            dir,
+        )?;
+        pai_sync::pair::write_message(&m, std::path::Path::new(&out_p))?;
+        Ok(offer.name)
+    })()
+    .map(|name| {
+        let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+        e.device = Some(rt.device);
+        e.detail = serde_json::json!({"pair_accepted": name});
+        let _ = rt.audit.record(&e);
+        to_c(serde_json::json!({"accept": out_p, "peer": name}))
+    })
+    .unwrap_or_else(|e| to_c(serde_json::json!({"error": e.to_string()})))
+}
+
+/// Complete pairing on the offering device: verifies the accept,
+/// records the acceptor as a peer, unwraps and adopts the vault key.
+/// After this, `pai_sync_now` has a vault to encrypt to.
+/// # Safety
+/// `handle` must come from `pai_init`; `accept` is NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn pai_pair_complete(
+    handle: *mut PaiRuntime,
+    accept: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let accept_p = match read_str(accept) {
+        Ok(s) => s,
+        Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
+    };
+    let dir = std::path::Path::new(&rt.data_dir);
+    (|| -> Result<String> {
+        let accept = pai_sync::pair::read_message(std::path::Path::new(&accept_p))?;
+        let agree = pai_sync::crypto::agreement_key(rt.device, dir)?;
+        pai_sync::pair::complete_pairing(&rt.store, &accept, &agree, dir)?;
+        Ok(accept.name)
+    })()
+    .map(|name| {
+        let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+        e.device = Some(rt.device);
+        e.detail = serde_json::json!({"pair_completed": name});
+        let _ = rt.audit.record(&e);
+        to_c(serde_json::json!({"paired": name}))
+    })
+    .unwrap_or_else(|e| to_c(serde_json::json!({"error": e.to_string()})))
 }
 
 // ---------------------------------------------------------------------------

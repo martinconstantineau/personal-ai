@@ -3045,6 +3045,133 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
   bool _syncing = false;
 
+  /// File-based pairing: this device offers a signed `offer.pai`, the
+  /// other device accepts it (vault key sealed to the offerer), and the
+  /// offerer completes. Any file transport works — flash drive, shared
+  /// folder, message attachment.
+  Future<void> _pairDialog() async {
+    await showDialog(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Pair a device'),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Text(
+                'A signed offer travels one way, the sealed accept '
+                'travels back. Any file transport works - flash drive, '
+                'shared folder, attachment.',
+                style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+          ),
+          SimpleDialogOption(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _pairOffer();
+            },
+            child: const ListTile(
+                leading: Icon(Icons.north_east),
+                title: Text('Create an offer'),
+                subtitle: Text('This device invites another')),
+          ),
+          SimpleDialogOption(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _pairAccept();
+            },
+            child: const ListTile(
+                leading: Icon(Icons.south_west),
+                title: Text('Accept an offer'),
+                subtitle: Text("An offer file from the other device")),
+          ),
+          SimpleDialogOption(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _pairComplete();
+            },
+            child: const ListTile(
+                leading: Icon(Icons.check_circle_outline),
+                title: Text('Complete pairing'),
+                subtitle: Text('Finish with the returned accept file')),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pairOffer() async {
+    final r = await _pathPrompt(
+        'Create pairing offer', 'offer.pai', 'Where to write the offer');
+    if (r == null) return;
+    final out = await widget.bridge.pairOffer(r);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(out['error'] != null
+            ? 'Offer failed: ${out['error']}'
+            : 'Offer written to ${out['offer']} - send it to the other device')));
+    _load();
+  }
+
+  Future<void> _pairAccept() async {
+    final offer = await _pathPrompt(
+        'Accept an offer', '', 'Path to the received offer.pai');
+    if (offer == null || offer.isEmpty || !mounted) return;
+    final out = await _pathPrompt(
+        'Write the accept file', 'accept.pai', 'Where to write accept.pai');
+    if (out == null || out.isEmpty || !mounted) return;
+    final r = await widget.bridge.pairAccept(offer, out);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r['error'] != null
+            ? 'Accept failed: ${r['error']}'
+            : "Paired with ${r['peer']} - return ${r['accept']} to the offerer")));
+    _load();
+  }
+
+  Future<void> _pairComplete() async {
+    final accept = await _pathPrompt(
+        'Complete pairing', '', 'Path to the returned accept.pai');
+    if (accept == null || accept.isEmpty || !mounted) return;
+    final r = await widget.bridge.pairComplete(accept);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r['error'] != null
+            ? 'Complete failed: ${r['error']}'
+            : 'Paired with ${r['paired']} - vault key installed')));
+    _load();
+  }
+
+  /// One-field path prompt; null on cancel.
+  Future<String?> _pathPrompt(
+      String title, String initial, String label) async {
+    final ctl = TextEditingController(text: initial);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          decoration: InputDecoration(
+              labelText: label, border: const OutlineInputBorder()),
+          onSubmitted: (_) => Navigator.pop(ctx, true),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('OK')),
+        ],
+      ),
+    );
+    final v = ctl.text.trim();
+    ctl.dispose();
+    return ok == true ? v : null;
+  }
+
   /// Sync-target dialog — LAN (zero-config mesh), a shared folder, or
   /// a relay URL. The choice persists under sync.* meta, so a second
   /// run needs no args.
@@ -3429,10 +3556,17 @@ class _DevicesScreenState extends State<DevicesScreen> {
                               Text('Syncing…'),
                             ]),
                       )
-                    : FilledButton.tonalIcon(
-                        icon: const Icon(Icons.sync, size: 18),
-                        label: const Text('Sync now'),
-                        onPressed: _syncDialog),
+                    : Row(mainAxisSize: MainAxisSize.min, children: [
+                        FilledButton.tonalIcon(
+                            icon: const Icon(Icons.sync, size: 18),
+                            label: const Text('Sync now'),
+                            onPressed: _syncDialog),
+                        const SizedBox(width: 8),
+                        TextButton.icon(
+                            icon: const Icon(Icons.add_link, size: 18),
+                            label: const Text('Pair a device'),
+                            onPressed: _pairDialog),
+                      ]),
               ),
             ]),
     );
