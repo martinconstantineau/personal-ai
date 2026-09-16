@@ -48,6 +48,40 @@ const _dests = [
   (Icons.music_note_outlined, 'Media'),
 ];
 
+/// Slash-command grammar: `/verb [arg]` typed in the chat input runs
+/// locally instead of going to the model. Nav entries jump rails; the
+/// rest call existing bridge ops.
+const _cmds = <(String, String, String)>[
+  ('new', '', 'Start a new chat'),
+  ('rename', '<title>', 'Rename this chat'),
+  ('model', '<slug>', 'Serve a model pack for chat'),
+  ('sync', '', 'Sync with paired devices now'),
+  ('export', '', 'Copy this transcript to the clipboard'),
+  ('apps', '', 'Open Apps'),
+  ('devices', '', 'Open Devices'),
+  ('alerts', '', 'Open Alerts'),
+  ('memories', '', 'Open Memories'),
+  ('docs', '', 'Open Documents'),
+  ('email', '', 'Open Email'),
+  ('activity', '', 'Open Activity'),
+  ('permissions', '', 'Open Permissions'),
+  ('media', '', 'Open Media'),
+  ('help', '', 'List these commands'),
+];
+
+/// verb → rail destination index for the navigation commands.
+const _navCmds = {
+  'apps': 1,
+  'devices': 2,
+  'alerts': 3,
+  'memories': 4,
+  'docs': 5,
+  'email': 6,
+  'activity': 7,
+  'permissions': 8,
+  'media': 9,
+};
+
 /// Ctrl+1..9,0 jump straight to a rail destination.
 const _railKeys = [
   LogicalKeyboardKey.digit1,
@@ -172,6 +206,7 @@ class _HomeShellState extends State<HomeShell> {
                         TextStyle(fontWeight: FontWeight.w600))),
             const SizedBox(height: 6),
             const _ShortcutRow('Ctrl+1-9,0', 'jump to a section'),
+            const _ShortcutRow('/', 'slash commands — /help lists them'),
             const _ShortcutRow('Ctrl+K', 'focus the message field'),
             const _ShortcutRow('Ctrl+N', 'new chat'),
             const _ShortcutRow('F1', 'this panel'),
@@ -241,7 +276,7 @@ class _HomeShellState extends State<HomeShell> {
     final pai = _pai!;
     switch (i) {
       case 0:
-        return ChatScreen(key: _chatKey, bridge: pai);
+        return ChatScreen(key: _chatKey, bridge: pai, onNavigate: _select);
       case 1:
         return AppsScreen(bridge: pai);
       case 2:
@@ -406,8 +441,11 @@ class _Entry {
 }
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, required this.bridge});
+  const ChatScreen({super.key, required this.bridge, this.onNavigate});
   final PaiBridge? bridge;
+
+  /// Rail navigation target — slash commands like /devices land here.
+  final void Function(int)? onNavigate;
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
@@ -510,6 +548,89 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Plugin-free export: the visible transcript goes to the clipboard
   /// as "You (HH:MM): ..." lines.
+  /// Slash-command dispatch — verbs map to bridge ops or rail jumps;
+  /// the result lands as a system entry in the transcript.
+  Future<void> _runCommand(String text) async {
+    final sp = text.indexOf(' ');
+    final verb =
+        (sp < 0 ? text.substring(1) : text.substring(1, sp)).toLowerCase();
+    final arg = sp < 0 ? '' : text.substring(sp + 1).trim();
+    String result;
+    switch (verb) {
+      case 'new':
+        await _newConversation();
+        result = 'Started a new chat.';
+      case 'rename':
+        if (arg.isEmpty) {
+          result = 'Usage: /rename <title>';
+          break;
+        }
+        final id = _convs
+            .firstWhere((c) => c['active'] == true,
+                orElse: () => const <String, dynamic>{})['id'];
+        if (id == null) {
+          result = 'No active chat to rename.';
+          break;
+        }
+        final r = await _pai!.conversationRename('$id', arg);
+        await _refreshConvs();
+        result = r['error'] != null
+            ? 'Rename failed: ${r['error']}'
+            : "Renamed to '$arg'.";
+      case 'model':
+        if (arg.isEmpty) {
+          result = 'Usage: /model <slug>';
+          break;
+        }
+        final r = await _pai!.modelsServe(arg);
+        result = r['error'] != null
+            ? '${r['error']}'
+            : 'Serving $arg — chat switched to it.';
+      case 'sync':
+        final r = await _pai!.syncNow();
+        result = r['error'] != null
+            ? 'Sync failed: ${r['error']}'
+            : 'Synced — pushed ${r['pushed']}, pulled ${r['pulled']}, '
+                'skipped ${r['skipped']}.';
+      case 'export':
+        _copyTranscript();
+        result = 'Transcript copied to the clipboard.';
+      case 'help':
+        result = _cmds
+            .map((c) =>
+                '/${c.$1}${c.$2.isEmpty ? '' : ' ${c.$2}'} — ${c.$3}')
+            .join('\n');
+      default:
+        final nav = _navCmds[verb];
+        if (nav != null) {
+          widget.onNavigate?.call(nav);
+          return;
+        }
+        result = "Unknown command '/$verb' — try /help.";
+    }
+    if (!mounted) return;
+    setState(() => _entries.add(_Entry(role: 'system', text: result)));
+    _scrollDown();
+  }
+
+  /// Commands matching the verb currently being typed — shown while
+  /// the input is still a single `/…` token.
+  List<(String, String, String)> get _cmdSuggestions {
+    final t = _input.text;
+    if (!t.startsWith('/') || t.contains(' ')) return const [];
+    final verb = t.substring(1).toLowerCase();
+    return _cmds
+        .where((c) => c.$1.startsWith(verb) && c.$1 != verb)
+        .toList();
+  }
+
+  void _fillCommand(String name, bool noArgs) {
+    _input.text = noArgs ? '/$name' : '/$name ';
+    _input.selection =
+        TextSelection.collapsed(offset: _input.text.length);
+    _inputFocus.requestFocus();
+  }
+
   void _copyTranscript() {
     final buf = StringBuffer();
     for (final e in _entries) {
@@ -535,6 +656,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _pai == null || _sending) return;
+    if (text.startsWith('/')) {
+      _input.clear();
+      await _runCommand(text);
+      return;
+    }
     _lastUserText = text;
     _input.clear();
     final user = _Entry(role: 'you', text: text);
@@ -894,7 +1020,29 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         Padding(
           padding: const EdgeInsets.all(8),
-          child: Row(children: [
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            if (_cmdSuggestions.isNotEmpty)
+              Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final c in _cmdSuggestions)
+                        ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.bolt, size: 18),
+                          title: Text(
+                              '/${c.$1}${c.$2.isEmpty ? '' : ' ${c.$2}'}'),
+                          subtitle: Text(c.$3),
+                          onTap: () {
+                            _fillCommand(c.$1, c.$2.isEmpty);
+                            if (c.$2.isEmpty) _send();
+                          },
+                        ),
+                    ]),
+              ),
+            Row(children: [
             Expanded(
               child: TextField(
                 controller: _input,
@@ -950,6 +1098,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         ? null
                         : _send,
                 icon: const Icon(Icons.send)),
+            ]),
           ]),
         ),
       ]),
