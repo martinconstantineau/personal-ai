@@ -4,6 +4,7 @@
 //! when no keystore is reachable (headless Linux, old desktops) so callers can
 //! fall back to a 0600 file — never to an error.
 
+#[cfg(not(target_os = "android"))]
 const SERVICE: &str = "personal-ai";
 
 fn entry(name: &str) -> Option<keyring::Entry> {
@@ -13,6 +14,16 @@ fn entry(name: &str) -> Option<keyring::Entry> {
     if std::env::var_os("PAI_KEYSTORE_OFF").is_some() {
         return None;
     }
+    // keyring's Android backend keeps secrets in process memory — they
+    // do not survive a restart, so a store/report-ok/load-miss sequence
+    // mints a fresh store.key that cannot decrypt the existing DB.
+    // File fallbacks under the app-private data dir are the safe path.
+    #[cfg(target_os = "android")]
+    {
+        let _ = name;
+        return None;
+    }
+    #[cfg(not(target_os = "android"))]
     match keyring::Entry::new(SERVICE, name) {
         Ok(e) => Some(e),
         Err(e) => {

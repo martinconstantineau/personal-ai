@@ -475,6 +475,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _sending = false;
   String _lastUserText = '';
   bool _listening = false;
+  bool _handsFree = false;
   bool _speakReplies = false;
   Map<String, dynamic> _voice = const {};
   Map<String, dynamic> _status = const {};
@@ -491,6 +492,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _handsFree = false;
     _statusSub?.cancel();
     _inputFocus.dispose();
     _input.dispose();
@@ -764,6 +766,43 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Continuous hands-free mode: listen → send → (speak reply) →
+  /// listen again until toggled off. No barge-in — a capture in flight
+  /// finishes on its own (silence or max duration), then the flag is
+  /// checked. Enabling it also turns on speak-replies when TTS is up.
+  Future<void> _toggleHandsFree() async {
+    if (_handsFree) {
+      setState(() => _handsFree = false);
+      return;
+    }
+    if (_pai == null) return;
+    setState(() {
+      _handsFree = true;
+      if (_voice['tts'] == true && _voice['speaker'] == true) {
+        _speakReplies = true;
+      }
+    });
+    while (_handsFree && mounted && _pai != null) {
+      setState(() => _listening = true);
+      final res = await _pai!.voiceListen();
+      if (!_handsFree || !mounted) break;
+      setState(() => _listening = false);
+      if (res['error'] != null) {
+        setState(() {
+          _error = 'voice: ${res['error']}';
+          _handsFree = false;
+        });
+        break;
+      }
+      final text = (res['text'] as String?)?.trim() ?? '';
+      if (res['heard'] == true && text.isNotEmpty) {
+        _input.text = text;
+        await _send();
+      }
+    }
+    if (mounted) setState(() => _listening = false);
+  }
+
   /// Push-to-talk: capture one utterance, drop the transcript into the
   /// input field for review (the user still presses send).
   Future<void> _listen() async {
@@ -906,6 +945,16 @@ class _ChatScreenState extends State<ChatScreen> {
               icon: const Icon(Icons.stop_circle_outlined),
               tooltip: 'Cancel run',
               onPressed: () => _pai?.cancel(),
+            ),
+          if (_voice['mic'] == true && _voice['stt'] == true)
+            IconButton(
+              icon: Icon(_handsFree
+                  ? Icons.hearing
+                  : Icons.hearing_disabled_outlined),
+              tooltip: _handsFree
+                  ? 'Hands-free on — tap to stop listening'
+                  : 'Hands-free voice loop (mic → agent → spoken reply)',
+              onPressed: _toggleHandsFree,
             ),
           if (_voice['tts'] == true && _voice['speaker'] == true)
             IconButton(
@@ -1104,6 +1153,7 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: (_pai == null ||
                       _voice['mic'] != true ||
                       _listening ||
+                      _handsFree ||
                       _sending)
                   ? null
                   : _listen,
@@ -3008,56 +3058,87 @@ class _MediaScreenState extends State<MediaScreen> {
   Future<void> _generate() async {
     final promptCtl = TextEditingController();
     final secsCtl = TextEditingController(text: '10');
+    final sizeCtl = TextEditingController(text: '512');
+    String kind = 'audio';
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Generate audio'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: Text(
-                'Runs on this device, or on a paired mesh peer when it '
-                'advertises media-run.',
-                style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
-          ),
-          TextField(
-            controller: promptCtl,
-            autofocus: true,
-            maxLines: 3,
-            minLines: 1,
-            decoration: const InputDecoration(
-                labelText: 'Prompt',
-                hintText: 'e.g. calm lo-fi rain ambience',
-                border: OutlineInputBorder()),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: secsCtl,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(
-                labelText: 'Duration (seconds, 1-300)',
-                border: OutlineInputBorder()),
-          ),
-        ]),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Generate')),
-        ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialog) => AlertDialog(
+          title: const Text('Generate media'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Text(
+                  'Runs on this device, or on a paired mesh peer when it '
+                  'advertises media-run.',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+            ),
+            DropdownButtonFormField<String>(
+              initialValue: kind,
+              decoration: const InputDecoration(
+                  labelText: 'Kind', border: OutlineInputBorder()),
+              items: const [
+                DropdownMenuItem(value: 'audio', child: Text('Audio')),
+                DropdownMenuItem(value: 'image', child: Text('Image')),
+                DropdownMenuItem(value: 'video', child: Text('Video')),
+              ],
+              onChanged: (v) => setDialog(() => kind = v ?? 'audio'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: promptCtl,
+              autofocus: true,
+              maxLines: 3,
+              minLines: 1,
+              decoration: const InputDecoration(
+                  labelText: 'Prompt',
+                  hintText: 'e.g. calm lo-fi rain ambience',
+                  border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 12),
+            if (kind == 'audio')
+              TextField(
+                controller: secsCtl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                    labelText: 'Duration (seconds, 1-300)',
+                    border: OutlineInputBorder()),
+              )
+            else
+              TextField(
+                controller: sizeCtl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                    labelText: 'Size (px, square)',
+                    border: OutlineInputBorder()),
+              ),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Generate')),
+          ],
+        ),
       ),
     );
     final prompt = promptCtl.text.trim();
     final secs = int.tryParse(secsCtl.text.trim()) ?? 10;
+    final size = int.tryParse(sizeCtl.text.trim()) ?? 512;
     promptCtl.dispose();
     secsCtl.dispose();
+    sizeCtl.dispose();
     if (ok != true || prompt.isEmpty || !mounted) return;
     try {
-      final r = await widget.bridge.mediaGen(prompt, seconds: secs);
+      final r = await widget.bridge.mediaGen(prompt,
+          kind: kind,
+          seconds: secs,
+          width: kind == 'audio' ? null : size,
+          height: kind == 'audio' ? null : size);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(r['error'] != null
@@ -3073,8 +3154,13 @@ class _MediaScreenState extends State<MediaScreen> {
   }
 
   Future<void> _export(Map job) async {
+    final ext = switch (job['kind'] as String? ?? 'text_to_audio') {
+      'text_to_image' || 'image_edit' || 'upscale' => 'png',
+      'text_to_video' => 'mp4',
+      _ => 'wav',
+    };
     final destCtl = TextEditingController(
-        text: 'media-${(job['id'] as String? ?? 'job').substring(0, 8)}.wav');
+        text: 'media-${(job['id'] as String? ?? 'job').substring(0, 8)}.$ext');
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -3138,7 +3224,7 @@ class _MediaScreenState extends State<MediaScreen> {
           padding: const EdgeInsets.only(right: 12),
           child: FilledButton.icon(
               icon: const Icon(Icons.add, size: 18),
-              label: const Text('New audio'),
+              label: const Text('Generate'),
               onPressed: _generate),
         ),
       ]),
@@ -3154,7 +3240,7 @@ class _MediaScreenState extends State<MediaScreen> {
                         const SizedBox(height: 12),
                         const Text('No media jobs yet'),
                         const SizedBox(height: 4),
-                        Text('Generate audio from a prompt - it lands here.',
+                        Text('Generate media from a prompt - it lands here.',
                             style: TextStyle(
                                 color: cs.onSurfaceVariant, fontSize: 13)),
                       ]),
@@ -3246,6 +3332,7 @@ class DevicesScreen extends StatefulWidget {
 class _DevicesScreenState extends State<DevicesScreen> {
   Map<String, dynamic>? _detect;
   List<dynamic> _peers = const [];
+  List<dynamic> _placement = const [];
   List<dynamic> _models = const [];
   Map<String, dynamic> _status = const {};
   bool _loading = true;
@@ -3316,16 +3403,22 @@ class _DevicesScreenState extends State<DevicesScreen> {
       final p = await widget.bridge.peersList();
       Map<String, dynamic> st = const {};
       List<dynamic> models = const [];
+      List<dynamic> placement = const [];
       try {
         st = await widget.bridge.status();
       } catch (_) {}
       try {
         models = await widget.bridge.modelsList();
       } catch (_) {}
+      try {
+        final pl = await widget.bridge.devicesPlacement();
+        placement = (pl['devices'] as List? ?? const []);
+      } catch (_) {}
       if (!mounted) return;
       setState(() {
         _detect = d;
         _peers = (p['peers'] as List? ?? const []);
+        _placement = placement;
         _models = models;
         _status = st;
         _loading = false;
@@ -3353,6 +3446,102 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
   bool _syncing = false;
 
+  /// Placement view for one device: name/platform, the ops it
+  /// advertises (`bcap`), load + score the broker would see, and the
+  /// local placement weight. `announced=false` means no `bcap` object
+  /// has synced yet — the device isn't currently routable.
+  Widget _deviceCard(ColorScheme cs, Map dev) {
+    final ops = (dev['ops'] as List? ?? const []).cast<String>();
+    final load = dev['load'] as Map?;
+    final announced = dev['announced'] == true;
+    final fresh = dev['fresh'] == true;
+    final weight = (dev['weight'] as num?)?.toInt() ?? 0;
+    final score = dev['score'] as num?;
+    final age = dev['age_secs'] as num?;
+    final isSelf = dev['self'] == true;
+    final loadBits = <String>[
+      if (load != null) ...[
+        'busy ${load['busy'] ?? 0}',
+        '${((load['ram_bytes'] as num? ?? 0) / (1 << 30)).toStringAsFixed(0)} GB',
+        '${load['cpu_cores'] ?? '?'} cores',
+        if (load['on_battery'] == true) 'on battery',
+        if (load['thermal_throttled'] == true) 'throttled',
+      ],
+    ].join(' · ');
+    return Card(
+        child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(isSelf ? Icons.computer : Icons.devices,
+              size: 20, color: cs.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Expanded(
+              child: Text('${dev['name']}',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis)),
+          if (isSelf)
+            Tooltip(
+                message: 'This device',
+                child: Chip(
+                    label: Text('local',
+                        style:
+                            TextStyle(fontSize: 10, color: cs.primary)),
+                    visualDensity: VisualDensity.compact)),
+          if (announced)
+            Tooltip(
+                message: fresh
+                    ? 'Announced ${age}s ago — routable'
+                    : 'Announcement ${age}s old — past TTL, not routable',
+                child: Icon(
+                    fresh ? Icons.check_circle_outline : Icons.schedule,
+                    size: 16,
+                    color: fresh ? Colors.greenAccent : cs.error)),
+        ]),
+        const SizedBox(height: 2),
+        Text(
+            '${dev['platform']} · ${(dev['id'] as String).substring(0, 8)}',
+            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+        if (ops.isNotEmpty || weight != 0 || score != null)
+          const SizedBox(height: 8),
+        if (ops.isNotEmpty)
+          Wrap(spacing: 6, runSpacing: 4, children: [
+            for (final op in ops)
+              Tooltip(
+                  message: 'advertised op',
+                  child: Chip(
+                      label: Text(op, style: const TextStyle(fontSize: 10)),
+                      visualDensity: VisualDensity.compact)),
+          ]),
+        if (score != null || weight != 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+                [
+                  if (score != null) 'score $score',
+                  if (weight != 0)
+                    'weight ${weight > 0 ? '+$weight' : '$weight'}',
+                  if (score != null && weight != 0)
+                    'effective ${score + weight}',
+                ].join(' · '),
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+          ),
+        if (loadBits.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(loadBits,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+          ),
+        if (!announced && !isSelf)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text('No capability announcement synced yet',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+          ),
+      ]),
+    ));
+  }
+
   /// File-based pairing: this device offers a signed `offer.pai`, the
   /// other device accepts it (vault key sealed to the offerer), and the
   /// offerer completes. Any file transport works — flash drive, shared
@@ -3372,6 +3561,18 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 style: TextStyle(
                     fontSize: 12,
                     color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+          ),
+          SimpleDialogOption(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _pairQr();
+            },
+            child: const ListTile(
+                leading: Icon(Icons.qr_code_2),
+                title: Text('Pair via QR'),
+                subtitle: Text(
+                    'Show a code the other device scans - or paste an '
+                    'offer payload to show the accept code back')),
           ),
           SimpleDialogOption(
             onPressed: () {
@@ -3418,6 +3619,122 @@ class _DevicesScreenState extends State<DevicesScreen> {
         ],
       ),
     );
+  }
+
+  /// QR pairing (render side): show this device's offer as a QR the
+  /// other device scans; or paste a scanned offer payload to render
+  /// the accept QR to show back. No camera plugin needed - the
+  /// payload text is also copyable for file/manual transport.
+  Future<void> _pairQr() async {
+    final r = await widget.bridge.pairQr('offer');
+    if (!mounted) return;
+    if (r['error'] != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Offer QR failed: ${r['error']}')));
+      return;
+    }
+    final acceptCtl = TextEditingController();
+    String? acceptErr;
+    Map<String, dynamic>? acceptQr;
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialog) => AlertDialog(
+          title: Text(acceptQr == null
+              ? 'Pair via QR - offer'
+              : 'Show this to the offerer'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              if (acceptQr == null) ...[
+                _QrView(r, size: 260),
+                const SizedBox(height: 8),
+                Text('This device is offering - the other device scans '
+                    'this code (or pastes the payload).',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                      child: Text('${r['payload']}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 9, fontFamily: 'monospace'))),
+                  IconButton(
+                      icon: const Icon(Icons.copy, size: 16),
+                      tooltip: 'Copy offer payload',
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(
+                            text: '${r['payload']}'));
+                      }),
+                ]),
+                const Divider(),
+                TextField(
+                  controller: acceptCtl,
+                  maxLines: 2,
+                  decoration: InputDecoration(
+                    labelText: 'Or paste an offer payload',
+                    hintText: '{"kind":"offer",…}',
+                    border: const OutlineInputBorder(),
+                    errorText: acceptErr,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                FilledButton.tonal(
+                  onPressed: () async {
+                    final offer = acceptCtl.text.trim();
+                    if (offer.isEmpty) return;
+                    final a = await widget.bridge
+                        .pairQr('accept', offer: offer);
+                    if (a['error'] != null) {
+                      setDialog(() => acceptErr = '${a['error']}');
+                    } else {
+                      setDialog(() {
+                        acceptQr = a;
+                        acceptErr = null;
+                      });
+                    }
+                  },
+                  child: const Text('Accept & show code'),
+                ),
+              ] else ...[
+                _QrView(acceptQr!, size: 260),
+                const SizedBox(height: 8),
+                Text('Accepted - the offerer scans this (or the payload) '
+                    'and completes pairing.',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                      child: Text('${acceptQr!['payload']}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 9, fontFamily: 'monospace'))),
+                  IconButton(
+                      icon: const Icon(Icons.copy, size: 16),
+                      tooltip: 'Copy accept payload',
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(
+                            text: '${acceptQr!['payload']}'));
+                      }),
+                ]),
+              ],
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Done')),
+          ],
+        ),
+      ),
+    );
+    acceptCtl.dispose();
+    _load();
   }
 
   Future<void> _pairOffer() async {
@@ -3921,7 +4238,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
               Text('Paired devices',
                   style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 4),
-              if (_peers.isEmpty)
+              if (_peers.isEmpty && _placement.isEmpty)
                 Card(
                     child: ListTile(
                   leading: Icon(Icons.phonelink_off_outlined,
@@ -3931,14 +4248,15 @@ class _DevicesScreenState extends State<DevicesScreen> {
                       'Pair another machine with `pai pair` — media jobs and app runs can then route to it.'),
                 ))
               else
-                for (final p in _peers)
-                  Card(
-                      child: ListTile(
-                    leading: const Icon(Icons.devices),
-                    title: Text('${p['name']}'),
-                    subtitle: Text(
-                        '${p['platform']} · ${(p['id'] as String).substring(0, 8)}'),
-                  )),
+                for (final dev in _placement.isNotEmpty
+                    ? _placement
+                    : _peers.map((p) => {
+                          'id': p['id'],
+                          'name': p['name'],
+                          'platform': p['platform'],
+                          'self': false,
+                        }))
+                  _deviceCard(cs, dev as Map),
               const SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerLeft,
@@ -4248,4 +4566,55 @@ class _ModelChip extends StatelessWidget {
           borderRadius: BorderRadius.circular(6), onTap: onTap, child: chip),
     );
   }
+}
+
+/// QR bit-matrix painter — renders `{"size": N, "rows": ["0101…"]}`
+/// from `pai_pair_qr`. Dark modules on the theme surface; scaled to
+/// fit [size] with a quiet-zone border.
+class _QrView extends StatelessWidget {
+  const _QrView(this.qr, {this.size = 220});
+  final Map<String, dynamic> qr;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = (qr['rows'] as List? ?? const []).cast<String>();
+    if (rows.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      width: size,
+      height: size,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+          color: Colors.white, borderRadius: BorderRadius.circular(8)),
+      child: CustomPaint(painter: _QrPainter(rows)),
+    );
+  }
+}
+
+class _QrPainter extends CustomPainter {
+  const _QrPainter(this.rows);
+  final List<String> rows;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final n = rows.length;
+    if (n == 0) return;
+    final cell = math.min(size.width, size.height) / n;
+    final paint = Paint()..color = Colors.black;
+    for (var y = 0; y < n; y++) {
+      final row = rows[y];
+      for (var x = 0; x < row.length && x < n; x++) {
+        if (row[x] == '1') {
+          canvas.drawRect(
+              Rect.fromLTWH(x * cell, y * cell, cell + 0.4, cell + 0.4),
+              paint);
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_QrPainter old) => old.rows != rows;
 }

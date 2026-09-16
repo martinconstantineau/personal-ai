@@ -151,6 +151,62 @@ pub trait OpHandler: Send + Sync {
 /// Missing devices map to 0. Local-only: never on the wire.
 pub type DeviceWeight<'a> = Box<dyn Fn(&DeviceId) -> i64 + Send + Sync + 'a>;
 
+/// One device's latest announced capabilities — the data
+/// [`BrokerClient::find_peer`] scores on this node right now.
+#[derive(Debug, Serialize)]
+pub struct CapsInfo {
+    pub device: String,
+    pub ops: Vec<String>,
+    /// Seconds since the announcement timestamp.
+    pub age_secs: i64,
+    /// Announcement within [`CAP_TTL`] — the device is currently
+    /// eligible for placement.
+    pub fresh: bool,
+    /// Load score before any local placement weight.
+    pub score: i64,
+    pub load: Option<DeviceLoad>,
+}
+
+/// Latest `bcap/<device>` announcements in the local store — every
+/// synced announce the broker would count on this node, freshest row
+/// per device key (sync keeps one row per key, LWW).
+pub fn list_caps(store: &pai_storage::Store, vault: &[u8; 32]) -> Result<Vec<CapsInfo>> {
+    let rows = store.with_conn(|c| {
+        let mut s = c.prepare(
+            "SELECT key, ciphertext FROM sync_objects \
+             WHERE key LIKE 'bcap/%' AND tombstone = 0",
+        )?;
+        let rows = s.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+    })?;
+    let mut out = Vec::new();
+    for (key, cipher) in rows {
+        let Ok(raw) = crypto::open(vault, key.as_bytes(), &cipher) else {
+            continue;
+        };
+        let Ok(caps) = serde_json::from_slice::<BrokerCaps>(&raw) else {
+            continue;
+        };
+        if caps.v != 1 {
+            continue;
+        }
+        let ts = pai_storage::parse_ts(&caps.ts);
+        let age = now() - ts;
+        out.push(CapsInfo {
+            device: caps.device,
+            ops: caps.ops,
+            age_secs: age.num_seconds().max(0),
+            fresh: age <= chrono::Duration::from_std(CAP_TTL).unwrap_or_default(),
+            score: caps.load.clone().unwrap_or_default().score(),
+            load: caps.load,
+        });
+    }
+    out.sort_by(|a, b| a.device.cmp(&b.device));
+    Ok(out)
+}
+
 /// Client side: send one request to a peer and wait for its response.
 pub struct BrokerClient<'a, T: SyncTransport + ?Sized> {
     transport: &'a T,
@@ -349,6 +405,43 @@ impl<'a, T: SyncTransport + ?Sized> BrokerClient<'a, T> {
                 next_seq += 1;
             }
             if let Some(obj) = self.transport.pull(&final_key).await? {
+                // The final object means the server wrote every chunk —
+                // drain the remainder (transport listing order is
+                // arbitrary, so chunks skipped as gaps above may be
+                // deliverable now).
+                let mut pending: Vec<(u32, String)> = Vec::new();
+                for meta in self.transport.list().await? {
+                    if !meta.key.starts_with(&chunk_prefix) || meta.tombstone {
+                        continue;
+                    }
+                    let Some(obj) = self.transport.pull(&meta.key).await? else {
+                        continue;
+                    };
+                    let Ok(raw) = crypto::open(self.vault, obj.key.as_bytes(), &obj.ciphertext)
+                    else {
+                        continue;
+                    };
+                    let Ok(chunk) = serde_json::from_slice::<BrokerChunk>(&raw) else {
+                        continue;
+                    };
+                    if chunk.v != 1 {
+                        continue;
+                    }
+                    pending.push((chunk.seq, chunk.payload_b64));
+                    self.transport.delete(&meta.key).await.ok();
+                }
+                pending.sort_by_key(|(seq, _)| *seq);
+                for (seq, payload_b64) in pending {
+                    if seq != next_seq {
+                        continue;
+                    }
+                    if let Ok(bytes) =
+                        base64::engine::general_purpose::STANDARD.decode(&payload_b64)
+                    {
+                        on_chunk(&bytes);
+                    }
+                    next_seq += 1;
+                }
                 let res = self.open_response(&obj)?;
                 self.transport.delete(&final_key).await.ok();
                 if !res.ok {

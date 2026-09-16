@@ -615,35 +615,47 @@ The Flutter app now surfaces the full FFI surface end-to-end:
 
 ## What's next (candidate slices, unordered)
 
-- **Removable-drive watch** — model packs are install/scan/serve in
-  the app; the remaining plug-and-play piece is noticing a newly
-  mounted `X:\pai-models` root without pressing Rescan (poll drive
-  letters, or WM_DEVICECHANGE on Windows).
-- **Packaged audio backend** — a reference `POST /generate` wrapper
-  (FastAPI + MusicGen / stable-audio.cpp) so `pai audio gen` works
-  out of the box. The provider boundary is already stable; this is
-  packaging, not protocol work.
-- **Image/video generation adapters** — `MediaJobKind` +
-  `ModelCapability` + the `media-run` op already carry them; only
-  the provider adapters are missing (stable-diffusion.cpp,
-  diffusers-onnx are the declared targets).
-- **Placement visualization** — Devices shows peers today; the deeper
-  view (advertised `bcap` capabilities, live `DeviceLoad`, per-device
-  place weights) is `broker devices` data without an FFI surface yet.
-- **Stable app names** — `app.user.devices` DNS layer on top of
-  `pai serve` (Tailscale/hosts-file integration). The CGI gateway +
-  placement-aware forwarding already make URLs location-stable.
-- **Voice loop** — mic capture → whisper → agent → piper reply is
-  half-wired (mic probe + dictate path exist); a continuous
-  hands-free mode is a UI/UX slice, not new plumbing.
-- **Mobile ↔ desktop parity** — the same `lib/main.dart` builds for
-  Android; verify media jobs, app install, and share flows on-device.
-- **QR pairing** — offer/accept already travel as small signed files;
-  a QR render+scan path would help mobile. Blocked on this host:
-  camera plugins need Developer Mode (symlinks).
-- **Screen-reader smoke test** — the a11y pass labeled everything to
-  platform conventions; a real Narrator/NVDA walk-through is worth a
-  dedicated session.
+Shipped:
+
+- **Removable-drive watch** (`b201589`) — model-pack roots rescan on
+  mount: drive letters are polled on Windows, `/media`/`/mnt` roots on
+  Linux, no Rescan press needed.
+- **Packaged audio backend** — `services/media-gen/` is the reference
+  `POST /generate` wrapper (FastAPI-shaped, stdlib-only stubs; MusicGen
+  / stable-audio.cpp drop in behind the same contract). `pai media gen`
+  works out of the box against it.
+- **Image/video generation adapters** — `pai-media` providers:
+  `SdCppImageGen` (stable-diffusion.cpp's `/v1/images/generations`),
+  `OnnxImageGen` + `OnnxVideoGen` (diffusers-onnx-style `POST /generate`
+  + `GET /jobs/{id}` polling). `MediaConfig` gained
+  `image_gen_url`/`image_backend`/`video_gen_url` in `media.json`
+  (+ `PAI_*_GEN_URL` envs); `media-run` dispatches by `kind` and
+  `pai media gen --kind image|video` routes locally or to a mesh peer.
+- **Placement visualization** — `pai_devices_placement` FFI + broker
+  `list_caps` surface `bcap` ops, live `DeviceLoad`, freshness, and
+  per-device place weights; the Devices screen renders the full
+  placement card (ops chips, score, weight, effective load).
+- **Stable app names** — `app.user.devices` layer on `pai serve`:
+  `pai apps names` prints stable `<app>.<device>.devices` names, and
+  the serve gateway rewrites the Host header so URLs travel between
+  devices.
+- **Voice loop** — continuous hands-free mode: a headphones toggle on
+  the chat input loops listen → send → speak until switched off
+  (auto-enables spoken replies).
+- **Mobile ↔ desktop parity** — verified on the Android emulator
+  (API 36, x86_64): chat, media gen of both audio and image kinds via
+  the device→host mesh, Devices placement, QR render, relaunch
+  persistence. Found and fixed a real Android keystore bug
+  (`keyring` is memory-only there → store.key file fallback) that made
+  every second launch fail to open the vault.
+- **QR pairing** — `pai pair offer --qr` / `--accept --qr` render a
+  scannable terminal QR; `pai_pair_qr` FFI + the desktop Pair dialog
+  render the same payload in-app with a paste path for the counter-offer.
+  Scan side stays blocked: camera plugins need Developer Mode on the
+  build host.
+- **Screen-reader smoke test** — walked under TalkBack on the emulator
+  (Narrator/NVDA substitute): focus ring advances, every control
+  exposes its label, headings and live regions announce correctly.
 
 ## Known technical debt (tracked, not hidden)
 

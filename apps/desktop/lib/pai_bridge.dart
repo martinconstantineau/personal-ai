@@ -152,13 +152,23 @@ class PaiBridge {
   Future<List<dynamic>> mediaList() async =>
       (await _call(_Op.mediaList)) as List<dynamic>;
 
-  /// Generate audio locally. `json`: `{prompt, duration_seconds?}`.
-  /// Long-running — runs on the worker isolate.
+  /// Generate media. `json`: `{prompt, kind?, duration_seconds?,
+  /// width?, height?}` — kind is `audio` (default) / `image` /
+  /// `image_edit` / `upscale` / `video`. Long-running — runs on the
+  /// worker isolate.
   Future<Map<String, dynamic>> mediaGen(String prompt,
-      {int seconds = 10}) async =>
+      {String kind = 'audio',
+      int seconds = 10,
+      int? width,
+      int? height}) async =>
       (await _call(_Op.mediaGen,
-          arg: jsonEncode(
-              {'prompt': prompt, 'duration_seconds': seconds})))
+          arg: jsonEncode({
+            'prompt': prompt,
+            'kind': kind,
+            'duration_seconds': seconds,
+            'width': ?width,
+            'height': ?height,
+          })))
           as Map<String, dynamic>;
 
   /// One-shot sync — `lan` discovers a paired mesh peer; `dir`/`relay`
@@ -207,6 +217,14 @@ class PaiBridge {
   /// publishes our offer, accepts pending offers, completes accepts.
   Future<Map<String, dynamic>> pairFolder() async =>
       (await _call(_Op.pairFolder)) as Map<String, dynamic>;
+
+  /// Pairing via QR — `{"mode":"offer"}` mints this device's offer
+  /// payload+matrix; `{"mode":"accept","offer":"<json>"}` consumes
+  /// a scanned offer payload and returns the accept QR to show back.
+  Future<Map<String, dynamic>> pairQr(String mode, {String? offer}) async =>
+      (await _call(_Op.pairQr,
+          arg: jsonEncode({'mode': mode, 'offer': ?offer})))
+          as Map<String, dynamic>;
 
   /// Write a finished job's result blob to `dest`.
   Future<Map<String, dynamic>> mediaExport(String jobId, String dest) async =>
@@ -336,6 +354,11 @@ class PaiBridge {
           arg: jsonEncode({'id': id, 'to': to}))) as Map<String, dynamic>;
   Future<Map<String, dynamic>> peersList() async =>
       (await _call(_Op.peersList)) as Map<String, dynamic>;
+
+  /// Placement view — every device with its latest capability
+  /// announcement (ops, load, freshness, score) + local weight.
+  Future<Map<String, dynamic>> devicesPlacement() async =>
+      (await _call(_Op.devicesPlacement)) as Map<String, dynamic>;
 
   /// Mint a capability token for [id]: [actions] like `exec,read`,
   /// [forDevice] a paired-peer prefix ('' = bearer).
@@ -564,6 +587,8 @@ class PaiBridge {
                 client.appsMigrate(a['id'] as String, a['to'] as String);
           case _Op.peersList:
             result = client.peersList();
+          case _Op.devicesPlacement:
+            result = client.devicesPlacement();
           case _Op.appsShareGrant:
             final a = jsonDecode(req.arg!) as Map<String, dynamic>;
             result = client.shareGrant(
@@ -606,6 +631,8 @@ class PaiBridge {
             result = client.syncStatus();
           case _Op.pairFolder:
             result = client.pairFolder();
+          case _Op.pairQr:
+            result = client.pairQr(req.arg!);
         }
       } catch (e) {
         result = {'error': e.toString()};
@@ -671,6 +698,7 @@ enum _Op {
   appsRun,
   appsMigrate,
   peersList,
+  devicesPlacement,
   appsShareGrant,
   shareDelegate,
   guestCall,
@@ -685,6 +713,7 @@ enum _Op {
   pairAccept,
   pairComplete,
   pairFolder,
+  pairQr,
 }
 
 class _InitError {
