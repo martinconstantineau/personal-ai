@@ -1,0 +1,20 @@
+[package]
+name = "pai-connector-gitlab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vendor-shaped GitLab connector — REST API v4 over PAT or OAuth device-flow tokens; adapters plug in, none are hard-coded into core."
+
+[dependencies]
+pai-core.workspace = true
+pai-permissions.workspace = true
+pai-identity.workspace = true
+pai-oauth.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+tokio.workspace = true

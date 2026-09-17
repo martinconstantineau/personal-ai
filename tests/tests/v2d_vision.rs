@@ -126,6 +126,7 @@ async fn vision_describe_tool_reads_jailed_image() {
         memory_scope: None,
         documents: None,
         email: None,
+        gitlab: None,
         vision: Some(&v),
         notify: None,
         apps: None,

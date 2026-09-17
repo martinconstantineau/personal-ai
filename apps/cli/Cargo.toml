@@ -18,6 +18,7 @@ pai-tools.workspace = true
 pai-agent.workspace = true
 pai-documents.workspace = true
 pai-connector-email.workspace = true
+pai-connector-gitlab.workspace = true
 rpassword.workspace = true
 pai-sync.workspace = true
 pai-broker.workspace = true

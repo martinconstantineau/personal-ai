@@ -27,6 +27,7 @@ members = [
     "crates/pai-oauth",
     "crates/pai-ffi",
     "connectors/email",
+    "connectors/gitlab",
     "apps/cli",
     "tests",
 ]
@@ -99,6 +100,7 @@ pai-share = { path = "crates/pai-share" }
 pai-oauth = { path = "crates/pai-oauth" }
 pai-ffi = { path = "crates/pai-ffi" }
 pai-connector-email = { path = "connectors/email" }
+pai-connector-gitlab = { path = "connectors/gitlab" }
 
 [profile.release]
 lto = "thin"

@@ -22,6 +22,7 @@ pai-broker.workspace = true
 pai-share.workspace = true
 pai-ffi.workspace = true
 pai-connector-email.workspace = true
+pai-connector-gitlab.workspace = true
 pai-voice.workspace = true
 pai-vision.workspace = true
 pai-tasks.workspace = true

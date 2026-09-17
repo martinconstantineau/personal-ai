@@ -19,6 +19,12 @@ pub enum Permission {
     EmailDelete,
     EmailDraft,
     EmailSend,
+    /// GitLab connector — read issues/MRs/pipelines/files.
+    GitLabRead,
+    /// GitLab connector — create issues, comment, open MRs, run CI.
+    GitLabWrite,
+    /// GitLab connector — merge an MR (effectively unreviewable-by-undo).
+    GitLabMerge,
     CalendarRead,
     CalendarCreate,
     CalendarUpdate,
@@ -83,6 +89,11 @@ impl PolicyTable {
             (EmailArchive, AskUser),
             (EmailSend, AskUser),
             (EmailDelete, AskUser),
+            // Reads are safe; writes land on a shared forge, and merge
+            // is the irreversible one.
+            (GitLabRead, AlwaysAllow),
+            (GitLabWrite, AskUser),
+            (GitLabMerge, AskUser),
             (CalendarRead, AlwaysAllow),
             (CalendarCreate, AskUser),
             (CalendarUpdate, AskUser),
@@ -144,6 +155,9 @@ pub fn all_permissions() -> Vec<Permission> {
         EmailDelete,
         EmailDraft,
         EmailSend,
+        GitLabRead,
+        GitLabWrite,
+        GitLabMerge,
         CalendarRead,
         CalendarCreate,
         CalendarUpdate,

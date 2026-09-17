@@ -62,6 +62,7 @@ fn runtime(store: Arc<Store>, table: PolicyTable) -> (AgentRuntime, Arc<SqliteMe
         }),
         documents: None,
         email: None,
+        gitlab: None,
         vision: None,
         notify: None,
         apps: None,

@@ -37,6 +37,7 @@ fn runtime(store: Arc<Store>) -> (AgentRuntime, Arc<SqliteMemory>, Arc<pai_audit
         persistence: None,
         documents: None,
         email: None,
+        gitlab: None,
         vision: None,
         notify: None,
         apps: None,

@@ -47,6 +47,7 @@ fn runtime(store: Arc<Store>, table: PolicyTable) -> AgentRuntime {
         }),
         documents: None,
         email: None,
+        gitlab: None,
         vision: None,
         notify: None,
         apps: None,

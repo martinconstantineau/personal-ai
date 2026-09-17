@@ -181,6 +181,8 @@ pub struct AgentRuntime {
     pub documents: Option<Arc<pai_documents::DocumentStore>>,
     /// Email connector exposed to `email.*` tools.
     pub email: Option<Arc<dyn pai_connector_email::EmailProvider>>,
+    /// GitLab connector exposed to `gitlab.*` tools.
+    pub gitlab: Option<Arc<dyn pai_connector_gitlab::GitLabProvider>>,
     /// Vision provider exposed to `vision.*` tools.
     pub vision: Option<Arc<dyn pai_inference::ImageUnderstandingProvider>>,
     /// Notification sink for `notify.send` — absent = tool reports
@@ -578,6 +580,7 @@ impl AgentRuntime {
             memory_scope: run.conversation,
             documents: self.documents.as_deref(),
             email: self.email.as_deref(),
+            gitlab: self.gitlab.as_deref(),
             vision: self.vision.as_deref(),
             notify: self.notify.as_deref(),
             allowed_roots: &self.allowed_roots,
@@ -888,6 +891,7 @@ impl AgentRuntime {
             memory_scope,
             documents: self.documents.as_deref(),
             email: self.email.as_deref(),
+            gitlab: self.gitlab.as_deref(),
             vision: self.vision.as_deref(),
             notify: self.notify.as_deref(),
             allowed_roots: &self.allowed_roots,

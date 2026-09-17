@@ -329,6 +329,115 @@ class PaiBridge {
                 : {'host': smtpHost, 'port': smtpPort, 'tls': smtpTls},
           }))) as Map<String, dynamic>;
 
+  /// GitLab connector — binding state `{configured, host?, project?,
+  /// auth?}`; list/read ops return `{issues|merge_requests|pipelines|
+  /// projects: [...]}` or `{error}` when unconfigured.
+  Future<Map<String, dynamic>> gitlabStatus() async =>
+      (await _call(_Op.gitlabStatus)) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabProjects(
+          {String? search, int limit = 20}) async =>
+      (await _call(_Op.gitlabProjects,
+          arg: jsonEncode({'search': ?search, 'limit': limit})))
+          as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabIssues(
+          {String? project,
+          String? state,
+          String? search,
+          List<String> labels = const [],
+          int limit = 20}) async =>
+      (await _call(_Op.gitlabIssues,
+          arg: jsonEncode({
+            'project': ?project,
+            'state': ?state,
+            'search': ?search,
+            'labels': labels,
+            'limit': limit,
+          }))) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabIssue(int iid,
+          {String? project}) async =>
+      (await _call(_Op.gitlabIssue,
+          arg: jsonEncode({'iid': iid, 'project': ?project})))
+          as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabIssueCreate(
+          {required String title,
+          String? description,
+          List<String> labels = const [],
+          String? project}) async =>
+      (await _call(_Op.gitlabIssueCreate,
+          arg: jsonEncode({
+            'title': title,
+            'description': ?description,
+            'labels': labels,
+            'project': ?project,
+          }))) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabComment(
+          {required String kind,
+          required int iid,
+          required String body,
+          String? project}) async =>
+      (await _call(_Op.gitlabComment,
+          arg: jsonEncode({
+            'kind': kind,
+            'iid': iid,
+            'body': body,
+            'project': ?project,
+          }))) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabMrs(
+          {String? project,
+          String? state,
+          String? search,
+          int limit = 20}) async =>
+      (await _call(_Op.gitlabMrs,
+          arg: jsonEncode({
+            'project': ?project,
+            'state': ?state,
+            'search': ?search,
+            'limit': limit,
+          }))) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabMr(int iid, {String? project}) async =>
+      (await _call(_Op.gitlabMr,
+          arg: jsonEncode({'iid': iid, 'project': ?project})))
+          as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabMrCreate(
+          {required String sourceBranch,
+          String? targetBranch,
+          required String title,
+          String? description,
+          String? project}) async =>
+      (await _call(_Op.gitlabMrCreate,
+          arg: jsonEncode({
+            'source_branch': sourceBranch,
+            'target_branch': ?targetBranch,
+            'title': title,
+            'description': ?description,
+            'project': ?project,
+          }))) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabMrMerge(int iid,
+          {String? project}) async =>
+      (await _call(_Op.gitlabMrMerge,
+          arg: jsonEncode({'iid': iid, 'project': ?project})))
+          as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabPipelines(
+          {String? project, int limit = 20}) async =>
+      (await _call(_Op.gitlabPipelines,
+          arg: jsonEncode({'project': ?project, 'limit': limit})))
+          as Map<String, dynamic>;
+  Future<Map<String, dynamic>> gitlabFile(String path,
+          {String? ref, String? project}) async =>
+      (await _call(_Op.gitlabFile,
+          arg: jsonEncode(
+              {'path': path, 'ref': ?ref, 'project': ?project})))
+          as Map<String, dynamic>;
+
+  /// Configure the binding in-app: writes gitlab.json and stores the
+  /// personal access token in the OS keystore (never in the file).
+  Future<Map<String, dynamic>> gitlabConfigure(
+          {required String host, String? token, String? project}) async =>
+      (await _call(_Op.gitlabConfigure,
+          arg: jsonEncode(
+              {'host': host, 'token': ?token, 'project': ?project})))
+          as Map<String, dynamic>;
+
   /// Voice ops — `{stt, tts, mic, speaker}` probe; `voiceListen` blocks up
   /// to [maxSecs] in the worker isolate; `voiceSay` plays on the host
   /// speaker ({ok, played} or {ok, played:false, wav_b64}).
@@ -555,6 +664,32 @@ class PaiBridge {
             result = client.emailSend(req.arg!);
           case _Op.emailConfigure:
             result = client.emailConfigure(req.arg!);
+          case _Op.gitlabStatus:
+            result = client.gitlabStatus();
+          case _Op.gitlabProjects:
+            result = client.gitlabProjects(req.arg);
+          case _Op.gitlabIssues:
+            result = client.gitlabIssues(req.arg);
+          case _Op.gitlabIssue:
+            result = client.gitlabIssue(req.arg!);
+          case _Op.gitlabIssueCreate:
+            result = client.gitlabIssueCreate(req.arg!);
+          case _Op.gitlabComment:
+            result = client.gitlabComment(req.arg!);
+          case _Op.gitlabMrs:
+            result = client.gitlabMrs(req.arg);
+          case _Op.gitlabMr:
+            result = client.gitlabMr(req.arg!);
+          case _Op.gitlabMrCreate:
+            result = client.gitlabMrCreate(req.arg!);
+          case _Op.gitlabMrMerge:
+            result = client.gitlabMrMerge(req.arg!);
+          case _Op.gitlabPipelines:
+            result = client.gitlabPipelines(req.arg);
+          case _Op.gitlabFile:
+            result = client.gitlabFile(req.arg!);
+          case _Op.gitlabConfigure:
+            result = client.gitlabConfigure(req.arg!);
           case _Op.notifyList:
             result = client.notifyList(unreadOnly: req.arg == 'unread');
           case _Op.notifyMarkRead:
@@ -685,6 +820,19 @@ enum _Op {
   emailDraft,
   emailSend,
   emailConfigure,
+  gitlabStatus,
+  gitlabProjects,
+  gitlabIssues,
+  gitlabIssue,
+  gitlabIssueCreate,
+  gitlabComment,
+  gitlabMrs,
+  gitlabMr,
+  gitlabMrCreate,
+  gitlabMrMerge,
+  gitlabPipelines,
+  gitlabFile,
+  gitlabConfigure,
   notifyList,
   notifyMarkRead,
   status,

@@ -123,6 +123,7 @@ fn ctx<'a>(apps: Option<&'a dyn AppOperator>) -> ToolContext<'a> {
         memory_scope: None,
         documents: None,
         email: None,
+        gitlab: None,
         vision: None,
         notify: None,
         apps,

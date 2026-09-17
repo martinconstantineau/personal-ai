@@ -170,6 +170,7 @@ fn ctx<'a>(
         memory_scope: None,
         documents: None,
         email: None,
+        gitlab: None,
         vision: None,
         notify: None,
         allowed_roots: &[],

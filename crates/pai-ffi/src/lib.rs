@@ -69,6 +69,7 @@ pub struct PaiRuntime {
     device_rec: pai_core::Device,
     documents: Arc<pai_documents::DocumentStore>,
     email: RwLock<Option<Arc<dyn pai_connector_email::EmailProvider>>>,
+    gitlab: RwLock<Option<Arc<dyn pai_connector_gitlab::GitLabProvider>>>,
     /// Detected voice providers (whisper-server STT / piper TTS) — None
     /// when neither is configured. Mic/speaker probes are cheap enough
     /// to answer live in `pai_voice_status`.
@@ -197,6 +198,9 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
     let email: Option<Arc<dyn pai_connector_email::EmailProvider>> =
         pai_connector_email::ImapConfig::load(&data_dir)?
             .map(|c| Arc::new(pai_connector_email::ImapProvider::new(c)) as _);
+    let gitlab: Option<Arc<dyn pai_connector_gitlab::GitLabProvider>> =
+        pai_connector_gitlab::GitLabConfig::load(&data_dir)?
+            .map(|c| Arc::new(pai_connector_gitlab::RestGitLab::new(c)) as _);
 
     // Voice: probe whisper-server + piper once at init (2s budget). A
     // missing provider just means the corresponding FFI op errors.
@@ -234,6 +238,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         }),
         documents: Some(documents.clone()),
         email: email.clone(),
+        gitlab: gitlab.clone(),
         vision,
         notify: Some(Arc::new(pai_notify::StoreNotifySink {
             store: store.clone(),
@@ -313,6 +318,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         device_rec: device,
         documents,
         email: RwLock::new(email),
+        gitlab: RwLock::new(gitlab),
         voice,
         server_url,
         llama_child: Mutex::new(None),
@@ -1256,6 +1262,467 @@ pub unsafe extern "C" fn pai_email_configure(
     let _ = rt.audit.record(&e);
     to_c(serde_json::json!({
         "configured": true, "user": c.user, "password_stored": has_password}))
+}
+
+// ---------------------------------------------------------------------------
+// GitLab connector
+// ---------------------------------------------------------------------------
+
+fn gitlab_err() -> *mut c_char {
+    to_c(serde_json::json!({"error": "gitlab not configured (gitlab.json)"}))
+}
+
+fn gitlab_provider(
+    rt: &PaiRuntime,
+) -> std::result::Result<Arc<dyn pai_connector_gitlab::GitLabProvider>, *mut c_char> {
+    rt.gitlab
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .ok_or_else(gitlab_err)
+}
+
+/// Parse a NUL-terminated JSON arg into `T`.
+unsafe fn json_arg<T: serde::de::DeserializeOwned>(
+    p: *const c_char,
+) -> std::result::Result<T, *mut c_char> {
+    match read_str(p)
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str(s).map_err(|e| e.to_string()))
+    {
+        Ok(v) => Ok(v),
+        Err(e) => Err(to_c(serde_json::json!({"error": e}))),
+    }
+}
+
+/// Configured state for the UI: `{configured, host?, project?, auth}` —
+/// never exposes the token.
+/// # Safety
+/// `handle` must come from `pai_init`.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_status(handle: *mut PaiRuntime) -> *mut c_char {
+    let rt = &mut *handle;
+    match pai_connector_gitlab::GitLabConfig::load(std::path::Path::new(&rt.data_dir)) {
+        Ok(Some(c)) => {
+            let host = c.normalized_host();
+            let auth = match &c.oauth {
+                Some(_) if pai_connector_gitlab::has_refresh_token(&host) => "oauth",
+                Some(_) => "oauth-missing-token",
+                None if pai_connector_gitlab::resolve_token(&host).is_ok() => "token",
+                None => "missing",
+            };
+            to_c(serde_json::json!({
+                "configured": true,
+                "host": host,
+                "project": c.project,
+                "auth": auth,
+            }))
+        }
+        Ok(None) => to_c(serde_json::json!({"configured": false})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// List projects the token can see: `{search?, limit?}` → `{projects}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `query_json` JSON or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_projects(
+    handle: *mut PaiRuntime,
+    query_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    #[derive(Default, Deserialize)]
+    struct Q {
+        search: Option<String>,
+        limit: Option<u32>,
+    }
+    let q: Q = match query_json {
+        q if q.is_null() => Q::default(),
+        q => match json_arg(q) {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
+    };
+    match rt.rt.block_on(async {
+        gl.projects(q.search.as_deref(), q.limit.unwrap_or(20))
+            .await
+    }) {
+        Ok(rows) => to_c(serde_json::json!({"projects": rows})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// List/search issues: `{project?, state?, search?, labels?, limit?}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `query_json` JSON or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_issues(
+    handle: *mut PaiRuntime,
+    query_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    let q: pai_connector_gitlab::IssueQuery = match query_json {
+        q if q.is_null() => pai_connector_gitlab::IssueQuery {
+            limit: 20,
+            ..Default::default()
+        },
+        q => match json_arg(q) {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
+    };
+    match rt.rt.block_on(async { gl.issues(&q).await }) {
+        Ok(rows) => to_c(serde_json::json!({"issues": rows})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Read one issue: `{project?, iid}` → `{issue}` (body is untrusted).
+/// # Safety
+/// `handle` must come from `pai_init`; `ref_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_issue(
+    handle: *mut PaiRuntime,
+    ref_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    #[derive(Deserialize)]
+    struct R {
+        iid: u64,
+        project: Option<String>,
+    }
+    let r: R = match json_arg(ref_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match rt
+        .rt
+        .block_on(async { gl.issue(r.iid, r.project.as_deref()).await })
+    {
+        Ok(i) => to_c(serde_json::json!({"issue": i})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Open an issue: `{project?, title, description?, labels?}` → `{issue}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `new_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_issue_create(
+    handle: *mut PaiRuntime,
+    new_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    let new: pai_connector_gitlab::NewIssue = match json_arg(new_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match rt.rt.block_on(async { gl.create_issue(&new).await }) {
+        Ok(i) => to_c(serde_json::json!({"issue": i})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Comment on an issue/MR: `{project?, kind: "issue"|"mr", iid, body}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `args_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_comment(
+    handle: *mut PaiRuntime,
+    args_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    #[derive(Deserialize)]
+    struct A {
+        kind: String,
+        iid: u64,
+        body: String,
+        project: Option<String>,
+    }
+    let a: A = match json_arg(args_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let target = match a.kind.as_str() {
+        "issue" => pai_connector_gitlab::CommentTarget::Issue(a.iid),
+        "mr" | "merge_request" => pai_connector_gitlab::CommentTarget::MergeRequest(a.iid),
+        other => {
+            return to_c(serde_json::json!({
+                "error": format!("bad kind {other:?} — issue|mr")
+            }))
+        }
+    };
+    match rt
+        .rt
+        .block_on(async { gl.comment(target, &a.body, a.project.as_deref()).await })
+    {
+        Ok(n) => to_c(serde_json::json!({"note": n})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// List/search merge requests: `{project?, state?, search?, limit?}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `query_json` JSON or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_mrs(
+    handle: *mut PaiRuntime,
+    query_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    let q: pai_connector_gitlab::MrQuery = match query_json {
+        q if q.is_null() => pai_connector_gitlab::MrQuery {
+            limit: 20,
+            ..Default::default()
+        },
+        q => match json_arg(q) {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
+    };
+    match rt.rt.block_on(async { gl.merge_requests(&q).await }) {
+        Ok(rows) => to_c(serde_json::json!({"merge_requests": rows})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Read one MR: `{project?, iid}` → `{merge_request}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `ref_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_mr(
+    handle: *mut PaiRuntime,
+    ref_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    #[derive(Deserialize)]
+    struct R {
+        iid: u64,
+        project: Option<String>,
+    }
+    let r: R = match json_arg(ref_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match rt
+        .rt
+        .block_on(async { gl.merge_request(r.iid, r.project.as_deref()).await })
+    {
+        Ok(m) => to_c(serde_json::json!({"merge_request": m})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Open an MR: `{project?, source_branch, target_branch?, title,
+/// description?}` — target defaults to the project's default branch.
+/// # Safety
+/// `handle` must come from `pai_init`; `new_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_mr_create(
+    handle: *mut PaiRuntime,
+    new_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    let new: pai_connector_gitlab::NewMr = match json_arg(new_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match rt
+        .rt
+        .block_on(async { gl.create_merge_request(&new).await })
+    {
+        Ok(m) => to_c(serde_json::json!({"merge_request": m})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Merge an MR: `{project?, iid}` → `{merge_request}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `ref_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_mr_merge(
+    handle: *mut PaiRuntime,
+    ref_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    #[derive(Deserialize)]
+    struct R {
+        iid: u64,
+        project: Option<String>,
+    }
+    let r: R = match json_arg(ref_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match rt
+        .rt
+        .block_on(async { gl.merge(r.iid, r.project.as_deref()).await })
+    {
+        Ok(m) => to_c(serde_json::json!({"merge_request": m})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Recent pipelines: `{project?, limit?}` → `{pipelines}`.
+/// # Safety
+/// `handle` must come from `pai_init`; `args_json` JSON or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_pipelines(
+    handle: *mut PaiRuntime,
+    args_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    #[derive(Default, Deserialize)]
+    struct A {
+        project: Option<String>,
+        limit: Option<u32>,
+    }
+    let a: A = match args_json {
+        a if a.is_null() => A::default(),
+        a => match json_arg(a) {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
+    };
+    match rt.rt.block_on(async {
+        gl.pipelines(a.limit.unwrap_or(20), a.project.as_deref())
+            .await
+    }) {
+        Ok(rows) => to_c(serde_json::json!({"pipelines": rows})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Read a repo file: `{project?, path, ref?}` → `{path, content}`
+/// (untrusted content).
+/// # Safety
+/// `handle` must come from `pai_init`; `args_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_file(
+    handle: *mut PaiRuntime,
+    args_json: *const c_char,
+) -> *mut c_char {
+    let rt = &mut *handle;
+    let gl = match gitlab_provider(rt) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    #[derive(Deserialize)]
+    struct A {
+        path: String,
+        #[serde(rename = "ref")]
+        git_ref: Option<String>,
+        project: Option<String>,
+    }
+    let a: A = match json_arg(args_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match rt.rt.block_on(async {
+        gl.repo_file(
+            &a.path,
+            a.git_ref.as_deref().unwrap_or("HEAD"),
+            a.project.as_deref(),
+        )
+        .await
+    }) {
+        Ok(text) => to_c(serde_json::json!({"path": a.path, "content": text})),
+        Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Configure the GitLab binding in-app: writes `gitlab.json`, stores the
+/// personal access token in the OS keystore (`gitlab:<host>` — never in
+/// the file), and hot-swaps the live provider so no restart is needed.
+/// `config_json`: `{host, token?, project?}`
+/// # Safety
+/// `handle` must come from `pai_init`; `config_json` NUL-terminated JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pai_gitlab_configure(
+    handle: *mut PaiRuntime,
+    config_json: *const c_char,
+) -> *mut c_char {
+    #[derive(Deserialize)]
+    struct CfgIn {
+        host: String,
+        token: Option<String>,
+        project: Option<String>,
+    }
+    let rt = &mut *handle;
+    let c: CfgIn = match json_arg(config_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if c.host.trim().is_empty() {
+        return to_c(serde_json::json!({"error": "host is required"}));
+    }
+    let cfg = pai_connector_gitlab::GitLabConfig {
+        host: c.host.clone(),
+        project: c.project.filter(|p| !p.trim().is_empty()),
+        oauth: None,
+    };
+    if let Err(e) = cfg.save(std::path::Path::new(&rt.data_dir)) {
+        return to_c(serde_json::json!({"error": e.to_string()}));
+    }
+    let host = cfg.normalized_host();
+    let has_token = match c.token {
+        Some(t) if !t.is_empty() => pai_connector_gitlab::store_token(&host, &t),
+        _ => false,
+    };
+    if let Ok(mut g) = rt.gitlab.write() {
+        *g = Some(Arc::new(pai_connector_gitlab::RestGitLab::new(cfg.clone())));
+    }
+    let mut e = pai_audit::event(AuditKind::ConfigChanged, AuditOutcome::Ok);
+    e.device = Some(rt.device);
+    e.detail = serde_json::json!({"gitlab": host});
+    let _ = rt.audit.record(&e);
+    to_c(serde_json::json!({
+        "configured": true,
+        "host": host,
+        "project": cfg.project,
+        "token_stored": has_token,
+    }))
 }
 
 // ---------------------------------------------------------------------------

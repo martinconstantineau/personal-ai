@@ -46,6 +46,7 @@ const _dests = [
   (Icons.receipt_long_outlined, 'Activity'),
   (Icons.policy_outlined, 'Permissions'),
   (Icons.music_note_outlined, 'Media'),
+  (Icons.merge_type_outlined, 'GitLab'),
 ];
 
 /// Slash-command grammar: `/verb [arg]` typed in the chat input runs
@@ -66,6 +67,7 @@ const _cmds = <(String, String, String)>[
   ('activity', '', 'Open Activity'),
   ('permissions', '', 'Open Permissions'),
   ('media', '', 'Open Media'),
+  ('gitlab', '', 'Open GitLab'),
   ('help', '', 'List these commands'),
 ];
 
@@ -80,6 +82,7 @@ const _navCmds = {
   'activity': 7,
   'permissions': 8,
   'media': 9,
+  'gitlab': 10,
 };
 
 /// Ctrl+1..9,0 jump straight to a rail destination.
@@ -304,6 +307,8 @@ class _HomeShellState extends State<HomeShell> {
         return PoliciesScreen(bridge: pai);
       case 9:
         return MediaScreen(bridge: pai);
+      case 10:
+        return GitLabScreen(bridge: pai);
       default:
         return const SizedBox.shrink();
     }
@@ -2238,6 +2243,584 @@ class _EmailScreenState extends State<EmailScreen> {
   }
 }
 
+/// GitLab view — issues, merge requests, and pipelines via the gitlab
+/// connector. Merge/trigger stay approval-gated tool-side; here they run
+/// behind an explicit confirm dialog.
+class GitLabScreen extends StatefulWidget {
+  const GitLabScreen({super.key, required this.bridge});
+  final PaiBridge bridge;
+  @override
+  State<GitLabScreen> createState() => _GitLabScreenState();
+}
+
+class _GitLabScreenState extends State<GitLabScreen> {
+  int _tab = 0; // 0 issues · 1 MRs · 2 pipelines
+  List<dynamic> _rows = const [];
+  bool _loading = true;
+  String? _error;
+  bool _configured = true;
+  final _searchCtrl = TextEditingController();
+  String _state = 'opened';
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _refresh() async {
+    setState(() => _loading = true);
+    final search = _searchCtrl.text.trim();
+    final r = switch (_tab) {
+      1 => await widget.bridge.gitlabMrs(
+        state: _state,
+        search: search.isEmpty ? null : search,
+      ),
+      2 => await widget.bridge.gitlabPipelines(),
+      _ => await widget.bridge.gitlabIssues(
+        state: _state,
+        search: search.isEmpty ? null : search,
+      ),
+    };
+    if (!mounted) return;
+    final err = r['error'] as String?;
+    setState(() {
+      _error = err;
+      _configured = !(err?.contains('not configured') ?? false);
+      _rows = switch (_tab) {
+        1 => r['merge_requests'] as List<dynamic>? ?? const [],
+        2 => r['pipelines'] as List<dynamic>? ?? const [],
+        _ => r['issues'] as List<dynamic>? ?? const [],
+      };
+      _loading = false;
+    });
+  }
+
+  void _snack(String msg) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+
+  Future<void> _openIssue(dynamic m) async {
+    final r = await widget.bridge.gitlabIssue(m['iid'] as int);
+    if (!mounted) return;
+    final i = r['issue'] as Map<String, dynamic>?;
+    if (i == null) {
+      _snack('${r['error'] ?? 'no issue'}');
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('#${i['iid']}  ${i['title'] ?? ''}'),
+        content: SizedBox(
+          width: 480,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${i['state']} · ${i['author'] ?? ''} · ${i['project'] ?? ''}',
+                  style: TextStyle(
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(i['description'] ?? '(no description)'),
+                const SizedBox(height: 12),
+                Text(
+                  '${i['web_url'] ?? ''}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(ctx).colorScheme.primary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              _comment('issue', i['iid'] as int);
+            },
+            child: const Text('Comment'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openMr(dynamic m) async {
+    final r = await widget.bridge.gitlabMr(m['iid'] as int);
+    if (!mounted) return;
+    final mr = r['merge_request'] as Map<String, dynamic>?;
+    if (mr == null) {
+      _snack('${r['error'] ?? 'no merge request'}');
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('!${mr['iid']}  ${mr['title'] ?? ''}'),
+        content: SizedBox(
+          width: 480,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${mr['state']} · ${mr['source_branch']} → ${mr['target_branch']} · ${mr['author'] ?? ''}',
+                  style: TextStyle(
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                if (mr['head_pipeline_status'] != null)
+                  Text('pipeline: ${mr['head_pipeline_status']}'),
+                const SizedBox(height: 12),
+                Text(mr['description'] ?? '(no description)'),
+                const SizedBox(height: 12),
+                Text(
+                  '${mr['web_url'] ?? ''}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(ctx).colorScheme.primary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          if (mr['state'] == 'opened')
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                _mergeMr(mr['iid'] as int, '${mr['title']}');
+              },
+              child: const Text('Merge'),
+            ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              _comment('mr', mr['iid'] as int);
+            },
+            child: const Text('Comment'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _comment(String kind, int iid) async {
+    final bodyCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Comment on $kind ${kind == 'mr' ? '!' : '#'}$iid'),
+        content: SizedBox(
+          width: 480,
+          child: TextField(
+            controller: bodyCtrl,
+            maxLines: 6,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: 'Comment'),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Post'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final r = await widget.bridge.gitlabComment(
+      kind: kind,
+      iid: iid,
+      body: bodyCtrl.text,
+    );
+    bodyCtrl.dispose();
+    if (!mounted) return;
+    _snack(r['error'] != null ? '${r['error']}' : 'Comment posted');
+  }
+
+  Future<void> _mergeMr(int iid, String title) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Merge merge request?'),
+        content: Text('!$iid  $title\n\nThis cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Merge'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final r = await widget.bridge.gitlabMrMerge(iid);
+    if (!mounted) return;
+    _snack(
+      r['error'] != null
+          ? '${r['error']}'
+          : 'Merged !${(r['merge_request'] as Map?)?['iid'] ?? iid}',
+    );
+    _refresh();
+  }
+
+  Future<void> _newIssue() async {
+    final titleCtrl = TextEditingController();
+    final descCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New issue'),
+        content: SizedBox(
+          width: 480,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: titleCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Title'),
+              ),
+              TextField(
+                controller: descCtrl,
+                maxLines: 6,
+                decoration: const InputDecoration(labelText: 'Description'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Open issue'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final r = await widget.bridge.gitlabIssueCreate(
+      title: titleCtrl.text.trim(),
+      description: descCtrl.text.trim().isEmpty ? null : descCtrl.text,
+    );
+    titleCtrl.dispose();
+    descCtrl.dispose();
+    if (!mounted) return;
+    _snack(
+      r['error'] != null
+          ? '${r['error']}'
+          : 'Opened #${(r['issue'] as Map?)?['iid'] ?? ''}',
+    );
+    _refresh();
+  }
+
+  Future<void> _configure() async {
+    final hostCtl = TextEditingController(text: 'https://gitlab.com');
+    final projCtl = TextEditingController();
+    final tokenCtl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('GitLab account'),
+        content: SizedBox(
+          width: 440,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: hostCtl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'GitLab host',
+                  helperText: 'gitlab.com or a self-managed instance',
+                ),
+              ),
+              TextField(
+                controller: projCtl,
+                decoration: const InputDecoration(
+                  labelText: 'Default project (group/repo)',
+                  helperText: 'Optional — per-op override',
+                ),
+              ),
+              TextField(
+                controller: tokenCtl,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Personal access token (api scope)',
+                  helperText: 'Stored in the OS keystore — never in a file',
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final r = await widget.bridge.gitlabConfigure(
+      host: hostCtl.text.trim(),
+      token: tokenCtl.text.isEmpty ? null : tokenCtl.text,
+      project: projCtl.text.trim().isEmpty ? null : projCtl.text.trim(),
+    );
+    hostCtl.dispose();
+    projCtl.dispose();
+    tokenCtl.dispose();
+    if (!mounted) return;
+    if (r['error'] != null) {
+      _snack('${r['error']}');
+      return;
+    }
+    _snack(
+      r['token_stored'] == true
+          ? 'GitLab configured — token saved to the OS keystore'
+          : 'GitLab configured — set PAI_GITLAB_TOKEN or re-save with a token',
+    );
+    _refresh();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('GitLab'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Configure account',
+            onPressed: _configure,
+          ),
+          if (_tab == 0)
+            IconButton(
+              icon: const Icon(Icons.add),
+              tooltip: 'New issue',
+              onPressed: _newIssue,
+            ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _refresh,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+            child: SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(
+                  value: 0,
+                  icon: Icon(Icons.adjust_outlined),
+                  label: Text('Issues'),
+                ),
+                ButtonSegment(
+                  value: 1,
+                  icon: Icon(Icons.merge_type_outlined),
+                  label: Text('Merge requests'),
+                ),
+                ButtonSegment(
+                  value: 2,
+                  icon: Icon(Icons.play_circle_outline),
+                  label: Text('Pipelines'),
+                ),
+              ],
+              selected: {_tab},
+              onSelectionChanged: (s) {
+                _tab = s.first;
+                _refresh();
+              },
+            ),
+          ),
+          if (_tab < 2)
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _searchCtrl,
+                      decoration: const InputDecoration(
+                        hintText: 'Search',
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                      onSubmitted: (_) => _refresh(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  DropdownButton<String>(
+                    value: _state,
+                    items: [
+                      for (final s
+                          in _tab == 0
+                              ? const ['opened', 'closed', 'all']
+                              : const ['opened', 'merged', 'closed', 'all'])
+                        DropdownMenuItem(value: s, child: Text(s)),
+                    ],
+                    onChanged: (v) {
+                      _state = v ?? 'opened';
+                      _refresh();
+                    },
+                  ),
+                ],
+              ),
+            ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.error_outline,
+                    size: 16,
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      _error!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ),
+                  if (!_configured)
+                    TextButton(
+                      onPressed: _configure,
+                      child: const Text('Set up'),
+                    ),
+                  TextButton(onPressed: _refresh, child: const Text('Retry')),
+                ],
+              ),
+            ),
+          Expanded(
+            child: _loading
+                ? _listSkeleton(context)
+                : _rows.isEmpty && _error == null
+                ? Center(
+                    child: Text(
+                      switch (_tab) {
+                        1 => 'No merge requests',
+                        2 => 'No pipelines',
+                        _ => 'No issues',
+                      },
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _rows.length,
+                    itemBuilder: (ctx, i) {
+                      final m = _rows[i] as Map<String, dynamic>;
+                      return switch (_tab) {
+                        1 => ListTile(
+                          leading: Icon(
+                            m['state'] == 'merged'
+                                ? Icons.merge
+                                : m['state'] == 'closed'
+                                ? Icons.close
+                                : Icons.merge_type_outlined,
+                          ),
+                          title: Text(
+                            m['title'] ?? '',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            '!${m['iid']} · ${m['source_branch']} → ${m['target_branch']} · ${m['author'] ?? ''}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onTap: () => _openMr(m),
+                        ),
+                        2 => ListTile(
+                          leading: Icon(switch ('${m['status']}') {
+                            'success' => Icons.check_circle_outline,
+                            'failed' => Icons.error_outline,
+                            'running' => Icons.play_circle_outline,
+                            _ => Icons.schedule_outlined,
+                          }),
+                          title: Text(
+                            '#${m['id']} · ${m['status']}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            '${m['ref'] ?? ''} · ${_fmtTs(m['created_at'])}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        _ => ListTile(
+                          leading: Icon(
+                            m['state'] == 'opened'
+                                ? Icons.radio_button_checked_outlined
+                                : Icons.check_circle_outline,
+                          ),
+                          title: Text(
+                            m['title'] ?? '',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            '#${m['iid']} · ${m['author'] ?? ''}'
+                            '${(m['labels'] as List?)?.isNotEmpty == true ? ' · ${(m['labels'] as List).join(", ")}' : ''}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onTap: () => _openIssue(m),
+                        ),
+                      };
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 /// Policy editor — every permission, its current policy, and a selector.
 /// Changes apply immediately and persist in the local DB.
 class PoliciesScreen extends StatefulWidget {

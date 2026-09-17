@@ -1734,6 +1734,7 @@ dependencies = [
  "pai-broker",
  "pai-config",
  "pai-connector-email",
+ "pai-connector-gitlab",
  "pai-core",
  "pai-documents",
  "pai-identity",
@@ -1775,6 +1776,7 @@ dependencies = [
  "pai-audit",
  "pai-broker",
  "pai-connector-email",
+ "pai-connector-gitlab",
  "pai-core",
  "pai-documents",
  "pai-identity",
@@ -1889,6 +1891,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pai-connector-gitlab"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "pai-core",
+ "pai-identity",
+ "pai-oauth",
+ "pai-permissions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "pai-core"
 version = "0.1.0"
 dependencies = [
@@ -1930,6 +1950,7 @@ dependencies = [
  "pai-broker",
  "pai-config",
  "pai-connector-email",
+ "pai-connector-gitlab",
  "pai-core",
  "pai-documents",
  "pai-identity",
@@ -2006,6 +2027,7 @@ dependencies = [
  "pai-broker",
  "pai-config",
  "pai-connector-email",
+ "pai-connector-gitlab",
  "pai-core",
  "pai-documents",
  "pai-ffi",
@@ -2238,6 +2260,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pai-connector-email",
+ "pai-connector-gitlab",
  "pai-core",
  "pai-documents",
  "pai-inference",

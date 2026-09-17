@@ -94,6 +94,42 @@ class PaiClient {
   late final _emailConfigure = _lib.lookupFunction<_SendNative,
       Pointer<Utf8> Function(
           Pointer<Void>, Pointer<Utf8>)>('pai_email_configure');
+  late final _gitlabStatus = _lib.lookupFunction<_NoArgNative,
+      Pointer<Utf8> Function(Pointer<Void>)>('pai_gitlab_status');
+  late final _gitlabProjects = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_projects');
+  late final _gitlabIssues = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_issues');
+  late final _gitlabIssue = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_issue');
+  late final _gitlabIssueCreate = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_issue_create');
+  late final _gitlabComment = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_comment');
+  late final _gitlabMrs = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_mrs');
+  late final _gitlabMr = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_mr');
+  late final _gitlabMrCreate = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_mr_create');
+  late final _gitlabMrMerge = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_mr_merge');
+  late final _gitlabPipelines = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_pipelines');
+  late final _gitlabFile = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_file');
+  late final _gitlabConfigure = _lib.lookupFunction<_SendNative,
+      Pointer<Utf8> Function(
+          Pointer<Void>, Pointer<Utf8>)>('pai_gitlab_configure');
   late final _status = _lib.lookupFunction<_NoArgNative,
       Pointer<Utf8> Function(Pointer<Void>)>('pai_status');
   late final _modelsList = _lib.lookupFunction<_NoArgNative,
@@ -353,6 +389,60 @@ class PaiClient {
   /// in the OS keystore, and hot-swaps the provider — no restart needed.
   Map<String, dynamic> emailConfigure(String configJson) =>
       _call1(_emailConfigure, configJson);
+
+  /// GitLab binding state: {configured, host?, project?, auth?} — the
+  /// token is never exposed.
+  Map<String, dynamic> gitlabStatus() =>
+      _json(_gitlabStatus(_handle)) as Map<String, dynamic>;
+
+  /// Projects the token can see: {search?, limit?} → {projects: [...]}.
+  Map<String, dynamic> gitlabProjects(String? queryJson) =>
+      _callOpt(_gitlabProjects, queryJson);
+
+  /// List/search issues: {project?, state?, search?, labels?, limit?}.
+  Map<String, dynamic> gitlabIssues(String? queryJson) =>
+      _callOpt(_gitlabIssues, queryJson);
+
+  /// Read one issue: {project?, iid} → {issue} (body is untrusted).
+  Map<String, dynamic> gitlabIssue(String refJson) =>
+      _call1(_gitlabIssue, refJson);
+
+  /// Open an issue: {project?, title, description?, labels?}.
+  Map<String, dynamic> gitlabIssueCreate(String newJson) =>
+      _call1(_gitlabIssueCreate, newJson);
+
+  /// Comment: {project?, kind: 'issue'|'mr', iid, body} → {note}.
+  Map<String, dynamic> gitlabComment(String argsJson) =>
+      _call1(_gitlabComment, argsJson);
+
+  /// List/search MRs: {project?, state?, search?, limit?}.
+  Map<String, dynamic> gitlabMrs(String? queryJson) =>
+      _callOpt(_gitlabMrs, queryJson);
+
+  /// Read one MR: {project?, iid} → {merge_request}.
+  Map<String, dynamic> gitlabMr(String refJson) => _call1(_gitlabMr, refJson);
+
+  /// Open an MR: {project?, source_branch, target_branch?, title,
+  /// description?} — target defaults to the project's default branch.
+  Map<String, dynamic> gitlabMrCreate(String newJson) =>
+      _call1(_gitlabMrCreate, newJson);
+
+  /// Merge an MR: {project?, iid} → {merge_request}.
+  Map<String, dynamic> gitlabMrMerge(String refJson) =>
+      _call1(_gitlabMrMerge, refJson);
+
+  /// Recent pipelines: {project?, limit?} → {pipelines: [...]}.
+  Map<String, dynamic> gitlabPipelines(String? argsJson) =>
+      _callOpt(_gitlabPipelines, argsJson);
+
+  /// Read a repo file: {project?, path, ref?} → {path, content}.
+  Map<String, dynamic> gitlabFile(String argsJson) =>
+      _call1(_gitlabFile, argsJson);
+
+  /// Configure the binding: {host, token?, project?}. Writes gitlab.json,
+  /// stores the token in the OS keystore, hot-swaps the provider.
+  Map<String, dynamic> gitlabConfigure(String configJson) =>
+      _call1(_gitlabConfigure, configJson);
 
   /// Notification inbox: {notifications: [...], unread: n}. Rows sync
   /// across paired devices.

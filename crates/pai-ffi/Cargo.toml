@@ -20,6 +20,7 @@ pai-tools.workspace = true
 pai-agent.workspace = true
 pai-documents.workspace = true
 pai-connector-email.workspace = true
+pai-connector-gitlab.workspace = true
 pai-vision.workspace = true
 pai-notify.workspace = true
 pai-apps.workspace = true
