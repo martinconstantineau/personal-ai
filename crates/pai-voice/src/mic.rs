@@ -13,6 +13,57 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
+/// WASAPI (cpal's Windows backend) caches its `IMMDeviceEnumerator` in a
+/// process-wide `OnceLock`: it is created on whichever thread first
+/// touches cpal, then shared with every later caller. COM objects are
+/// apartment-bound, so when that first thread exits and its apartment
+/// is torn down (`CoUninitialize`), the cached enumerator dangles and
+/// the next call access-violates inside `GetDefaultAudioEndpoint` —
+/// the crash `pai serve` request threads trigger on the second audio
+/// call. Every cpal touch therefore runs on one long-lived worker
+/// thread whose COM apartment (and thus the cached enumerator) stays
+/// valid for the process lifetime.
+#[cfg(windows)]
+mod com {
+    #[link(name = "ole32")]
+    extern "system" {
+        pub fn CoInitializeEx(reserved: *mut std::ffi::c_void, coinit: u32) -> i32;
+    }
+}
+
+#[cfg(windows)]
+fn com_thread<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    use std::sync::{mpsc, OnceLock};
+    type Task = Box<dyn FnOnce() + Send>;
+    static SENDER: OnceLock<mpsc::SyncSender<Task>> = OnceLock::new();
+    let tx = SENDER.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<Task>(8);
+        std::thread::spawn(move || {
+            const COINIT_MULTITHREADED: u32 = 0x0;
+            unsafe { com::CoInitializeEx(std::ptr::null_mut(), COINIT_MULTITHREADED) };
+            while let Ok(task) = rx.recv() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
+            }
+        });
+        tx
+    });
+    let (rtx, rrx) = mpsc::channel();
+    let task: Box<dyn FnOnce() + Send + '_> = Box::new(move || drop(rtx.send(f())));
+    // SAFETY: the caller blocks on `rrx.recv()` until the worker has run
+    // the task to completion, so every borrow captured in `f` outlives
+    // the call — the same guarantee `std::thread::scope` gives.
+    let task: Box<dyn FnOnce() + Send + 'static> = unsafe { std::mem::transmute(task) };
+    if tx.send(task).is_err() {
+        panic!("audio worker thread dead");
+    }
+    rrx.recv().expect("audio worker panicked")
+}
+
+#[cfg(not(windows))]
+fn com_thread<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    f()
+}
+
 /// What whisper wants: mono 16 kHz i16.
 pub const TARGET_RATE: u32 = 16_000;
 const FRAME_MS: usize = 30;
@@ -181,12 +232,12 @@ pub fn is_quiet(pcm: &[i16]) -> bool {
 /// True when a default input device exists (doesn't open it — OS
 /// permission prompts only fire on stream start).
 pub fn input_available() -> bool {
-    cpal::default_host().default_input_device().is_some()
+    com_thread(|| cpal::default_host().default_input_device().is_some())
 }
 
 /// True when a default output device exists.
 pub fn output_available() -> bool {
-    cpal::default_host().default_output_device().is_some()
+    com_thread(|| cpal::default_host().default_output_device().is_some())
 }
 
 /// Minimal block_on — the VAD's async method is pure CPU; no IO drivers
@@ -267,6 +318,10 @@ pub fn wav_to_pcm16(wav: &[u8]) -> Result<(u32, Vec<i16>)> {
 /// VAD sees speech (+ hangover), ends on ~750 ms of trailing silence or
 /// `max_secs`. Returns mono 16 kHz i16 — empty when nothing was heard.
 pub fn capture_utterance(vad: &EnergyVad, max_secs: u32) -> Result<Vec<i16>> {
+    com_thread(|| capture_utterance_inner(vad, max_secs))
+}
+
+fn capture_utterance_inner(vad: &EnergyVad, max_secs: u32) -> Result<Vec<i16>> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -355,6 +410,14 @@ pub fn capture_utterance(vad: &EnergyVad, max_secs: u32) -> Result<Vec<i16>> {
 /// nothing was heard. `on_segment` runs inline — the cpal channel keeps
 /// buffering so no audio is lost while it works.
 pub fn capture_segmented(
+    vad: &EnergyVad,
+    max_secs: u32,
+    on_segment: &mut (dyn FnMut(Vec<i16>) + Send),
+) -> Result<Vec<i16>> {
+    com_thread(|| capture_segmented_inner(vad, max_secs, on_segment))
+}
+
+fn capture_segmented_inner(
     vad: &EnergyVad,
     max_secs: u32,
     on_segment: &mut dyn FnMut(Vec<i16>),
@@ -466,6 +529,10 @@ pub fn capture_segmented(
 /// Play mono i16 PCM through the default output device; blocks until the
 /// buffer is consumed. Resamples when the device can't take the rate.
 pub fn play(pcm: &[i16], sample_rate: u32) -> Result<()> {
+    com_thread(|| play_inner(pcm, sample_rate))
+}
+
+fn play_inner(pcm: &[i16], sample_rate: u32) -> Result<()> {
     if pcm.is_empty() {
         return Ok(());
     }

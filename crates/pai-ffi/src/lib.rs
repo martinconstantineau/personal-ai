@@ -175,6 +175,29 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         }
     }
 
+    // Restore the endpoint the user chose via `pai_set_provider` or
+    // `models serve` — without this a `pai serve` restart silently
+    // reverts to echo even though the UI keeps showing a real model.
+    // Only fills the echo default; an explicit non-echo `--provider`
+    // still wins.
+    if provider_name == "echo" {
+        if let Ok(raw) = std::fs::read_to_string(data_dir.join("provider.json")) {
+            if let Ok(saved) = serde_json::from_str::<serde_json::Value>(&raw) {
+                provider_name = saved
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("echo")
+                    .to_string();
+                if let Some(u) = saved.get("server_url").and_then(|v| v.as_str()) {
+                    server_url = u.to_string();
+                }
+                if let Some(m) = saved.get("model").and_then(|v| v.as_str()) {
+                    model = Some(m.to_string());
+                }
+            }
+        }
+    }
+
     // Vector recall: probe the resolved server for an Ollama embedding
     // model (/api/tags is Ollama-only, so detection is self-gating).
     let embedder = rt
@@ -1905,6 +1928,18 @@ fn apply_provider(rt: &mut PaiRuntime, base_url: &str, model: &str) {
         base_url,
         model.to_string(),
     )));
+    // Persist the choice — a `serve` restart must not silently revert
+    // to echo; init restores this file when no real provider was
+    // requested.
+    let _ = std::fs::write(
+        std::path::Path::new(&rt.data_dir).join("provider.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "provider": "llama-server",
+            "server_url": base_url,
+            "model": model,
+        }))
+        .unwrap_or_default(),
+    );
 }
 
 /// Re-point chat at a different endpoint/model without re-init:

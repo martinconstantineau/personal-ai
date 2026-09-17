@@ -92,7 +92,7 @@ pub fn stream_transcribe(
     stt: &dyn SpeechToTextProvider,
     vad: &EnergyVad,
     max_secs: u32,
-    on_partial: &mut dyn FnMut(&str),
+    on_partial: &mut (dyn FnMut(&str) + Send),
 ) -> Result<String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
