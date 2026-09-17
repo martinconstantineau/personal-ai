@@ -1737,6 +1737,7 @@ dependencies = [
  "pai-connector-gitlab",
  "pai-core",
  "pai-documents",
+ "pai-ffi",
  "pai-identity",
  "pai-inference",
  "pai-media",

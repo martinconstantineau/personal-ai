@@ -440,8 +440,9 @@ self.addEventListener('fetch', e => {{
 // the cache — a single visit then suffices for full offline use.
 self.addEventListener('message', e => {{
   if (e.data && e.data.type === 'pai-precache' && Array.isArray(e.data.urls))
-    e.waitUntil(caches.open(CACHE).then(c => c.addAll(
-      e.data.urls.filter(u => new URL(u, location).origin === location.origin))));
+    e.waitUntil(caches.open(CACHE).then(c => Promise.allSettled(
+      e.data.urls.filter(u => new URL(u, location).origin === location.origin)
+        .map(u => c.add(u)))));
 }});
 "#
     )
@@ -465,6 +466,18 @@ fn inject_pwa(resp: &mut ServeResponse, req: &ServeRequest) -> bool {
     let Ok(mut html) = String::from_utf8(resp.body.clone()) else {
         return false;
     };
+    // A `<base href="/">` (Flutter web) only resolves under a root mount —
+    // rewrite it so the same package also works under `/apps/<id>`.
+    let mut changed = false;
+    if !req.base.is_empty() {
+        for pat in ["<base href=\"/\">", "<base href='/'>"] {
+            if html.contains(pat) {
+                html = html.replace(pat, &format!("<base href=\"{}/\">", req.base));
+                changed = true;
+                break;
+            }
+        }
+    }
     let mut snippet = String::new();
     if !html.contains("rel=\"manifest\"") && !html.contains("rel='manifest'") {
         snippet.push_str(&format!(
@@ -472,18 +485,34 @@ fn inject_pwa(resp: &mut ServeResponse, req: &ServeRequest) -> bool {
             req.base
         ));
     }
+    // Note: Flutter ≥3.35 ships `flutter_service_worker.js` as a
+    // self-unregistering stub (flutter#156910) — its presence means the
+    // page has NO real worker, so it still gets ours.
     if !html.contains("serviceWorker.register") {
+        // Seed the SW cache with everything the page has fetched — the
+        // DOM list covers declared subresources, the resource-timing
+        // buffer catches dynamically-fetched ones (Flutter's main.dart.js
+        // / canvaskit.wasm). POST endpoints like /api/bridge are excluded:
+        // addAll would GET them and fail wholesale on a non-ok reply.
+        // A second pass runs later to catch lazy loads after `ready`.
         snippet.push_str(&format!(
             "<script>addEventListener('load',()=>{{if(!('serviceWorker'in navigator))return;\
              navigator.serviceWorker.register('{base}/sw.js');\
-             navigator.serviceWorker.ready.then(r=>{{const u=[...document.\
+             const seed=()=>{{const dom=[...document.\
              querySelectorAll('link[href],script[src],img[src]')].map(e=>e.href||e.src);\
-             r.active&&r.active.postMessage({{type:'pai-precache',urls:u}});}});}});</script>",
+             const net=(performance.getEntriesByType('resource')||[]).map(e=>e.name);\
+             const u=[...new Set([...dom,...net])].filter(u=>!u.includes('/api/'));\
+             navigator.serviceWorker.ready.then(r=>r.active&&r.active.postMessage(\
+             {{type:'pai-precache',urls:u}}));}};\
+             seed();setTimeout(seed,5000);}});</script>",
             base = req.base
         ));
     }
     if snippet.is_empty() {
-        return false;
+        if changed {
+            resp.body = html.into_bytes();
+        }
+        return changed;
     }
     if let Some(i) = html.find("</head>") {
         html.insert_str(i, &snippet);

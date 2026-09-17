@@ -1,15 +1,12 @@
-/// Isolate bridge: `pai_send` blocks on inference, so all FFI work happens
-/// inside a dedicated worker isolate that owns the runtime handle. Live run
-/// events (token deltas, approval requests, tool progress) stream back
-/// through the reply port while a send is in flight.
+/// Platform-neutral bridge over the runtime. Native (dart:ffi) runs ops
+/// in a worker isolate; web (PWA) POSTs them to `/api/bridge` on the
+/// `pai serve --bridge` gateway. Same ops, same result shapes — the
+/// transport is conditionally imported.
 library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:ffi';
-import 'dart:isolate';
-import 'package:ffi/ffi.dart';
-import 'pai_ffi.dart';
+import 'bridge_transport.dart';
 
 /// Handle for one in-flight `send`: live [events] then the final [result].
 class SendHandle {
@@ -19,11 +16,9 @@ class SendHandle {
 }
 
 class PaiBridge {
-  PaiBridge._(this._requests);
+  PaiBridge._(this._transport);
 
-  final SendPort _requests;
-  int _nextId = 0;
-  final _pending = <int, _Pending>{};
+  final BridgeTransport _transport;
 
   /// Latest resolved provider/model status — refreshed by [status]
   /// and [setProvider]. [statusStream] pushes updates so the chat
@@ -37,40 +32,12 @@ class PaiBridge {
   final _uiEvents = StreamController<Map<String, dynamic>>.broadcast();
   Stream<Map<String, dynamic>> get uiEvents => _uiEvents.stream;
 
-  /// Spawns the worker isolate and initializes the Rust runtime inside it.
+  /// Connects the platform transport (worker isolate on native, HTTP on
+  /// web) and initializes the Rust runtime behind it.
   static Future<PaiBridge> start(Map<String, dynamic> config) async {
-    final ready = ReceivePort();
-    await Isolate.spawn(_workerMain, (ready.sendPort, config));
-    final handshake = await ready.first;
-    if (handshake is _InitError) {
-      throw StateError(handshake.message);
-    }
-    final requests = handshake as SendPort;
-    final bridge = PaiBridge._(requests);
-    // Route replies back by id; `_event` payloads go to the event stream.
-    final replies = ReceivePort();
-    requests.send(_Subscribe(replies.sendPort));
-    replies.listen((msg) {
-      final (id, value) = msg as (int, dynamic);
-      final p = bridge._pending[id];
-      if (value is Map && value['_event'] != null) {
-        final decoded = jsonDecode(value['_event'] as String);
-        if (decoded is Map<String, dynamic>) {
-          // `ui:` kinds are runtime-originated UI events — broadcast to
-          // screens rather than whichever call happens to be pending.
-          if ('${decoded['kind']}'.startsWith('ui:')) {
-            bridge._uiEvents.add(decoded);
-          } else {
-            p?.events?.add(decoded);
-          }
-        }
-      } else {
-        if (p == null) return;
-        bridge._pending.remove(id);
-        p.completer.complete(value);
-        p.events?.close();
-      }
-    });
+    final t = await startBridgeTransport(config);
+    final bridge = PaiBridge._(t);
+    t.uiEvents.listen(bridge._uiEvents.add);
     return bridge;
   }
 
@@ -547,244 +514,8 @@ class PaiBridge {
       (await _call(_Op.voiceSay, arg: text)) as Map<String, dynamic>;
 
   Future<dynamic> _call(_Op op,
-      {String? arg, StreamController<Map<String, dynamic>>? events}) {
-    final id = _nextId++;
-    final c = Completer<dynamic>();
-    _pending[id] = _Pending(c, events);
-    _requests.send(_Request(id, op, arg));
-    return c.future;
-  }
-
-  static void _workerMain((SendPort, Map<String, dynamic>) args) {
-    final (ready, config) = args;
-    final inbox = ReceivePort();
-    SendPort? replies;
-    // The event callback is invoked synchronously on this isolate's thread
-    // during client.send — `isolateLocal` is exactly that contract.
-    int activeSend = 0;
-    _eventSink = NativeCallable<NativeEventCallback>.isolateLocal(
-        (Pointer<Utf8> evt, Pointer<Void> _) {
-          replies?.send((activeSend, {'_event': evt.toDartString()}));
-        });
-    final PaiClient client;
-    try {
-      client = PaiClient.init(config);
-      client.setEventCallback(_eventSink!.nativeFunction);
-    } catch (e) {
-      ready.send(_InitError(e.toString()));
-      return;
-    }
-    ready.send(inbox.sendPort);
-    inbox.listen((msg) {
-      if (msg is _Subscribe) {
-        replies = msg.port;
-        return;
-      }
-      final req = msg as _Request;
-      dynamic result;
-      try {
-        switch (req.op) {
-          case _Op.send:
-            activeSend = req.id;
-            result = client.send(req.arg!);
-            activeSend = 0;
-          case _Op.resume:
-            activeSend = req.id;
-            result = client.resume(req.arg!);
-            activeSend = 0;
-          case _Op.approve:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result = client.approve(a['id'] as String, a['granted'] as bool);
-          case _Op.cancel:
-            client.cancel();
-            result = {'ok': true};
-          case _Op.memories:
-            result = client.memories();
-          case _Op.modelsList:
-            result = client.modelsList();
-          case _Op.modelsScan:
-            result = client.modelsScan();
-          case _Op.modelsServe:
-            {
-              final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-              result = client.modelsServe(
-                  a['slug'] as String, (a['port'] as num? ?? 0).toInt());
-            }
-          case _Op.modelsCatalog:
-            result = client.modelsCatalog();
-          case _Op.modelsInstall:
-            result = client.modelsInstall(req.arg!);
-          case _Op.audit:
-            result = client.audit();
-          case _Op.runs:
-            result = client.runs();
-          case _Op.conversations:
-            result = client.conversations();
-          case _Op.history:
-            result = client.history();
-          case _Op.policies:
-            result = client.policies();
-          case _Op.detect:
-            result = client.detect();
-          case _Op.convNew:
-            result = client.conversationNew(isolated: req.arg == 'isolated');
-          case _Op.convSelect:
-            result = client.conversationSelect(req.arg!);
-          case _Op.convDelete:
-            result = client.conversationDelete(req.arg!);
-          case _Op.convRename:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result = client.conversationRename(
-                a['id'] as String, a['title'] as String);
-          case _Op.convSetMemory:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result = client.conversationSetMemory(
-                a['id'] as String, a['mode'] as String);
-          case _Op.forget:
-            result = client.forget(req.arg!);
-          case _Op.setPolicy:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result =
-                client.setPolicy(a['p'] as String, a['x'] as String);
-          case _Op.docs:
-            result = client.docs();
-          case _Op.docsIngest:
-            result = client.docsIngest(req.arg!);
-          case _Op.docsSearch:
-            result = client.docsSearch(req.arg!);
-          case _Op.docsDelete:
-            result = client.docsDelete(req.arg!);
-          case _Op.emailSearch:
-            result = client.emailSearch(req.arg);
-          case _Op.emailRead:
-            result = client.emailRead(req.arg!);
-          case _Op.emailDraft:
-            result = client.emailDraft(req.arg!);
-          case _Op.emailSend:
-            result = client.emailSend(req.arg!);
-          case _Op.emailConfigure:
-            result = client.emailConfigure(req.arg!);
-          case _Op.gitlabStatus:
-            result = client.gitlabStatus();
-          case _Op.gitlabProjects:
-            result = client.gitlabProjects(req.arg);
-          case _Op.gitlabIssues:
-            result = client.gitlabIssues(req.arg);
-          case _Op.gitlabIssue:
-            result = client.gitlabIssue(req.arg!);
-          case _Op.gitlabIssueCreate:
-            result = client.gitlabIssueCreate(req.arg!);
-          case _Op.gitlabComment:
-            result = client.gitlabComment(req.arg!);
-          case _Op.gitlabMrs:
-            result = client.gitlabMrs(req.arg);
-          case _Op.gitlabMr:
-            result = client.gitlabMr(req.arg!);
-          case _Op.gitlabMrCreate:
-            result = client.gitlabMrCreate(req.arg!);
-          case _Op.gitlabMrMerge:
-            result = client.gitlabMrMerge(req.arg!);
-          case _Op.gitlabPipelines:
-            result = client.gitlabPipelines(req.arg);
-          case _Op.gitlabFile:
-            result = client.gitlabFile(req.arg!);
-          case _Op.gitlabConfigure:
-            result = client.gitlabConfigure(req.arg!);
-          case _Op.notifyList:
-            result = client.notifyList(unreadOnly: req.arg == 'unread');
-          case _Op.notifyMarkRead:
-            result = client.notifyMarkRead(req.arg!);
-          case _Op.status:
-            result = client.status();
-          case _Op.setProvider:
-            result = client.setProvider(req.arg!);
-          case _Op.voiceStatus:
-            result = client.voiceStatus();
-          case _Op.voiceListen:
-            result =
-                client.voiceListen(maxSecs: int.tryParse(req.arg ?? '') ?? 30);
-          case _Op.voiceListenStream:
-            result = client.voiceListenStream(
-                maxSecs: int.tryParse(req.arg ?? '') ?? 30);
-          case _Op.voiceTranscribe:
-            result = client.voiceTranscribe(req.arg!);
-          case _Op.voiceSay:
-            result = client.voiceSay(req.arg!);
-          case _Op.appsList:
-            result = client.appsList();
-          case _Op.appsRun:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result = client.appsRun(a['id'] as String,
-                args: (a['args'] as List).cast<String>());
-          case _Op.appsMigrate:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result =
-                client.appsMigrate(a['id'] as String, a['to'] as String);
-          case _Op.peersList:
-            result = client.peersList();
-          case _Op.devicesPlacement:
-            result = client.devicesPlacement();
-          case _Op.appsShareGrant:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result = client.shareGrant(
-                a['id'] as String,
-                a['actions'] as String,
-                a['days'] as int,
-                a['for'] as String);
-          case _Op.shareDelegate:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result = client.shareDelegate(
-                a['parent'] as String,
-                a['actions'] as String,
-                a['days'] as int,
-                a['for'] as String);
-          case _Op.guestCall:
-            result = client.guestCall(req.arg!);
-          case _Op.shareList:
-            result = client.shareList();
-          case _Op.shareRevoke:
-            result = client.shareRevoke(req.arg!);
-          case _Op.mediaList:
-            result = client.mediaList();
-          case _Op.mediaGen:
-            result = client.mediaGen(req.arg!);
-          case _Op.mediaExport:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result = client.mediaExport(
-                a['id'] as String, a['dest'] as String);
-          case _Op.syncNow:
-            result = client.syncNow(req.arg ?? '{}');
-          case _Op.pairOffer:
-            result = client.pairOffer(req.arg!);
-          case _Op.pairAccept:
-            final a = jsonDecode(req.arg!) as Map<String, dynamic>;
-            result = client.pairAccept(
-                a['offer'] as String, a['out'] as String);
-          case _Op.pairComplete:
-            result = client.pairComplete(req.arg!);
-          case _Op.syncStatus:
-            result = client.syncStatus();
-          case _Op.pairFolder:
-            result = client.pairFolder();
-          case _Op.pairQr:
-            result = client.pairQr(req.arg!);
-        }
-      } catch (e) {
-        result = {'error': e.toString()};
-      }
-      replies?.send((req.id, result));
-    });
-  }
-}
-
-/// Retained for the process lifetime: the Rust side may invoke this
-/// callback at any time during a `pai_send` call.
-NativeCallable<NativeEventCallback>? _eventSink;
-
-class _Pending {
-  _Pending(this.completer, this.events);
-  final Completer<dynamic> completer;
-  final StreamController<Map<String, dynamic>>? events;
+      {String? arg, StreamController<Map<String, dynamic>>? events}) =>
+      _transport.call(op.name, arg, events: events);
 }
 
 enum _Op {
@@ -862,21 +593,4 @@ enum _Op {
   pairComplete,
   pairFolder,
   pairQr,
-}
-
-class _InitError {
-  _InitError(this.message);
-  final String message;
-}
-
-class _Subscribe {
-  _Subscribe(this.port);
-  final SendPort port;
-}
-
-class _Request {
-  _Request(this.id, this.op, this.arg);
-  final int id;
-  final _Op op;
-  final String? arg;
 }

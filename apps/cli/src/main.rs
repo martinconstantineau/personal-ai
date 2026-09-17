@@ -14,7 +14,7 @@ use pai_storage::Store;
 use pai_tools::Tool;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
 #[command(name = "pai", about = "Personal AI — local-first, free models only")]
@@ -127,6 +127,17 @@ enum Cmd {
         /// Relay bearer token.
         #[arg(long)]
         token: Option<String>,
+        /// Host a PaiRuntime in-process and answer POST /api/bridge —
+        /// this is what the Flutter *web* build (the PWA) talks to.
+        /// Loopback-only by default; on a non-loopback bind it requires
+        /// --bridge-token.
+        #[arg(long)]
+        bridge: bool,
+        /// Bearer token required on /api/bridge when set (mandatory for
+        /// non-loopback binds). The web app passes it as
+        /// `?token=` once, then keeps it in localStorage.
+        #[arg(long)]
+        bridge_token: Option<String>,
     },
     /// Email connector (IMAP) — configure + direct ops.
     Email {
@@ -3804,6 +3815,8 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
             dir,
             relay,
             token,
+            bridge,
+            bridge_token,
         } => {
             let http = tiny_http::Server::http(bind)
                 .map_err(|e| Error::Other(format!("serve bind {bind}: {e}")))?;
@@ -3813,7 +3826,63 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 "name layer: http://<app>.{user_slug}.devices[:port] — \
                  `pai apps names` emits hosts-file lines"
             );
-            let cx = ServeCtx {
+            // The Flutter web build (PWA) drives the same runtime the
+            // native app does — hosted here behind POST /api/bridge.
+            let bridge_state = if *bridge {
+                let loopback = bind
+                    .split(':')
+                    .next()
+                    .is_some_and(|h| h == "127.0.0.1" || h == "localhost" || h == "::1");
+                if !loopback && bridge_token.is_none() {
+                    return Err(Error::InvalidInput(
+                        "--bridge on a non-loopback bind requires --bridge-token".into(),
+                    ));
+                }
+                let init = serde_json::json!({
+                    "data_dir": cfg.data_dir,
+                    "provider": cli.provider,
+                    "model": cli.model,
+                    "server_url": cli.server_url,
+                })
+                .to_string();
+                // PaiRuntime::new block_on's its own tokio runtime — that
+                // panics on a thread already driving one, so init happens
+                // on a dedicated OS thread and hands the handle back.
+                let (init_tx, init_rx) =
+                    std::sync::mpsc::channel::<std::result::Result<usize, String>>();
+                std::thread::spawn(move || {
+                    let r = unsafe { pai_ffi::bridge::bridge_init(&init) }
+                        .map(|h| h as usize)
+                        .map_err(|e| e.to_string());
+                    let _ = init_tx.send(r);
+                });
+                match init_rx
+                    .recv()
+                    .unwrap_or_else(|e| Err(format!("init thread: {e}")))
+                    .map(|h| h as *mut pai_ffi::PaiRuntime)
+                {
+                    Ok(handle) => {
+                        let events = Arc::new(Mutex::new(Vec::new()));
+                        unsafe {
+                            pai_ffi::bridge::bridge_install_event_sink(handle, events.clone());
+                        }
+                        println!("bridge: POST /api/bridge live — web PWA can drive this device");
+                        Some(Arc::new(BridgeState {
+                            handle: BridgeHandle(handle),
+                            lock: Mutex::new(()),
+                            events,
+                            token: bridge_token.clone(),
+                        }))
+                    }
+                    Err(e) => {
+                        eprintln!("bridge: runtime init failed ({e}) — /api/bridge off");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let cx = Arc::new(ServeCtx {
                 data_dir: cfg.data_dir.clone(),
                 store: store.clone(),
                 device: device.clone(),
@@ -3821,12 +3890,19 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 relay: relay.clone(),
                 token: token.clone(),
                 user_slug,
-            };
+                bridge: bridge_state,
+            });
             let rt = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
+                // One thread per request — a long `send` run must not
+                // block `pollEvents`/`approve` from the same web app.
                 for mut req in http.incoming_requests() {
-                    let resp = serve_request(&cx, &rt, &mut req);
-                    let _ = req.respond(resp);
+                    let cx = cx.clone();
+                    let rt = rt.clone();
+                    std::thread::spawn(move || {
+                        let resp = serve_request(&cx, &rt, &mut req);
+                        let _ = req.respond(resp);
+                    });
                 }
             })
             .await
@@ -6103,6 +6179,107 @@ struct ServeCtx {
     /// Local user's `app.user.devices` slug — Host-header routing only
     /// answers names in this namespace.
     user_slug: String,
+    /// POST /api/bridge runtime — present when `--bridge` was passed and
+    /// `pai_init` succeeded.
+    bridge: Option<Arc<BridgeState>>,
+}
+
+/// `*mut PaiRuntime` — Send+Sync because every op either holds
+/// `BridgeState::lock` or is whitelisted concurrent by
+/// `pai_ffi::bridge::bridge_op_concurrent` (it only touches the
+/// runtime's own internal locks).
+struct BridgeHandle(*mut pai_ffi::PaiRuntime);
+unsafe impl Send for BridgeHandle {}
+unsafe impl Sync for BridgeHandle {}
+
+struct BridgeState {
+    handle: BridgeHandle,
+    /// Serializes non-concurrent ops — the runtime uses `&mut self`
+    /// semantics on most calls.
+    lock: Mutex<()>,
+    /// Live event queue — the FFI event callback pushes here and the
+    /// web client's `pollEvents` op drains it (approvals, run progress).
+    events: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// Required bearer token on bridge calls when set (non-loopback).
+    token: Option<String>,
+}
+
+/// POST /api/bridge — `{op, arg?}` → the same call the native bridge
+/// would make through dart:ffi. Answers the Flutter *web* build.
+fn serve_bridge(
+    cx: &ServeCtx,
+    req: &mut tiny_http::Request,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    use std::io::Read as _;
+    let Some(b) = &cx.bridge else {
+        return serve_response(404, "text/plain", b"not found\n".to_vec());
+    };
+    if !req.method().as_str().eq_ignore_ascii_case("post") {
+        return serve_response(405, "text/plain", b"POST only\n".to_vec());
+    }
+    if let Some(t) = &b.token {
+        let ok = req.headers().iter().any(|h| {
+            (h.field
+                .as_str()
+                .as_str()
+                .eq_ignore_ascii_case("x-pai-bridge-token")
+                && h.value.as_str() == t.as_str())
+                || (h
+                    .field
+                    .as_str()
+                    .as_str()
+                    .eq_ignore_ascii_case("authorization")
+                    && h.value.as_str() == format!("Bearer {t}").as_str())
+        });
+        if !ok {
+            return serve_response(401, "text/plain", b"bridge token required\n".to_vec());
+        }
+    }
+    let mut body = Vec::new();
+    if req
+        .as_reader()
+        .take(pai_apps::serve::BODY_CAP as u64 + 1)
+        .read_to_end(&mut body)
+        .is_err()
+    {
+        return serve_response(400, "text/plain", b"bad request body\n".to_vec());
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return serve_response(
+            400,
+            "text/plain",
+            b"body must be JSON {op, arg?}\n".to_vec(),
+        );
+    };
+    let Some(op) = v["op"].as_str() else {
+        return serve_response(400, "text/plain", b"missing 'op'\n".to_vec());
+    };
+    let arg = v["arg"].as_str();
+    // The poll drain is the bridge's own queue — never touches the runtime.
+    if op == "pollEvents" {
+        let evs: Vec<serde_json::Value> = b.events.lock().unwrap().drain(..).collect();
+        return serve_response(
+            200,
+            "application/json",
+            serde_json::json!({"events": evs}).to_string().into_bytes(),
+        );
+    }
+    let res = if pai_ffi::bridge::bridge_op_concurrent(op) {
+        unsafe { pai_ffi::bridge::bridge_dispatch(b.handle.0, op, arg) }
+    } else {
+        let _g = b.lock.lock().unwrap();
+        unsafe { pai_ffi::bridge::bridge_dispatch(b.handle.0, op, arg) }
+    };
+    match res {
+        Ok(json) => serve_response(200, "application/json", json.into_bytes()),
+        Err(e) => serve_response(
+            400,
+            "application/json",
+            serde_json::json!({"error": e.to_string()})
+                .to_string()
+                .into_bytes(),
+        ),
+    }
 }
 
 fn serve_response(
@@ -6135,6 +6312,11 @@ fn serve_request(
     // `app.user.devices` name layer — a Host like
     // `notes.alice.devices` routes `/x` to `/apps/notes/x`, so names
     // stay valid no matter which device the app is placed on.
+    // Gateway API — checked before the name-layer rewrite so a Host like
+    // `<app>.<user>.devices` can't shadow it into an app route.
+    if path == "/api/bridge" {
+        return serve_bridge(cx, req);
+    }
     let mut named = false;
     if let Some(app) = req
         .headers()
@@ -6148,13 +6330,30 @@ fn serve_request(
     if path == "/" || path == "/apps" || path == "/apps/" {
         // Index: apps that opted into serving.
         let reg = pai_apps::AppRegistry::new(&cx.data_dir);
-        let mut lines = String::from("serve-enabled apps:\n");
+        let mut items = String::new();
         for (id, m) in reg.list().unwrap_or_default() {
             if m.app.serve {
-                lines.push_str(&format!("  /apps/{id}/\n"));
+                let esc = |s: &str| {
+                    s.replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                };
+                items.push_str(&format!(
+                    "<li><a href=\"/apps/{id}/\">{}</a> \
+                     <small>{id} · v{} · {:?}</small></li>",
+                    esc(&m.app.name),
+                    esc(&m.app.version),
+                    m.app.runtime
+                ));
             }
         }
-        return serve_response(200, "text/plain", lines.into_bytes());
+        let html = format!(
+            "<!doctype html><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+             <title>Personal AI apps</title>\
+             <body><h1>apps on this device</h1><ul>{items}</ul>"
+        );
+        return serve_response(200, "text/html; charset=utf-8", html.into_bytes());
     }
     let Some(rest) = path.strip_prefix("/apps/") else {
         return serve_response(404, "text/plain", b"not found\n".to_vec());

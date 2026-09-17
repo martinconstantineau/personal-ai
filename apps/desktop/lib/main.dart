@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:convert';
-import 'dart:io';
+import 'platform_config.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'pai_bridge.dart';
@@ -118,16 +118,10 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _init() async {
-    final dataDir = Platform.environment['PAI_DATA_DIR'] ??
-        (Platform.isAndroid
-            // The app's private files dir — always writable, no plugin
-            // needed (path_provider is absent: build host lacks symlink
-            // privilege).
-            ? '/data/data/com.example.pai_app/files'
-            : '${Directory.current.path}/.pai-data');
+    final dataDir = appDataDir();
     // 'auto' probes llama-server / Ollama / LM Studio, falls back to echo.
     _dataDir = dataDir;
-    final provider = Platform.environment['PAI_PROVIDER'] ?? 'auto';
+    final provider = appProvider();
     try {
       final bridge = await PaiBridge.start(
           {'data_dir': dataDir, 'provider': provider});
@@ -145,8 +139,7 @@ class _HomeShellState extends State<HomeShell> {
       _refreshUnread();
       _maybeWelcome();
     } catch (e) {
-      setState(() => _error = 'Core init failed: $e\n'
-          '(build the core: cargo build -p pai-ffi)');
+      setState(() => _error = 'Core init failed: $e\n$platformInitHint');
     }
   }
 
@@ -163,8 +156,7 @@ class _HomeShellState extends State<HomeShell> {
   /// First run: show the welcome once — a marker file in the data dir
   /// is enough; no account, nothing leaves the device.
   void _maybeWelcome() {
-    final marker = File('$_dataDir/.onboarded');
-    if (marker.existsSync()) return;
+    if (onboardingSeen(_dataDir)) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _helpDialog(firstRun: true);
     });
@@ -237,7 +229,7 @@ class _HomeShellState extends State<HomeShell> {
 
   void _dismissMarker() {
     try {
-      File('$_dataDir/.onboarded').writeAsStringSync('seen');
+      markOnboardingSeen(_dataDir);
     } catch (_) {}
   }
 

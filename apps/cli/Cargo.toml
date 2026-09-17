@@ -31,6 +31,7 @@ pai-workflows.workspace = true
 pai-notify.workspace = true
 pai-audit.workspace = true
 pai-apps.workspace = true
+pai-ffi.workspace = true
 pai-oauth.workspace = true
 pai-share.workspace = true
 serde.workspace = true
