@@ -399,11 +399,20 @@ fn pwa_manifest(pkg: &crate::AppPackage, base: &str) -> Vec<u8> {
 /// A default service worker: precaches the shell, network-first for
 /// navigations (fresh online, cached offline), cache-first for other
 /// in-scope GETs. Scoped to `base`, so it controls exactly the app.
+/// First `n` hex chars of a digest — no hex dep for four bytes.
+fn hex_prefix(b: &[u8; 32], n: usize) -> String {
+    b.iter().take(n / 2).map(|x| format!("{x:02x}")).collect()
+}
+
 fn pwa_sw(pkg: &crate::AppPackage, base: &str) -> Vec<u8> {
+    // Content digest in the name: redeploying the same version still
+    // invalidates — otherwise a stale SW keeps serving the old bundle.
+    let digest = hex_prefix(&pkg.content_digest, 8);
     let cache = format!(
-        "pai-{}-v{}",
+        "pai-{}-v{}-{}",
         pkg.manifest.app_id(),
-        pkg.manifest.app.version
+        pkg.manifest.app.version,
+        digest
     );
     let base_json = serde_json::to_string(&format!("{base}/")).unwrap_or_else(|_| "\"/\"".into());
     let cache_json = serde_json::to_string(&cache).unwrap();
