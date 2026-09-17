@@ -32,12 +32,19 @@ class _WebTransport implements BridgeTransport {
       };
 
   Future<dynamic> _post(String op, String? arg) async {
-    final resp = await html.HttpRequest.request(
-      _endpoint.toString(),
-      method: 'POST',
-      requestHeaders: _headers,
-      sendData: jsonEncode({'op': op, 'arg': ?arg}),
-    );
+    html.HttpRequest resp;
+    try {
+      resp = await html.HttpRequest.request(
+        _endpoint.toString(),
+        method: 'POST',
+        requestHeaders: _headers,
+        sendData: jsonEncode({'op': op, 'arg': ?arg}),
+      );
+    } catch (_) {
+      // Network-level failure (ProgressEvent/TypeError) — the gateway
+      // is down or restarting; surface words, not a minified class name.
+      throw StateError('gateway unreachable — is `pai serve --bridge` running?');
+    }
     // A 4xx still carries the runtime's {"error": …} JSON — return it
     // like the native transport does (PaiClient surfaces op errors as
     // maps, not exceptions).
