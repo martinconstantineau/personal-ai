@@ -165,6 +165,7 @@ fn req(method: &str, path: &str, query: &str, body: &[u8]) -> pai_apps::serve::S
             ("Connection".into(), "keep-alive".into()),
         ],
         body_b64: base64::engine::general_purpose::STANDARD.encode(body),
+        base: String::new(),
     }
 }
 
@@ -418,6 +419,7 @@ fn gateway(data_dir: PathBuf) -> String {
                         .map(|h| (h.field.as_str().to_string(), h.value.as_str().to_string()))
                         .collect(),
                     body_b64: base64::engine::general_purpose::STANDARD.encode(&body),
+                    base: format!("/apps/{id}"),
                 };
                 match pai_apps::app_serve_op(&data_dir, &id, &[sreq.to_json()]) {
                     Ok(env) => {

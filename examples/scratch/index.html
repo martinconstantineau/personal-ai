@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#5c6bc0">
+<title>Scratch Pad</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Scratch Pad</h1>
+  <span id="net" title="connection state"></span>
+</header>
+<main>
+  <form id="f">
+    <input id="t" placeholder="a quick note…" autocomplete="off" autofocus>
+    <button type="submit">add</button>
+  </form>
+  <ul id="notes"></ul>
+  <p id="empty">no notes yet — everything stays on this device (localStorage), online or off.</p>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

@@ -128,6 +128,10 @@ pub enum AppRuntime {
     /// Native desktop binary. Only installable on the platform it was
     /// built for; carries a stronger trust requirement.
     Native,
+    /// Static web bundle — `index.html` + assets served as files by
+    /// `pai serve` (PWA). Not executable; `entrypoint` is the document
+    /// served for `/` (defaults to `index.html`).
+    Web,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,17 +349,28 @@ impl AppPackage {
         let manifest_path = dir.join("manifest.toml");
         let manifest_bytes =
             std::fs::read(&manifest_path).map_err(|_| AppError::NoManifest(dir.to_path_buf()))?;
-        let manifest = AppManifest::parse(
+        let mut manifest = AppManifest::parse(
             std::str::from_utf8(&manifest_bytes)
                 .map_err(|_| AppError::Manifest("manifest.toml is not utf-8".into()))?,
         )?;
+        // Web bundles that don't name an entrypoint serve index.html.
+        if manifest.app.runtime == AppRuntime::Web
+            && manifest.app.entrypoint == default_entrypoint()
+        {
+            manifest.app.entrypoint = "index.html".into();
+        }
 
-        // Entrypoint must exist for wasm packages.
+        // Entrypoint must exist for wasm packages; web bundles need
+        // their landing document too.
         let entry = dir.join(&manifest.app.entrypoint);
-        if manifest.app.runtime == AppRuntime::Wasm && !entry.is_file() {
+        if matches!(manifest.app.runtime, AppRuntime::Wasm | AppRuntime::Web) && !entry.is_file() {
             return Err(AppError::Layout(format!(
-                "entrypoint {:?} missing for wasm runtime",
-                manifest.app.entrypoint
+                "entrypoint {:?} missing for {} runtime",
+                manifest.app.entrypoint,
+                match manifest.app.runtime {
+                    AppRuntime::Wasm => "wasm",
+                    _ => "web",
+                }
             )));
         }
 
@@ -490,15 +505,44 @@ impl AppPackage {
     }
 
     /// Scaffold a new app source project under `dir` (id slugified from
-    /// `name`): a `manifest.toml` to edit, plus a minimal Rust bin
-    /// (`Cargo.toml` + `src/main.rs`) that `pai apps build` compiles
-    /// for `wasm32-wasip1`.
-    pub fn init(dir: &Path, name: &str) -> AppResult<PathBuf> {
+    /// `name`): a `manifest.toml` to edit, plus either a minimal Rust bin
+    /// (`Cargo.toml` + `src/main.rs`) that `pai apps build` compiles for
+    /// `wasm32-wasip1`, or — with `web` — a static PWA skeleton
+    /// (`index.html` + `app.js` + `manifest.webmanifest`; the service
+    /// worker and icons are synthesized by `pai serve` unless the
+    /// package ships its own).
+    pub fn init(dir: &Path, name: &str, web: bool) -> AppResult<PathBuf> {
         let id = slugify(name);
         check_app_id(&id)?;
         let root = dir.join(&id);
         if root.exists() {
             return Err(AppError::Layout(format!("{root:?} already exists")));
+        }
+        if web {
+            std::fs::create_dir_all(&root)?;
+            std::fs::write(
+                root.join("manifest.toml"),
+                format!(
+                    "[app]\nid = \"{id}\"\nname = \"{name}\"\nversion = \"0.1.0\"\nruntime = \"web\"\nserve = true\n"
+                ),
+            )?;
+            std::fs::write(
+                root.join("index.html"),
+                format!(
+                    "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>{name}</title>\n<link rel=\"manifest\" href=\"manifest.webmanifest\">\n</head>\n<body>\n<h1>{name}</h1>\n<div id=\"app\"></div>\n<script src=\"app.js\"></script>\n</body>\n</html>\n"
+                ),
+            )?;
+            std::fs::write(
+                root.join("app.js"),
+                "document.getElementById('app').textContent = 'edit me — files in this directory are the app';\n",
+            )?;
+            std::fs::write(
+                root.join("manifest.webmanifest"),
+                format!(
+                    "{{\n  \"name\": \"{name}\",\n  \"short_name\": \"{id}\",\n  \"start_url\": \"./\",\n  \"scope\": \"./\",\n  \"display\": \"standalone\",\n  \"icons\": [\n    {{\"src\": \"icon-192.png\", \"sizes\": \"192x192\", \"type\": \"image/png\"}},\n    {{\"src\": \"icon-512.png\", \"sizes\": \"512x512\", \"type\": \"image/png\"}}\n  ]\n}}\n"
+                ),
+            )?;
+            return Ok(root);
         }
         std::fs::create_dir_all(root.join("src"))?;
         std::fs::write(
@@ -1250,7 +1294,7 @@ auto_migrate = true
     #[test]
     fn init_scaffolds_project() {
         let t = tmp();
-        let root = AppPackage::init(&t, "My Cool App").unwrap();
+        let root = AppPackage::init(&t, "My Cool App", false).unwrap();
         assert_eq!(root, t.join("my-cool-app"));
         for f in ["manifest.toml", "Cargo.toml", "src/main.rs"] {
             assert!(root.join(f).is_file(), "missing {f}");
@@ -1264,8 +1308,8 @@ auto_migrate = true
     #[test]
     fn init_refuses_existing_dir() {
         let t = tmp();
-        AppPackage::init(&t, "dup").unwrap();
-        assert!(AppPackage::init(&t, "dup").is_err());
+        AppPackage::init(&t, "dup", false).unwrap();
+        assert!(AppPackage::init(&t, "dup", false).is_err());
         let _ = std::fs::remove_dir_all(&t);
     }
 

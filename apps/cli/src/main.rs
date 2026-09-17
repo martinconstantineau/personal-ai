@@ -245,6 +245,11 @@ enum AppsCmd {
         /// Parent directory (default: current dir).
         #[arg(long)]
         dir: Option<String>,
+        /// Static web bundle instead of wasm: index.html + app.js +
+        /// manifest.webmanifest, `runtime = "web"`, `serve = true` —
+        /// `pai serve` installs it as an offline-capable PWA.
+        #[arg(long)]
+        web: bool,
     },
     /// Build a source dir into a verifiable package: Rust crate →
     /// wasm32-wasip1, or an existing package dir → copy + validate.
@@ -2329,15 +2334,20 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
         Cmd::Audio { cmd } => run_audio_cmds(cmd, &cfg, &store, &device).await?,
         Cmd::Media { cmd } => run_media_cmds(cmd, &cfg, &store, &device).await?,
         Cmd::Apps { cmd } => match cmd {
-            AppsCmd::Init { name, dir } => {
+            AppsCmd::Init { name, dir, web } => {
                 let base = match dir {
                     Some(d) => std::path::PathBuf::from(d),
                     None => std::env::current_dir().map_err(|e| Error::Other(e.to_string()))?,
                 };
-                let root = pai_apps::AppPackage::init(&base, name)
+                let root = pai_apps::AppPackage::init(&base, name, *web)
                     .map_err(|e| Error::InvalidInput(e.to_string()))?;
                 println!("created {}", root.display());
                 println!("next:    pai apps build {}", root.display());
+                if *web {
+                    println!(
+                        "         (static web app — `pai serve` answers it as an installable PWA)"
+                    );
+                }
             }
             AppsCmd::Build { dir, out, sign } => {
                 let out_dir = out
@@ -6125,6 +6135,7 @@ fn serve_request(
     // `app.user.devices` name layer — a Host like
     // `notes.alice.devices` routes `/x` to `/apps/notes/x`, so names
     // stay valid no matter which device the app is placed on.
+    let mut named = false;
     if let Some(app) = req
         .headers()
         .iter()
@@ -6132,6 +6143,7 @@ fn serve_request(
         .and_then(|h| parse_app_name(h.value.as_str(), &cx.user_slug))
     {
         path = format!("/apps/{app}{path}");
+        named = true;
     }
     if path == "/" || path == "/apps" || path == "/apps/" {
         // Index: apps that opted into serving.
@@ -6176,6 +6188,14 @@ fn serve_request(
             .map(|h| (h.field.as_str().to_string(), h.value.as_str().to_string()))
             .collect(),
         body_b64: b64.encode(&body),
+        // PWA links (manifest/sw/icons) are minted relative to where the
+        // browser mounted the app: root on name-layer hosts, the /apps
+        // path prefix otherwise.
+        base: if named {
+            String::new()
+        } else {
+            format!("/apps/{id}")
+        },
     };
     let arg = sreq.to_json();
     // Follow placement: an app active elsewhere is proxied over the

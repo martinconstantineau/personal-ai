@@ -4,6 +4,9 @@ Cargo.lock.bak
 
 # Flutter / Dart
 **/build/
+
+# App package build output (`pai apps build` → <src>/pkg)
+**/pkg/
 .dart_tool/
 .flutter-plugins
 .flutter-plugins-dependencies

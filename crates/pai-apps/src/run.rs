@@ -68,7 +68,7 @@ impl AppPackage {
     ) -> AppResult<RunOutput> {
         if self.manifest.app.runtime != AppRuntime::Wasm {
             return Err(AppError::Layout(
-                "native runtime is not executable — wasm only".into(),
+                "only wasm packages are executable — native/web are not run".into(),
             ));
         }
         let wasm_path = app_dir.join(&self.manifest.app.entrypoint);
