@@ -34,6 +34,17 @@ RAG citations (`pai docs`, Flutter Documents screen), and a filesystem
 jail for model-driven file reads**. See [docs/ROADMAP.md](docs/ROADMAP.md)
 for what's next and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
+## Downloads
+
+- **[Android APK (preview)](https://github.com/martinconstantineau/personal-ai/releases/tag/android-preview)** —
+  Flutter app + Rust core FFI for arm64-v8a / armeabi-v7a / x86_64.
+  Sideload with `adb install` or open the APK on-device. Rebuilt from
+  `main` as it moves — not a stable release.
+- **[Scratch Pad PWA package](https://github.com/martinconstantineau/personal-ai/releases/tag/android-preview)** —
+  signed example web app (`examples/scratch`). Deploy with
+  `pai apps deploy <pkg>`, then `pai serve` serves it as an
+  installable, offline-capable PWA.
+
 ## Quick start
 
 ```bash
