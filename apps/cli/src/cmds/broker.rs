@@ -169,6 +169,7 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
                     temperature: None,
                     max_tokens: None,
                     require_structured: false,
+                    system: None,
                 };
                 Ok(p.generate(&req).await?.text.into_bytes())
             }
@@ -271,6 +272,7 @@ impl pai_broker::rpc::OpHandler for BrokerOps {
             temperature: None,
             max_tokens: None,
             require_structured: false,
+            system: None,
         };
         let mut stream = p.stream(req);
         while let Some(ev) = stream.next().await {

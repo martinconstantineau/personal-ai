@@ -44,6 +44,7 @@ fn req(text: &str) -> AIRequest {
         temperature: None,
         max_tokens: None,
         require_structured: false,
+        system: None,
     }
 }
 

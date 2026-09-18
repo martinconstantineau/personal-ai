@@ -34,6 +34,10 @@ pub struct AIRequest {
     pub max_tokens: Option<u32>,
     /// Force the provider to emit the structured output protocol.
     pub require_structured: bool,
+    /// Optional system prompt override. When set, replaces the default
+    /// structured-protocol system message — used for freeform generation
+    /// (e.g. code-gen where the model writes file contents, not protocol).
+    pub system: Option<String>,
 }
 
 /// Minimal provider-neutral tool description given to models.
@@ -289,7 +293,45 @@ pub fn parse_action(text: &str) -> Option<ModelAction> {
         }
     }
     let json = &trimmed[start..end?];
-    serde_json::from_str::<ModelAction>(json).ok()
+    serde_json::from_str::<ModelAction>(json).ok().or_else(|| {
+        serde_json::from_str::<serde_json::Value>(json)
+            .ok()
+            .as_ref()
+            .and_then(bare_action)
+    })
+}
+
+/// Lenient recovery for the shapes small models actually emit: a bare
+/// `{"name": …, "arguments": …}` without the `type` tag, alternate key
+/// names (`tool`/`args`/`input`/`parameters`), and final-ish types
+/// (`answer`, `final_answer`, `response`). Anything that doesn't carry
+/// a usable name or content stays `None` → the run treats it as prose.
+fn bare_action(v: &serde_json::Value) -> Option<ModelAction> {
+    let ty = v.get("type").and_then(|t| t.as_str());
+    if let Some(name) = ["name", "tool", "tool_name", "function"]
+        .iter()
+        .find_map(|k| v.get(k).and_then(|c| c.as_str()))
+    {
+        if ty.is_none() || ty == Some("tool_call") {
+            let arguments = ["arguments", "args", "input", "parameters"]
+                .iter()
+                .find_map(|k| v.get(k).cloned())
+                .unwrap_or_else(|| serde_json::json!({}));
+            return Some(ModelAction::ToolCall {
+                name: name.into(),
+                arguments,
+            });
+        }
+    }
+    let content = ["content", "answer", "text", "response"]
+        .iter()
+        .find_map(|k| v.get(k).and_then(|c| c.as_str()))?;
+    match ty {
+        None | Some("final" | "answer" | "final_answer" | "response") => Some(ModelAction::Final {
+            content: content.into(),
+        }),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -495,7 +537,10 @@ impl LlamaServerProvider {
     fn to_wire(&self, req: &AIRequest) -> Vec<ChatMessage<'_>> {
         let mut out = vec![ChatMessage {
             role: "system",
-            content: protocol_prompt(&req.tools),
+            content: req
+                .system
+                .clone()
+                .unwrap_or_else(|| protocol_prompt(&req.tools)),
         }];
         for m in &req.messages {
             let text: String = m
@@ -565,13 +610,21 @@ impl InferenceProvider for LlamaServerProvider {
     }
 
     async fn generate(&self, req: &AIRequest) -> Result<GenerateResponse> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": req.model.clone().unwrap_or_else(|| self.model.clone()),
             "messages": self.to_wire(req),
             "temperature": req.temperature.unwrap_or(0.2),
             "max_tokens": req.max_tokens.unwrap_or(512),
             "stream": false,
         });
+        // Transport-level enforcement where the server supports it —
+        // llama.cpp's OpenAI endpoint accepts json_object mode, which
+        // guarantees the protocol JSON instead of hoping the model
+        // follows the prompt. Freeform calls (require_structured=false)
+        // skip it.
+        if req.require_structured {
+            body["response_format"] = serde_json::json!({"type": "json_object"});
+        }
         let resp = self
             .client
             .post(format!("{}/v1/chat/completions", self.base_url))
@@ -808,50 +861,60 @@ pub struct DetectedEndpoint {
     pub embed_only: Vec<String>,
 }
 
+/// Probe a single endpoint's `/v1/models`. Used by [`detect_endpoints`]
+/// for the well-known ports, and by the app for its self-managed
+/// llama-server port (a leftover child from a previous launch still
+/// counts as a live endpoint).
+pub async fn detect_endpoint_at(
+    provider: &str,
+    base_url: &str,
+    timeout: Duration,
+) -> Option<DetectedEndpoint> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{base_url}/v1/models"))
+        .timeout(timeout)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let models: Vec<String> = body["data"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m["id"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let chat_model = pick_chat_model(&models);
+    let embed_only = models
+        .iter()
+        .filter(|m| is_embedding_model(m))
+        .cloned()
+        .collect();
+    Some(DetectedEndpoint {
+        provider: provider.to_string(),
+        base_url: base_url.to_string(),
+        models,
+        chat_model,
+        embed_only,
+    })
+}
+
 /// Probe every candidate's `/v1/models` concurrently; return the live ones.
 pub async fn detect_endpoints(timeout: Duration) -> Vec<DetectedEndpoint> {
-    let client = reqwest::Client::new();
-    let probes = LOCAL_ENDPOINT_CANDIDATES.iter().map(|(name, url)| {
-        let client = client.clone();
-        async move {
-            let resp = client
-                .get(format!("{url}/v1/models"))
-                .timeout(timeout)
-                .send()
-                .await
-                .ok()?;
-            if !resp.status().is_success() {
-                return None;
-            }
-            let body: serde_json::Value = resp.json().await.ok()?;
-            let models: Vec<String> = body["data"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|m| m["id"].as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let chat_model = pick_chat_model(&models);
-            let embed_only = models
-                .iter()
-                .filter(|m| is_embedding_model(m))
-                .cloned()
-                .collect();
-            Some(DetectedEndpoint {
-                provider: name.to_string(),
-                base_url: url.to_string(),
-                models,
-                chat_model,
-                embed_only,
-            })
-        }
-    });
-    futures::future::join_all(probes)
-        .await
-        .into_iter()
-        .flatten()
-        .collect()
+    futures::future::join_all(
+        LOCAL_ENDPOINT_CANDIDATES
+            .iter()
+            .map(|(name, url)| detect_endpoint_at(name, url, timeout)),
+    )
+    .await
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Pick a chat-capable model from an endpoint's reported list.
@@ -924,6 +987,52 @@ mod tests {
     #[test]
     fn trust_levels_order() {
         assert!(TrustLevel::Policy > TrustLevel::Untrusted);
+    }
+
+    #[test]
+    fn parses_bare_tool_call_shapes() {
+        // Small models drop the `type` tag or rename keys — recoverable.
+        assert_eq!(
+            parse_action(r#"{"name":"fs.write","arguments":{"path":"a.py","content":"x"}}"#),
+            Some(ModelAction::ToolCall {
+                name: "fs.write".into(),
+                arguments: serde_json::json!({"path":"a.py","content":"x"}),
+            })
+        );
+        assert_eq!(
+            parse_action(r#"{"tool":"fs.list","args":{"path":"."}}"#),
+            Some(ModelAction::ToolCall {
+                name: "fs.list".into(),
+                arguments: serde_json::json!({"path":"."}),
+            })
+        );
+        assert_eq!(
+            parse_action(r#"{"type":"tool_call","tool":"shell.exec","input":{"command":"ls"}}"#),
+            Some(ModelAction::ToolCall {
+                name: "shell.exec".into(),
+                arguments: serde_json::json!({"command":"ls"}),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_lenient_final_shapes() {
+        assert_eq!(
+            parse_action(r#"{"type":"answer","answer":"42"}"#),
+            Some(ModelAction::Final {
+                content: "42".into()
+            })
+        );
+        // No type tag at all but an answer-shaped key.
+        assert_eq!(
+            parse_action(r#"{"response":"done"}"#),
+            Some(ModelAction::Final {
+                content: "done".into()
+            })
+        );
+        // Random JSON without usable keys stays unparsed → prose path.
+        assert_eq!(parse_action(r#"{"foo":1,"bar":2}"#), None);
+        assert_eq!(parse_action(r#"{"type":"weird","x":1}"#), None);
     }
 
     #[test]

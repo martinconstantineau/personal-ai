@@ -663,6 +663,26 @@ Shipped:
   canonical path jail to not-yet-existing write targets; `shell.exec`
   is `ComputeLocal`-gated + High risk so each command prompts by
   default. Stdout/stderr capped at 32 KiB with kill-on-timeout.
+- **Always-responsive agent** — three layers so the assistant answers
+  without babysitting external servers:
+  1. *Self-serve*: `auto` provider with no live endpoint spawns
+     llama-server itself for the smallest installed text model on a
+     managed port (8090), reusing a leftover server from a previous
+     launch; `pai_models_serve` shares the same spawn+wait helper.
+  2. *Intent fast-path*: strong local intents (write/run/read/list/
+     delete files, remember, doc search, capability questions) are
+     classified in Rust and executed through the same `execute_tool`
+     gate — permissions, approvals, audit, and UI events unchanged.
+     The model is only asked for file *contents* (freeform `system`
+     prompt, `require_structured=false`), never the tool protocol; if
+     it's unreachable or returns prose, a per-language scaffold still
+     lands a working file.
+  3. *Protocol recovery*: `response_format: json_object` constrains
+     structured turns on servers that support it; `parse_action`
+     accepts the bare `{"name"/"tool":…, "arguments"/"args"/"input":…}`
+     shapes small models emit; and one bounded correction round retries
+     output that looks like a failed tool call before it's accepted as
+     a prose answer.
 
 ## Known technical debt (tracked, not hidden)
 

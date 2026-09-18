@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub mod appops;
+pub mod fastpath;
 pub mod store;
 use store::run_state_name;
 pub use store::{ConversationStore, RunStore};
@@ -382,8 +383,25 @@ impl AgentRuntime {
             MemoryScopeQuery::Scoped(c, false) => Some(c),
             _ => None,
         };
+        // Deterministic fast-path: strong local intents (write/run/read/
+        // list files, remember, doc search, capability questions) are
+        // decided in Rust and run through the same permission/approval/
+        // audit pipeline — the model only has to produce file contents,
+        // never the tool-call protocol. Fresh runs only; resumed runs
+        // re-enter the loop.
+        if resume_from.is_none() && !user_text.is_empty() && !cancel.cancelled() {
+            if let Some(intent) = fastpath::classify(&user_text) {
+                return self
+                    .fast_path(
+                        def, &run, conv, intent, &provider, approval, emit, mem_scope,
+                    )
+                    .await;
+            }
+        }
         let tools = self.tool_specs(def);
         let mut answer: Option<String> = None;
+        // One correction round per run for malformed tool-call output.
+        let mut parse_retries = 1u8;
 
         while step < self.max_steps {
             if cancel.cancelled() {
@@ -403,19 +421,53 @@ impl AgentRuntime {
                 require_structured: true,
                 ..Default::default()
             };
-            let (resp, streamed) = match self.generate_step(&provider, req, stream, emit).await {
-                Ok(x) => x,
-                Err(e) => {
-                    self.audit_error(&run, &e);
-                    let state = if matches!(e, Error::Timeout) {
-                        RunState::TimedOut
-                    } else {
-                        RunState::Failed
-                    };
-                    self.finish_run(run, None, state, emit);
-                    return Err(e);
+            let (mut resp, mut streamed) =
+                match self.generate_step(&provider, req, stream, emit).await {
+                    Ok(x) => x,
+                    Err(e) => {
+                        self.audit_error(&run, &e);
+                        let state = if matches!(e, Error::Timeout) {
+                            RunState::TimedOut
+                        } else {
+                            RunState::Failed
+                        };
+                        self.finish_run(run, None, state, emit);
+                        return Err(e);
+                    }
+                };
+            // Protocol recovery: output that *looks like* a malformed
+            // tool call gets one correction round — a system message
+            // restating the contract — before it's accepted as a final
+            // answer. Bounded per run so a chatty model isn't retried
+            // forever.
+            let mut corrected = false;
+            if parse_retries > 0
+                && resp.action.is_none()
+                && pai_inference::parse_action(&resp.text).is_none()
+                && looks_like_tool_attempt(&resp.text, &tools)
+            {
+                parse_retries -= 1;
+                messages.push(Message {
+                    id: MessageId::new(),
+                    conversation: conv,
+                    role: Role::System,
+                    created_at: now(),
+                    content: vec![Content::text(PROTOCOL_CORRECTION)],
+                    trust: TrustLevel::Policy,
+                });
+                let retry = AIRequest {
+                    messages: messages.clone(),
+                    tools: tools.clone(),
+                    model: def.model.clone(),
+                    require_structured: true,
+                    ..Default::default()
+                };
+                if let Ok((r2, s2)) = self.generate_step(&provider, retry, stream, emit).await {
+                    resp = r2;
+                    streamed |= s2;
+                    corrected = true;
                 }
-            };
+            }
             self.audit(
                 &run,
                 AuditKind::ModelResponded,
@@ -423,6 +475,7 @@ impl AgentRuntime {
                 None,
                 serde_json::json!({
                     "step": step,
+                    "corrected": corrected,
                     "action": match &resp.action {
                         Some(pai_inference::ModelAction::ToolCall { name, .. }) => {
                             serde_json::json!({"type": "tool_call", "tool": name})
@@ -1011,6 +1064,30 @@ struct ToolInvocation<'a> {
     conv: ConversationId,
     /// Isolated-conversation tag for memory writes inside the tool.
     memory_scope: Option<ConversationId>,
+}
+
+/// Correction sent when the model emits malformed near-protocol output.
+/// TrustLevel::Policy — it's our contract restated, not user input.
+const PROTOCOL_CORRECTION: &str = "Your previous reply was not valid \
+protocol JSON. Respond with ONLY one JSON object — \
+{\"type\":\"tool_call\",\"name\":\"<tool>\",\"arguments\":{...}} to call \
+a tool, or {\"type\":\"final\",\"content\":\"<answer>\"} for a final \
+answer. No other text.";
+
+/// Does this unparseable output look like a *failed* tool call rather
+/// than a prose answer? Only then is a correction round worth a
+/// round-trip: braces plus protocol-ish keys or a registered tool name.
+fn looks_like_tool_attempt(text: &str, tools: &[pai_inference::ToolSpec]) -> bool {
+    let t = text.trim();
+    if !t.contains('{') {
+        return false;
+    }
+    let l = t.to_lowercase();
+    l.contains("\"name\"")
+        || l.contains("\"tool")
+        || l.contains("\"arguments\"")
+        || l.contains("\"action\"")
+        || tools.iter().any(|s| l.contains(&s.name.to_lowercase()))
 }
 
 fn tool_result_msg(

@@ -161,6 +161,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
     let mut server_url = cfg
         .server_url
         .unwrap_or_else(|| "http://127.0.0.1:8080".into());
+    let mut llama_child: Option<std::process::Child> = None;
     if provider_name == "auto" {
         match rt.block_on(pai_inference::detect_endpoints(Duration::from_secs(2))) {
             found if !found.is_empty() => {
@@ -171,7 +172,24 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
                 }
                 provider_name = "llama-server".into();
             }
-            _ => provider_name = "echo".into(),
+            _ => {
+                // No live endpoint — self-serve an installed model when
+                // llama-server is on PATH, so the app answers without the
+                // user babysitting Ollama/llama.cpp. Echo is the last
+                // resort: the agent fast-path still answers local
+                // intents deterministically without a model.
+                match auto_serve(&rt, &store, &data_dir) {
+                    Some((url, slug, child)) => {
+                        server_url = url;
+                        if model.is_none() {
+                            model = slug;
+                        }
+                        provider_name = "llama-server".into();
+                        llama_child = child;
+                    }
+                    None => provider_name = "echo".into(),
+                }
+            }
         }
     }
 
@@ -348,7 +366,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         gitlab: RwLock::new(gitlab),
         voice,
         server_url,
-        llama_child: Mutex::new(None),
+        llama_child: Mutex::new(llama_child),
         serving_slug: Mutex::new(None),
     })
 }
@@ -1939,6 +1957,88 @@ pub unsafe extern "C" fn pai_status(handle: *mut PaiRuntime) -> *mut c_char {
 
 /// Point chat at an OpenAI-compatible endpoint — shared by
 /// `pai_set_provider` and `pai_models_serve`.
+/// Port the app manages its own llama-server on — kept off the
+/// well-known list (8080) so auto-detection still finds *user* servers.
+const MANAGED_PORT: u16 = 8090;
+
+/// Spawn `llama-server` for `model_path` on `port`, polling once a
+/// second until the endpoint answers or `wait_secs` elapses. Returns
+/// `(child, ready)` — a still-loading live process is returned too;
+/// only spawn failure or early exit is `Err`.
+fn spawn_llama_server(
+    rt: &tokio::runtime::Runtime,
+    bin: &std::path::Path,
+    model_path: &std::path::Path,
+    port: u16,
+    wait_secs: u64,
+) -> std::result::Result<(std::process::Child, bool), String> {
+    let mut child = std::process::Command::new(bin)
+        .args([
+            "-m",
+            &model_path.to_string_lossy(),
+            "--port",
+            &port.to_string(),
+            "--host",
+            "127.0.0.1",
+        ])
+        .spawn()
+        .map_err(|e| format!("spawn llama-server: {e}"))?;
+    let url = format!("http://127.0.0.1:{port}");
+    let up = rt.block_on(async {
+        for _ in 0..wait_secs {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if let Ok(Some(status)) = child.try_wait() {
+                return Err(format!("llama-server exited early: {status}"));
+            }
+            if pai_inference::detect_endpoint_at("llama-server", &url, Duration::from_millis(400))
+                .await
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })?;
+    Ok((child, up))
+}
+
+/// `auto` provider with no live endpoint: reuse a managed server left
+/// on [`MANAGED_PORT`] by a previous launch, else spawn llama-server for
+/// the smallest installed text-capable model. Returns `(url, model,
+/// child)` — `child` is `None` when an existing server was reused and
+/// `model` comes from the endpoint's own report when reused.
+fn auto_serve(
+    rt: &tokio::runtime::Runtime,
+    store: &Arc<Store>,
+    data_dir: &std::path::Path,
+) -> Option<(String, Option<String>, Option<std::process::Child>)> {
+    let url = format!("http://127.0.0.1:{MANAGED_PORT}");
+    if let Some(ep) = rt.block_on(pai_inference::detect_endpoint_at(
+        "llama-server",
+        &url,
+        Duration::from_millis(400),
+    )) {
+        return Some((ep.base_url, ep.chat_model, None));
+    }
+    let bin = pai_inference::find_in_path("llama-server")?;
+    let mgr = ModelManager::new(store.clone(), data_dir);
+    let pick = mgr
+        .list()
+        .ok()?
+        .into_iter()
+        .filter(|(m, installed, path)| {
+            *installed
+                && m.capabilities.contains(&ModelCapability::TextGeneration)
+                && path.as_ref().map(|p| p.exists()).unwrap_or(false)
+        })
+        // Smallest model first — fastest to load on this machine.
+        .min_by_key(|(m, _, _)| m.size_bytes)?;
+    let slug = pick.0.slug.clone();
+    let path = pick.2?;
+    let (child, _ready) = spawn_llama_server(rt, &bin, &path, MANAGED_PORT, 15).ok()?;
+    Some((url, Some(slug), Some(child)))
+}
+
 fn apply_provider(rt: &mut PaiRuntime, base_url: &str, model: &str) {
     rt.server_url = base_url.to_string();
     rt.def.model = Some(model.to_string());
@@ -2121,45 +2221,15 @@ pub unsafe extern "C" fn pai_models_serve(
     if let Some(mut c) = rt.llama_child.lock().unwrap().take() {
         let _ = c.kill();
     }
-    let mut child = match std::process::Command::new(&bin)
-        .args([
-            "-m",
-            &path.to_string_lossy(),
-            "--port",
-            &port.to_string(),
-            "--host",
-            "127.0.0.1",
-        ])
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return to_c(serde_json::json!({
-                "error": format!("spawn llama-server: {e}")
-            }))
-        }
+    let (mut child, up) = match spawn_llama_server(&rt.rt, &bin, &path, port, 45) {
+        Ok(x) => x,
+        Err(e) => return to_c(serde_json::json!({"error": e})),
     };
-    let url = format!("http://127.0.0.1:{port}");
-    let outcome: std::result::Result<(), String> = rt.rt.block_on(async {
-        for _ in 0..45 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            if let Ok(Some(status)) = child.try_wait() {
-                return Err(format!("llama-server exited early: {status}"));
-            }
-            if pai_inference::detect_endpoints(Duration::from_millis(400))
-                .await
-                .iter()
-                .any(|e| e.base_url == url)
-            {
-                return Ok(());
-            }
-        }
-        Err("llama-server did not come up in 45s".into())
-    });
-    if let Err(e) = outcome {
+    if !up {
         let _ = child.kill();
-        return to_c(serde_json::json!({"error": e}));
+        return to_c(serde_json::json!({"error": "llama-server did not come up in 45s"}));
     }
+    let url = format!("http://127.0.0.1:{port}");
     *rt.llama_child.lock().unwrap() = Some(child);
     *rt.serving_slug.lock().unwrap() = Some(slug.to_string());
     apply_provider(rt, &url, slug);
