@@ -41,7 +41,9 @@ export PATH="/c/Users/Marti/src/flutter/bin:$PATH"
 export ANDROID_SDK_ROOT="C:/Users/Marti/src/android-sdk"
 scripts/build_android_ffi.sh            # needs OPENSSL_OUT=/c/Users/Marti/src/ossl-out
 cd apps/desktop && flutter build apk --release     # or appbundle
-flutter build windows --release --no-tree-shake-icons  # tree-shaking drops icons referenced via record fields (e.g. _dests) — Media/help icons render blank without this; then copy target/release/pai_ffi.dll next to pai_app.exe
+flutter build windows --release        # then copy target/release/pai_ffi.dll next to pai_app.exe
+# (icon tree-shaking is fine now: nav icons live in flat const lists in nav.dart —
+#  IconData inside const records was shaken, which is why --no-tree-shake-icons existed)
 ```
 
 ## Git

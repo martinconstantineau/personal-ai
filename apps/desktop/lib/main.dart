@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'platform_config.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'nav.dart';
 import 'pai_bridge.dart';
 import 'theme.dart';
 
@@ -16,26 +17,55 @@ class PaiApp extends StatefulWidget {
 }
 
 class _PaiAppState extends State<PaiApp> {
-  ThemeMode _mode = ThemeMode.system;
   String _dataDir = '';
+  Map<String, dynamic> _prefs = const {};
+  ThemeMode _mode = ThemeMode.system;
+  AppAccent _accent = AppAccent.teal;
+
+  /// 'compact' | 'standard' | 'large' — drives MediaQuery.textScaler.
+  String _textScale = 'standard';
+  double get _scaleFactor => switch (_textScale) {
+        'compact' => 0.92,
+        'large' => 1.12,
+        _ => 1.0,
+      };
 
   @override
   void initState() {
     super.initState();
     _dataDir = appDataDir();
-    _mode = switch (themeMode(_dataDir)) {
+    _prefs = loadPrefs(_dataDir);
+    _applyPrefs();
+  }
+
+  /// Re-derive typed state from the prefs map.
+  void _applyPrefs() {
+    _mode = switch ('${_prefs['theme_mode'] ?? 'system'}') {
       'light' => ThemeMode.light,
       'dark' => ThemeMode.dark,
       _ => ThemeMode.system,
     };
+    _accent = switch ('${_prefs['accent']}') {
+      'brass' => AppAccent.brass,
+      'cobalt' => AppAccent.cobalt,
+      _ => AppAccent.teal,
+    };
+    final ts = '${_prefs['text_scale'] ?? 'standard'}';
+    _textScale = ts == 'compact' || ts == 'large' ? ts : 'standard';
   }
 
-  /// Persist + apply a theme mode — shared by the rail toggle and the
-  /// Settings segmented control.
-  void _setTheme(ThemeMode m) {
-    setState(() => _mode = m);
-    saveThemeMode(_dataDir, m.name);
+  /// Persist + apply one preference — the single funnel every settings
+  /// control writes through.
+  void _setPref(String key, Object? value) {
+    setState(() {
+      _prefs = Map<String, dynamic>.of(_prefs)..[key] = value;
+      _applyPrefs();
+    });
+    savePrefs(_dataDir, _prefs);
   }
+
+  /// Theme mode — shared by the rail toggle and Settings.
+  void _setTheme(ThemeMode m) => _setPref('theme_mode', m.name);
 
   /// Rail toggle — system → light → dark.
   void _cycleTheme() => _setTheme(switch (_mode) {
@@ -48,13 +78,20 @@ class _PaiAppState extends State<PaiApp> {
   Widget build(BuildContext context) => MaterialApp(
         title: 'Personal AI',
         debugShowCheckedModeBanner: false,
-        theme: AppTheme.light(),
-        darkTheme: AppTheme.dark(),
+        theme: AppTheme.light(accent: _accent),
+        darkTheme: AppTheme.dark(accent: _accent),
         themeMode: _mode,
+        // Text scale is a pref, not the OS's — applied app-wide here.
+        builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(_scaleFactor)),
+            child: child ?? const SizedBox.shrink()),
         home: HomeShell(
             themeMode: _mode,
             onThemeCycle: _cycleTheme,
-            onThemeMode: _setTheme),
+            onThemeMode: _setTheme,
+            prefs: _prefs,
+            onPref: _setPref),
       );
 }
 
@@ -66,89 +103,32 @@ class HomeShell extends StatefulWidget {
       {super.key,
       required this.themeMode,
       required this.onThemeCycle,
-      required this.onThemeMode});
+      required this.onThemeMode,
+      required this.prefs,
+      required this.onPref});
   final ThemeMode themeMode;
   final VoidCallback onThemeCycle;
   final ValueChanged<ThemeMode> onThemeMode;
+
+  /// Live prefs map + writer — Settings edits ride through these, and
+  /// the shell reads badge toggles from the same source.
+  final Map<String, dynamic> prefs;
+  final void Function(String key, Object? value) onPref;
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
 
 /// The surfaces, in rail order — shared by the wide rail, the
-/// compact icon-rail, and the narrow bottom bar.
-const _dests = [
-  (Icons.chat_bubble_outline, 'Chat'),
-  (Icons.apps_outlined, 'Apps'),
-  (Icons.devices_outlined, 'Devices'),
-  (Icons.notifications_outlined, 'Alerts'),
-  (Icons.psychology_outlined, 'Memories'),
-  (Icons.description_outlined, 'Documents'),
-  (Icons.mail_outline, 'Email'),
-  (Icons.receipt_long_outlined, 'Activity'),
-  (Icons.policy_outlined, 'Permissions'),
-  (Icons.music_note_outlined, 'Media'),
-  (Icons.merge_type_outlined, 'GitLab'),
-  (Icons.settings_outlined, 'Settings'),
-];
-
-/// Slash-command grammar: `/verb [arg]` typed in the chat input runs
-/// locally instead of going to the model. Nav entries jump rails; the
-/// rest call existing bridge ops.
-const _cmds = <(String, String, String)>[
-  ('new', '', 'Start a new chat'),
-  ('rename', '<title>', 'Rename this chat'),
-  ('model', '<slug>', 'Serve a model pack for chat'),
-  ('sync', '', 'Sync with paired devices now'),
-  ('export', '', 'Copy this transcript to the clipboard'),
-  ('apps', '', 'Open Apps'),
-  ('devices', '', 'Open Devices'),
-  ('alerts', '', 'Open Alerts'),
-  ('memories', '', 'Open Memories'),
-  ('docs', '', 'Open Documents'),
-  ('email', '', 'Open Email'),
-  ('activity', '', 'Open Activity'),
-  ('permissions', '', 'Open Permissions'),
-  ('media', '', 'Open Media'),
-  ('gitlab', '', 'Open GitLab'),
-  ('settings', '', 'Open Settings'),
-  ('help', '', 'List these commands'),
-];
-
-/// verb → rail destination index for the navigation commands.
-const _navCmds = {
-  'apps': 1,
-  'devices': 2,
-  'alerts': 3,
-  'memories': 4,
-  'docs': 5,
-  'email': 6,
-  'activity': 7,
-  'permissions': 8,
-  'media': 9,
-  'gitlab': 10,
-  'settings': 11,
-};
-
-/// Ctrl+1..9,0 jump straight to a rail destination.
-const _railKeys = [
-  LogicalKeyboardKey.digit1,
-  LogicalKeyboardKey.digit2,
-  LogicalKeyboardKey.digit3,
-  LogicalKeyboardKey.digit4,
-  LogicalKeyboardKey.digit5,
-  LogicalKeyboardKey.digit6,
-  LogicalKeyboardKey.digit7,
-  LogicalKeyboardKey.digit8,
-  LogicalKeyboardKey.digit9,
-  LogicalKeyboardKey.digit0,
-];
-
+/// Nav destinations, slash commands, and rail shortcuts live in
+/// `nav.dart` — flat const lists, so the icon font tree-shaker sees
+/// every glyph and tests can assert the wiring.
 class _HomeShellState extends State<HomeShell> {
   PaiBridge? _pai;
   String? _error;
   String _dataDir = '';
   int _index = 0;
   int _unread = 0;
+  int _unreadMail = 0;
   Map<String, dynamic> _status = const {};
   StreamSubscription? _statusSub;
   StreamSubscription? _uiSub;
@@ -193,6 +173,13 @@ class _HomeShellState extends State<HomeShell> {
       final r = await _pai!.notifyList(unreadOnly: true);
       if (mounted) {
         setState(() => _unread = (r['unread'] as num? ?? 0).toInt());
+      }
+    } catch (_) {}
+    try {
+      final m = await _pai!.emailSearch(unreadOnly: true, limit: 50);
+      if (mounted) {
+        setState(() =>
+            _unreadMail = (m['results'] as List? ?? const []).length);
       }
     } catch (_) {}
   }
@@ -246,6 +233,8 @@ class _HomeShellState extends State<HomeShell> {
                     style: Theme.of(ctx).textTheme.titleSmall)),
             const SizedBox(height: AppSpacing.sm),
             const _ShortcutRow('Ctrl+1-9,0', 'jump to a section'),
+            const _ShortcutRow('Ctrl+P', 'command palette — navigate & search'),
+            const _ShortcutRow('Ctrl+G ,', 'GitLab · Settings'),
             const _ShortcutRow('/', 'slash commands — /help lists them'),
             const _ShortcutRow('Ctrl+K', 'focus the message field'),
             const _ShortcutRow('Ctrl+N', 'new chat'),
@@ -279,7 +268,55 @@ class _HomeShellState extends State<HomeShell> {
       _index = i;
       _visited.add(i);
     });
-    if (i == 3 || _unread > 0) _refreshUnread();
+    if (i == 3 || i == 6 || _unread > 0 || _unreadMail > 0) {
+      _refreshUnread();
+    }
+  }
+
+  /// Ctrl+P — destinations, actions, and a federated search over
+  /// docs, chats, and memories.
+  void _palette() {
+    if (_pai == null) return;
+    showDialog(
+        context: context,
+        builder: (ctx) => _CommandPalette(
+            bridge: _pai!,
+            onNavigate: (i) {
+              Navigator.of(ctx).pop();
+              _select(i);
+            },
+            onConversation: (id) {
+              Navigator.of(ctx).pop();
+              _select(0);
+              _chatKey.currentState?.openConversation(id);
+            },
+            onAction: (a) {
+              Navigator.of(ctx).pop();
+              _paletteAction(a);
+            }));
+  }
+
+  Future<void> _paletteAction(String action) async {
+    switch (action) {
+      case 'new':
+        _select(0);
+        _chatKey.currentState?.newConversation();
+      case 'focus':
+        _select(0);
+        _chatKey.currentState?.focusInput();
+      case 'sync':
+        final r = await _pai!.syncNow();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(r['error'] != null
+                ? 'Sync failed: ${r['error']}'
+                : 'Synced — pushed ${r['pushed']}, pulled '
+                    '${r['pulled']}, skipped ${r['skipped']}.')));
+      case 'theme':
+        widget.onThemeCycle();
+      case 'help':
+        _helpDialog();
+    }
   }
 
   @override
@@ -298,12 +335,21 @@ class _HomeShellState extends State<HomeShell> {
     return brand.success;
   }
 
-  /// Destination icon — Alerts carries the unread-count badge.
+  /// Destination icon — Alerts and Email carry unread-count badges,
+  /// each gated by its Notifications pref.
   Widget _navIcon(int i) {
-    final icon = Icon(_dests[i].$1);
-    if (i != 3) return icon;
-    return Badge.count(
-        count: _unread, isLabelVisible: _unread > 0, child: icon);
+    final icon = Icon(destIcons[i]);
+    if (i == 3 && widget.prefs['badge_alerts'] != false) {
+      return Badge.count(
+          count: _unread, isLabelVisible: _unread > 0, child: icon);
+    }
+    if (i == 6 && widget.prefs['badge_email'] != false) {
+      return Badge.count(
+          count: _unreadMail,
+          isLabelVisible: _unreadMail > 0,
+          child: icon);
+    }
+    return icon;
   }
 
   String _healthMsg() {
@@ -345,6 +391,8 @@ class _HomeShellState extends State<HomeShell> {
             bridge: pai,
             themeMode: widget.themeMode,
             onThemeMode: widget.onThemeMode,
+            prefs: widget.prefs,
+            onPref: widget.onPref,
             onNavigate: _select,
             onHelp: _helpDialog);
       default:
@@ -372,8 +420,10 @@ class _HomeShellState extends State<HomeShell> {
     }
     return CallbackShortcuts(
       bindings: {
-        for (var i = 0; i < _railKeys.length; i++)
-          SingleActivator(_railKeys[i], control: true): () => _select(i),
+        for (var i = 0; i < railKeys.length; i++)
+          SingleActivator(railKeys[i], control: true): () => _select(i),
+        for (final MapEntry(:key, :value) in extraNavKeys.entries)
+          key: () => _select(value),
         const SingleActivator(LogicalKeyboardKey.keyK, control: true):
             () {
           _select(0);
@@ -384,15 +434,17 @@ class _HomeShellState extends State<HomeShell> {
           _select(0);
           _chatKey.currentState?.newConversation();
         },
+        const SingleActivator(LogicalKeyboardKey.keyP, control: true):
+            _palette,
         const SingleActivator(LogicalKeyboardKey.f1): _helpDialog,
       },
       child: LayoutBuilder(
         builder: (_, c) {
           final content = IndexedStack(
               index: _index,
-              children: List.generate(_dests.length, _tab));
+              children: List.generate(destLabels.length, _tab));
           // Narrow windows (and the Android build): bottom bar with
-          // labels on the selected destination only — all ten fit.
+          // labels on the selected destination only — all twelve fit.
           if (c.maxWidth < 640) {
             return Scaffold(
               body: content,
@@ -402,24 +454,24 @@ class _HomeShellState extends State<HomeShell> {
                 labelBehavior:
                     NavigationDestinationLabelBehavior.onlyShowSelected,
                 destinations: [
-                  for (var i = 0; i < _dests.length; i++)
+                  for (var i = 0; i < destLabels.length; i++)
                     NavigationDestination(
-                        icon: _navIcon(i), label: _dests[i].$2),
+                        icon: _navIcon(i), label: destLabels[i]),
                 ],
               ),
             );
           }
           final wide = c.maxWidth > 1120;
-          // Ten destinations outgrow short windows — let the rail scroll.
+          // The destinations outgrow short windows — let the rail scroll.
           // SizedBox keeps height bounded so the trailing health dot can
           // still dock at the bottom on tall windows.
           final rail = LayoutBuilder(
             builder: (_, rc) {
-              final overflow = rc.maxHeight < _dests.length * 72 + 144;
+              final overflow = rc.maxHeight < destLabels.length * 72 + 144;
               final scrollable = SingleChildScrollView(
                 child: SizedBox(
                   height: math.max(
-                      rc.maxHeight, _dests.length * 72 + 144),
+                      rc.maxHeight, destLabels.length * 72 + 144),
                   child: NavigationRail(
                     selectedIndex: _index,
                     onDestinationSelected: _select,
@@ -465,14 +517,14 @@ class _HomeShellState extends State<HomeShell> {
                       ),
                     ),
                     destinations: [
-                      for (var i = 0; i < _dests.length; i++)
+                      for (var i = 0; i < destLabels.length; i++)
                         NavigationRailDestination(
                             icon: wide
                                 ? _navIcon(i)
                                 : Tooltip(
-                                    message: _dests[i].$2,
+                                    message: destLabels[i],
                                     child: _navIcon(i)),
-                            label: Text(_dests[i].$2)),
+                            label: Text(destLabels[i])),
                     ],
                   ),
                 ),
@@ -527,6 +579,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Ctrl+N lands here — same as the drawer's New chat button.
   void newConversation() => _newConversation();
+
+  /// Palette entry point — open a conversation by id.
+  void openConversation(String id) => _selectConversation(id);
   final _scroll = ScrollController();
   PaiBridge? get _pai => widget.bridge;
   bool _ready = false;
@@ -574,7 +629,13 @@ class _ChatScreenState extends State<ChatScreen> {
       final runs = await _pai!.runs();
       if (mounted) setState(() => _interrupted = runs);
       final voice = await _pai!.voiceStatus();
-      if (mounted) setState(() => _voice = voice);
+      if (mounted) {
+        setState(() {
+          _voice = voice;
+          _speakReplies =
+              loadPrefs(appDataDir())['speak_replies'] == true;
+        });
+      }
       _statusSub ??= _pai!.statusStream.listen((st) {
         if (mounted) setState(() => _status = st);
       });
@@ -666,12 +727,12 @@ class _ChatScreenState extends State<ChatScreen> {
         _copyTranscript();
         result = 'Transcript copied to the clipboard.';
       case 'help':
-        result = _cmds
+        result = cmds
             .map((c) =>
                 '/${c.$1}${c.$2.isEmpty ? '' : ' ${c.$2}'} — ${c.$3}')
             .join('\n');
       default:
-        final nav = _navCmds[verb];
+        final nav = navCmds[verb];
         if (nav != null) {
           widget.onNavigate?.call(nav);
           return;
@@ -689,7 +750,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final t = _input.text;
     if (!t.startsWith('/') || t.contains(' ')) return const [];
     final verb = t.substring(1).toLowerCase();
-    return _cmds
+    return cmds
         .where((c) => c.$1.startsWith(verb) && c.$1 != verb)
         .toList();
   }
@@ -1024,8 +1085,14 @@ class _ChatScreenState extends State<ChatScreen> {
               tooltip: _speakReplies
                   ? 'Speaking replies — tap to mute'
                   : 'Speak replies aloud (piper)',
-              onPressed: () =>
-                  setState(() => _speakReplies = !_speakReplies),
+              onPressed: () {
+                final next = !_speakReplies;
+                setState(() => _speakReplies = next);
+                final dir = appDataDir();
+                final p = Map<String, dynamic>.of(loadPrefs(dir))
+                  ..['speak_replies'] = next;
+                savePrefs(dir, p);
+              },
             ),
         ],
       ),
@@ -5292,20 +5359,25 @@ class _QrPainter extends CustomPainter {
   bool shouldRepaint(_QrPainter old) => old.rows != rows;
 }
 
-/// Settings — the one writable knob is appearance (theme mode); the
-/// rest report what the runtime sees (provider, voice, sync, storage)
-/// and deep-link to the screens that own each of those knobs.
+/// Settings — appearance (theme, accent, text scale), notification
+/// badges, the chat model picker, sync cadence, and storage tools.
+/// Writable knobs go through [onPref]; runtime state is reported with
+/// deep-links to the screens that own it.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen(
       {super.key,
       required this.bridge,
       required this.themeMode,
       required this.onThemeMode,
+      required this.prefs,
+      required this.onPref,
       this.onNavigate,
       this.onHelp});
   final PaiBridge bridge;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeMode;
+  final Map<String, dynamic> prefs;
+  final void Function(String key, Object? value) onPref;
   final ValueChanged<int>? onNavigate;
   final VoidCallback? onHelp;
   @override
@@ -5316,6 +5388,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, dynamic> _status = const {};
   Map<String, dynamic> _voice = const {};
   Map<String, dynamic> _sync = const {};
+  List<dynamic> _endpoints = const [];
   String _dataDir = '';
   bool _loading = true;
 
@@ -5328,6 +5401,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _load() async {
     Map<String, dynamic> st = const {}, voice = const {}, sync = const {};
+    List<dynamic> endpoints = const [];
     try {
       st = await widget.bridge.status();
     } catch (_) {}
@@ -5337,14 +5411,81 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       sync = await widget.bridge.syncStatus();
     } catch (_) {}
+    try {
+      final d = await widget.bridge.detect();
+      endpoints = (d['endpoints'] as List? ?? const []);
+    } catch (_) {}
     if (mounted) {
       setState(() {
         _status = st;
         _voice = voice;
         _sync = sync;
+        _endpoints = endpoints;
         _loading = false;
       });
     }
+  }
+
+  /// Every (endpoint, model) pair detected on this machine — the
+  /// provider picker's choices.
+  List<(String, String)> get _modelChoices => [
+        for (final e in _endpoints)
+          for (final m in (e['models'] as List? ?? const []))
+            ('${e['base_url']}', '$m'),
+      ];
+
+  Future<void> _pickModel(String baseUrl, String model) async {
+    final r = await widget.bridge
+        .setProvider(serverUrl: baseUrl, model: model);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+            r['error'] as String? ?? 'Chat now served by $model')));
+    _load();
+  }
+
+  /// Change just the cadence — syncNow persists auto_minutes under
+  /// sync.* meta and reuses the already-configured target.
+  Future<void> _setAutoSync(int minutes) async {
+    final r = await widget.bridge.syncNow(autoMinutes: minutes);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r['error'] != null
+            ? 'Sync failed: ${r['error']}'
+            : minutes == 0
+                ? 'Auto-sync off — ran one manual sync.'
+                : 'Auto-sync every ${minutes}m — ran a sync now.')));
+    _load();
+  }
+
+  Future<void> _clearConversations() async {
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              title: const Text('Delete all conversations?'),
+              content: const Text(
+                  'Every chat transcript is removed. Memories, '
+                  'documents, and the audit log are kept — the deletes '
+                  'are recorded there.'),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('Cancel')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Delete all')),
+              ],
+            ));
+    if (ok != true || !mounted) return;
+    final convs = await widget.bridge.conversations();
+    var n = 0;
+    for (final c in convs) {
+      final r = await widget.bridge.conversationDelete('${c['id']}');
+      if (r['error'] == null) n++;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Deleted $n conversation(s).')));
   }
 
   /// Voice capability flags come back as `true`/`false`, except `stt`
@@ -5372,6 +5513,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final brand = context.brand;
+    final cs = Theme.of(context).colorScheme;
     final tt = Theme.of(context).textTheme;
     final muted = tt.bodySmall?.copyWith(color: brand.textMuted);
     final echo = _status['provider'] == 'echo';
@@ -5413,9 +5555,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onSelectionChanged: (s) =>
                       widget.onThemeMode(s.first),
                 ),
+                const SizedBox(height: AppSpacing.md),
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('Accent', style: tt.labelMedium)),
+                const SizedBox(height: AppSpacing.xs),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(
+                        value: 'teal', label: Text('Teal')),
+                    ButtonSegment(
+                        value: 'brass', label: Text('Brass')),
+                    ButtonSegment(
+                        value: 'cobalt', label: Text('Cobalt')),
+                  ],
+                  selected: {'${widget.prefs['accent'] ?? 'teal'}'},
+                  onSelectionChanged: (s) =>
+                      widget.onPref('accent', s.first),
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('Text size', style: tt.labelMedium)),
+                const SizedBox(height: AppSpacing.xs),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(
+                        value: 'compact', label: Text('Compact')),
+                    ButtonSegment(
+                        value: 'standard', label: Text('Standard')),
+                    ButtonSegment(
+                        value: 'large', label: Text('Large')),
+                  ],
+                  selected: {'${widget.prefs['text_scale'] ?? 'standard'}'},
+                  onSelectionChanged: (s) =>
+                      widget.onPref('text_scale', s.first),
+                ),
                 const SizedBox(height: AppSpacing.sm),
-                Text('Persisted across restarts — the rail\'s theme '
-                    'button cycles the same three modes.', style: muted),
+                Text('All three persist across restarts — the rail\'s '
+                    'theme button cycles the same modes.', style: muted),
               ]),
               _section('Chat provider', [
                 Wrap(spacing: AppSpacing.sm,
@@ -5426,6 +5604,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     _TagChip('${_status['model']}'),
                 ]),
                 const SizedBox(height: AppSpacing.sm),
+                if (_modelChoices.isNotEmpty) ...[
+                  DropdownMenu<String>(
+                    label: const Text('Serve a model'),
+                    initialSelection: null,
+                    hintText: 'Pick a detected model',
+                    dropdownMenuEntries: [
+                      for (final (url, model) in _modelChoices)
+                        DropdownMenuEntry(value: '$url#$model', label: model),
+                    ],
+                    onSelected: (v) {
+                      if (v == null) return;
+                      final i = v.indexOf('#');
+                      _pickModel(v.substring(0, i), v.substring(i + 1));
+                    },
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                ],
                 Text(
                     echo
                         ? 'No model is serving — replies are echoes '
@@ -5436,7 +5631,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 TextButton.icon(
                     onPressed: () => widget.onNavigate?.call(2),
                     icon: const Icon(Icons.devices_outlined, size: 16),
-                    label: const Text('Manage in Devices')),
+                    label: const Text('Manage endpoints in Devices')),
+              ]),
+              _section('Notifications', [
+                SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Alerts badge'),
+                    subtitle: const Text(
+                        'Unread-count badge on the Alerts rail icon'),
+                    value: widget.prefs['badge_alerts'] != false,
+                    onChanged: (v) =>
+                        widget.onPref('badge_alerts', v)),
+                SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Email badge'),
+                    subtitle: const Text(
+                        'Unread-count badge on the Email rail icon'),
+                    value: widget.prefs['badge_email'] != false,
+                    onChanged: (v) =>
+                        widget.onPref('badge_email', v)),
               ]),
               _section('Voice', [
                 Wrap(spacing: AppSpacing.sm,
@@ -5457,30 +5670,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ]),
                 const SizedBox(height: AppSpacing.sm),
                 Text('Dictation and spoken replies need a whisper '
-                    'server (STT) and piper (TTS) on this machine.',
+                    'server (STT) and piper (TTS). The speak-replies '
+                    'toggle lives in the Chat header and persists.',
                     style: muted),
               ]),
               _section('Sync', [
                 Wrap(spacing: AppSpacing.sm,
                     runSpacing: AppSpacing.xs, children: [
                   _TagChip(syncTarget),
-                  _TagChip(
-                      auto == 0
-                          ? 'Auto-sync off'
-                          : 'Auto-sync every ${auto}m',
-                      color:
-                          auto == 0 ? brand.textMuted : brand.info),
                   if (_sync['dir'] != null)
                     _TagChip('${_sync['dir']}',
                         tooltip: 'Shared folder'),
                   if (_sync['relay'] != null)
                     _TagChip('${_sync['relay']}', tooltip: 'Relay'),
                 ]),
+                const SizedBox(height: AppSpacing.md),
+                DropdownMenu<int>(
+                  label: const Text('Auto-sync'),
+                  initialSelection: auto,
+                  helperText:
+                      'Background syncs on the configured target — '
+                          'changing this runs one sync now',
+                  dropdownMenuEntries: const [
+                    DropdownMenuEntry(value: 0, label: 'Off'),
+                    DropdownMenuEntry(
+                        value: 5, label: 'Every 5 minutes'),
+                    DropdownMenuEntry(
+                        value: 15, label: 'Every 15 minutes'),
+                    DropdownMenuEntry(value: 60, label: 'Hourly'),
+                  ],
+                  onSelected: (v) {
+                    if (v != null) _setAutoSync(v);
+                  },
+                ),
                 const SizedBox(height: AppSpacing.sm),
                 TextButton.icon(
                     onPressed: () => widget.onNavigate?.call(2),
                     icon: const Icon(Icons.sync_outlined, size: 16),
-                    label: const Text('Sync options in Devices')),
+                    label: const Text('Sync target in Devices')),
               ]),
               _section('Storage', [
                 Row(children: [
@@ -5502,11 +5729,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                       Text('Data directory copied')));
                         }
                       }),
+                  IconButton(
+                      tooltip: 'Open folder',
+                      icon: const Icon(Icons.folder_open, size: 18),
+                      onPressed: () => revealDataDir(_dataDir)),
                 ]),
                 const SizedBox(height: AppSpacing.xs),
                 Text('Chats, memories, documents, and the audit log '
                     'live here — nothing leaves this folder unless you '
                     'sync.', style: muted),
+                const SizedBox(height: AppSpacing.sm),
+                TextButton.icon(
+                    onPressed: _clearConversations,
+                    icon: Icon(Icons.delete_outline,
+                        size: 16, color: cs.error),
+                    label: Text('Delete all conversations',
+                        style: TextStyle(color: cs.error))),
               ]),
               _section('About', [
                 Text('Personal AI', style: tt.titleMedium),
@@ -5527,6 +5765,219 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ]),
               ]),
             ]),
+    );
+  }
+}
+
+/// One selectable row in the command palette.
+final class _PaletteItem {
+  const _PaletteItem(this.icon, this.title, this.sub, this.run);
+  final IconData icon;
+  final String title;
+  final String? sub;
+  final VoidCallback run;
+}
+
+/// Ctrl+P palette — destinations and app actions always listed; two
+/// or more characters adds a federated search over docs (via
+/// docsSearch), chats, and memories (filtered client-side).
+class _CommandPalette extends StatefulWidget {
+  const _CommandPalette(
+      {required this.bridge,
+      required this.onNavigate,
+      required this.onConversation,
+      required this.onAction});
+  final PaiBridge bridge;
+  final ValueChanged<int> onNavigate;
+  final ValueChanged<String> onConversation;
+  final ValueChanged<String> onAction;
+  @override
+  State<_CommandPalette> createState() => _CommandPaletteState();
+}
+
+class _CommandPaletteState extends State<_CommandPalette> {
+  final _query = TextEditingController();
+  List<dynamic> _convs = const [];
+  List<dynamic> _mems = const [];
+  List<dynamic> _docs = const [];
+  int _sel = 0;
+  Timer? _debounce;
+
+  static const _actions = <(String, IconData, String)>[
+    ('new', Icons.add_comment_outlined, 'New chat'),
+    ('focus', Icons.keyboard_outlined, 'Focus message field'),
+    ('sync', Icons.sync_outlined, 'Sync with paired devices'),
+    ('theme', Icons.brightness_6_outlined, 'Cycle theme mode'),
+    ('help', Icons.help_outline, 'Tour & shortcuts'),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _cache();
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _query.dispose();
+    super.dispose();
+  }
+
+  /// Chats and memories are filtered client-side — cache them once
+  /// rather than per keystroke.
+  Future<void> _cache() async {
+    try {
+      final c = await widget.bridge.conversations();
+      if (mounted) setState(() => _convs = c);
+    } catch (_) {}
+    try {
+      final m = await widget.bridge.memories();
+      if (mounted) setState(() => _mems = m);
+    } catch (_) {}
+  }
+
+  void _onChanged(String q) {
+    _debounce?.cancel();
+    _sel = 0;
+    setState(() {});
+    if (q.trim().length < 2) {
+      setState(() => _docs = const []);
+      return;
+    }
+    _debounce = Timer(const Duration(milliseconds: 250), () async {
+      try {
+        final d = await widget.bridge.docsSearch(q.trim());
+        if (mounted && _query.text.trim() == q.trim()) {
+          setState(() => _docs = d);
+        }
+      } catch (_) {}
+    });
+  }
+
+  List<_PaletteItem> _items() {
+    final q = _query.text.trim().toLowerCase();
+    bool match(String s) => q.isEmpty || s.toLowerCase().contains(q);
+    final items = <_PaletteItem>[];
+    for (var i = 0; i < destLabels.length; i++) {
+      if (match(destLabels[i])) {
+        items.add(_PaletteItem(destIcons[i], destLabels[i], 'Go to',
+            () => widget.onNavigate(i)));
+      }
+    }
+    for (final (id, icon, label) in _actions) {
+      if (match(label)) {
+        items.add(
+            _PaletteItem(icon, label, 'Action', () => widget.onAction(id)));
+      }
+    }
+    if (q.length >= 2) {
+      for (final c in _convs
+          .where((c) => match('${c['title'] ?? ''}')).take(3)) {
+        items.add(_PaletteItem(
+            Icons.chat_bubble_outline,
+            '${c['title'] ?? 'Untitled'}',
+            'Chat',
+            () => widget.onConversation('${c['id']}')));
+      }
+      for (final m in _mems
+          .where((m) => match('${m['content'] ?? ''}')).take(3)) {
+        final text = '${m['content'] ?? ''}';
+        items.add(_PaletteItem(
+            Icons.psychology_outlined,
+            text.length > 60 ? '${text.substring(0, 60)}…' : text,
+            'Memory',
+            () => widget.onNavigate(4)));
+      }
+      for (final d in _docs.take(3)) {
+        items.add(_PaletteItem(
+            Icons.description_outlined,
+            '${d['title'] ?? 'Untitled'} §${d['section']}',
+            'Document',
+            () => widget.onNavigate(5)));
+      }
+    }
+    return items;
+  }
+
+  void _run(int i) {
+    final items = _items();
+    if (items.isEmpty) return;
+    items[i.clamp(0, items.length - 1)].run();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final brand = context.brand;
+    final cs = Theme.of(context).colorScheme;
+    final items = _items();
+    return Dialog(
+      child: SizedBox(
+        width: 560,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+                AppSpacing.lg, AppSpacing.md, AppSpacing.lg, 0),
+            child: CallbackShortcuts(
+              bindings: {
+                const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+                    setState(() =>
+                        _sel = items.isEmpty ? 0 : (_sel + 1) % items.length),
+                const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
+                    setState(() => _sel = items.isEmpty
+                        ? 0
+                        : (_sel - 1 + items.length) % items.length),
+              },
+              child: TextField(
+                controller: _query,
+                autofocus: true,
+                onChanged: _onChanged,
+                onSubmitted: (_) => _run(_sel),
+                decoration: const InputDecoration(
+                    prefixIcon: Icon(Icons.search, size: 18),
+                    hintText: 'Go to, run, or search docs · chats · memories'),
+              ),
+            ),
+          ),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 380),
+            child: items.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(AppSpacing.xl),
+                    child: Text('No matches',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: brand.textMuted)))
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: items.length,
+                    itemBuilder: (_, i) {
+                      final it = items[i];
+                      final sel = i == _sel;
+                      return ListTile(
+                        dense: true,
+                        selected: sel,
+                        selectedTileColor:
+                            cs.primary.withValues(alpha: 0.10),
+                        leading: Icon(it.icon,
+                            size: 18,
+                            color: sel ? cs.primary : brand.textMuted),
+                        title: Text(it.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis),
+                        trailing: it.sub == null
+                            ? null
+                            : Text(it.sub!,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelSmall),
+                        onTap: it.run,
+                      );
+                    }),
+          ),
+        ]),
+      ),
     );
   }
 }

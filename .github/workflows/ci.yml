@@ -42,7 +42,22 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check advisories licenses bans sources
 
+  # The widget test spawns the real bridge isolate — it needs
+  # libpai_ffi at ../../target/debug relative to apps/desktop.
+  ffi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p pai-ffi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pai-ffi
+          path: target/debug/libpai_ffi.so
+
   flutter:
+    needs: ffi
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,9 +65,35 @@ jobs:
         with:
           channel: stable
           cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: pai-ffi
+          path: target/debug
       - name: analyze + test
         working-directory: apps/desktop
         run: |
           flutter pub get
           flutter analyze
           flutter test
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: cargo build -p pai-ffi --release
+      - working-directory: apps/desktop
+        run: |
+          flutter pub get
+          flutter build windows --release
+          cp ../../target/release/pai_ffi.dll build/windows/x64/runner/Release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pai-app-windows
+          path: apps/desktop/build/windows/x64/runner/Release/
+          if-no-files-found: error

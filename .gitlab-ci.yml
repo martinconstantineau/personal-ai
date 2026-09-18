@@ -1,0 +1,40 @@
+# Personal AI — mirrors the GitHub workflow: Rust lint+test, FFI
+# build, then Flutter analyze + test. The widget test spawns the real
+# bridge isolate, so libpai_ffi must exist at ../../target/debug
+# relative to apps/desktop.
+stages:
+  - lint
+  - build
+  - test
+
+rust:
+  stage: lint
+  image: rust:latest
+  script:
+    - apt-get update -qq && apt-get install -y -qq libdbus-1-dev pkg-config libssl-dev gcc
+    - rustup component add rustfmt clippy
+    - cargo fmt --all -- --check
+    - cargo clippy --workspace --all-targets -- -D warnings
+    - cargo test --workspace
+
+ffi:
+  stage: build
+  image: rust:latest
+  script:
+    - apt-get update -qq && apt-get install -y -qq libdbus-1-dev pkg-config libssl-dev gcc
+    - cargo build -p pai-ffi
+  artifacts:
+    paths:
+      - target/debug/libpai_ffi.so
+    expire_in: 1 hour
+
+desktop:
+  stage: test
+  image: ghcr.io/cirruslabs/flutter:stable
+  dependencies:
+    - ffi
+  script:
+    - cd apps/desktop
+    - flutter pub get
+    - flutter analyze
+    - flutter test

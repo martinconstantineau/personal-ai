@@ -7,7 +7,8 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:html' as html;
+import 'dart:js_interop';
+import 'package:web/web.dart' as web;
 import 'bridge_transport.dart';
 
 class _WebTransport implements BridgeTransport {
@@ -32,30 +33,42 @@ class _WebTransport implements BridgeTransport {
       };
 
   Future<dynamic> _post(String op, String? arg) async {
-    html.HttpRequest resp;
+    final xhr = web.XMLHttpRequest();
+    final done = Completer<web.XMLHttpRequest>();
+    xhr.addEventListener(
+        'loadend',
+        ((web.Event _) {
+          if (!done.isCompleted) done.complete(xhr);
+        }).toJS);
+    xhr.addEventListener(
+        'error',
+        ((web.Event _) {
+          if (!done.isCompleted) {
+            done.completeError(StateError('xhr failed'));
+          }
+        }).toJS);
+    xhr.open('POST', _endpoint.toString());
+    _headers.forEach((k, v) => xhr.setRequestHeader(k, v));
+    xhr.send(jsonEncode({'op': op, 'arg': ?arg}).toJS);
+    web.XMLHttpRequest resp;
     try {
-      resp = await html.HttpRequest.request(
-        _endpoint.toString(),
-        method: 'POST',
-        requestHeaders: _headers,
-        sendData: jsonEncode({'op': op, 'arg': ?arg}),
-      );
+      resp = await done.future;
     } catch (_) {
-      // Network-level failure (ProgressEvent/TypeError) — the gateway
-      // is down or restarting; surface words, not a minified class name.
+      // Network-level failure — the gateway is down or restarting;
+      // surface words, not a minified class name.
       throw StateError('gateway unreachable — is `pai serve --bridge` running?');
     }
     // A 4xx still carries the runtime's {"error": …} JSON — return it
     // like the native transport does (PaiClient surfaces op errors as
     // maps, not exceptions).
     if (resp.status != 200) {
-      final body = jsonDecode(resp.responseText ?? 'null');
+      final body = jsonDecode(resp.responseText);
       if (body is Map<String, dynamic> && body['error'] != null) {
         return body;
       }
       throw StateError('bridge $op → HTTP ${resp.status}');
     }
-    return jsonDecode(resp.responseText ?? 'null');
+    return jsonDecode(resp.responseText);
   }
 
   Future<void> _poll() async {
@@ -108,9 +121,9 @@ Future<BridgeTransport> startBridgeTransport(Map<String, dynamic> config) async 
   // in localStorage so later launches — including the installed PWA —
   // need no URL parameter.
   final token = Uri.base.queryParameters['token'] ??
-      html.window.localStorage['pai.bridge.token'];
+      web.window.localStorage.getItem('pai.bridge.token');
   if (token != null) {
-    html.window.localStorage['pai.bridge.token'] = token;
+    web.window.localStorage.setItem('pai.bridge.token', token);
   }
   final t = _WebTransport._(
       Uri.parse('${Uri.base.origin}/api/bridge'), token);

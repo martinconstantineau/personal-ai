@@ -8,8 +8,13 @@ void main() {
     // actually complete (fake-async pumpAndSettle never sees it).
     await tester.runAsync(() async {
       await tester.pumpWidget(const PaiApp());
-      await Future.delayed(const Duration(seconds: 3));
-      await tester.pump();
+      // FFI init can take several seconds under a loaded host — poll
+      // for the shell instead of sleeping a fixed duration.
+      for (var i = 0; i < 60; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        await tester.pump();
+        if (find.text('Personal AI').evaluate().isNotEmpty) break;
+      }
       // First run opens the welcome tour — dismiss it to reach the shell.
       final getStarted = find.text('Get started');
       if (getStarted.evaluate().isNotEmpty) {

@@ -179,16 +179,80 @@ abstract final class AppText {
 
 // ── Theme assembly ──────────────────────────────────────────────
 
-abstract final class AppTheme {
-  static ThemeData dark() => _base(_darkScheme(), _darkBrand());
-  static ThemeData light() => _base(_lightScheme(), _lightBrand());
+/// Accent colorway — the primary family swaps per accent while the
+/// navy/ivory structure, semantic colors, and component themes stay
+/// fixed. `teal` is the brand default; `brass` and `cobalt` are the
+/// alternates.
+enum AppAccent { teal, brass, cobalt }
 
-  static ColorScheme _darkScheme() => const ColorScheme(
+/// The five primary-family slots a ColorScheme needs, per accent and
+/// brightness.
+final class _AccentSet {
+  const _AccentSet(
+      {required this.primary,
+      required this.onPrimary,
+      required this.primaryContainer,
+      required this.onPrimaryContainer,
+      required this.inverse});
+  final Color primary;
+  final Color onPrimary;
+  final Color primaryContainer;
+  final Color onPrimaryContainer;
+  final Color inverse;
+}
+
+_AccentSet _accent(AppAccent a, {required bool dark}) =>
+    switch ((a, dark)) {
+      (AppAccent.teal, true) => const _AccentSet(
+          primary: AppColors.tealBright,
+          onPrimary: Color(0xFF052B28),
+          primaryContainer: Color(0xFF124A44),
+          onPrimaryContainer: Color(0xFFB9EFE7),
+          inverse: AppColors.teal),
+      (AppAccent.teal, false) => const _AccentSet(
+          primary: AppColors.teal,
+          onPrimary: Color(0xFFFDFBF6),
+          primaryContainer: Color(0xFFC9EAE3),
+          onPrimaryContainer: Color(0xFF073F3B),
+          inverse: AppColors.tealBright),
+      (AppAccent.brass, true) => const _AccentSet(
+          primary: AppColors.brassBright,
+          onPrimary: Color(0xFF3A2C0E),
+          primaryContainer: Color(0xFF4A3A1C),
+          onPrimaryContainer: Color(0xFFF0DFB8),
+          inverse: AppColors.brass),
+      (AppAccent.brass, false) => const _AccentSet(
+          primary: AppColors.brass,
+          onPrimary: Color(0xFFFDFBF6),
+          primaryContainer: Color(0xFFEFE3C8),
+          onPrimaryContainer: Color(0xFF4A3A15),
+          inverse: AppColors.brassBright),
+      (AppAccent.cobalt, true) => const _AccentSet(
+          primary: Color(0xFF7DA4E3),
+          onPrimary: Color(0xFF0E2340),
+          primaryContainer: Color(0xFF1E3A63),
+          onPrimaryContainer: Color(0xFFC9DCF7),
+          inverse: AppColors.cobalt),
+      (AppAccent.cobalt, false) => const _AccentSet(
+          primary: AppColors.cobalt,
+          onPrimary: Color(0xFFFDFBF6),
+          primaryContainer: Color(0xFFD6E2F4),
+          onPrimaryContainer: Color(0xFF1B3358),
+          inverse: Color(0xFF7DA4E3)),
+    };
+
+abstract final class AppTheme {
+  static ThemeData dark({AppAccent accent = AppAccent.teal}) =>
+      _base(_darkScheme(_accent(accent, dark: true)), _darkBrand());
+  static ThemeData light({AppAccent accent = AppAccent.teal}) =>
+      _base(_lightScheme(_accent(accent, dark: false)), _lightBrand());
+
+  static ColorScheme _darkScheme(_AccentSet a) => ColorScheme(
         brightness: Brightness.dark,
-        primary: AppColors.tealBright,
-        onPrimary: Color(0xFF052B28),
-        primaryContainer: Color(0xFF124A44),
-        onPrimaryContainer: Color(0xFFB9EFE7),
+        primary: a.primary,
+        onPrimary: a.onPrimary,
+        primaryContainer: a.primaryContainer,
+        onPrimaryContainer: a.onPrimaryContainer,
         secondary: AppColors.steel,
         onSecondary: AppColors.ink,
         secondaryContainer: AppColors.navyHigh,
@@ -211,10 +275,10 @@ abstract final class AppTheme {
         outlineVariant: Color(0xFF22345A),
         inverseSurface: AppColors.ivory,
         onInverseSurface: AppColors.ink,
-        inversePrimary: AppColors.teal,
+        inversePrimary: a.inverse,
         scrim: Color(0xB3000000),
         shadow: Color(0xFF000000),
-        surfaceTint: AppColors.tealBright,
+        surfaceTint: a.primary,
       );
 
   static BrandColors _darkBrand() => const BrandColors(
@@ -229,12 +293,12 @@ abstract final class AppTheme {
         gold: AppColors.brassBright,
       );
 
-  static ColorScheme _lightScheme() => const ColorScheme(
+  static ColorScheme _lightScheme(_AccentSet a) => ColorScheme(
         brightness: Brightness.light,
-        primary: AppColors.teal,
-        onPrimary: Color(0xFFFDFBF6),
-        primaryContainer: Color(0xFFC9EAE3),
-        onPrimaryContainer: Color(0xFF073F3B),
+        primary: a.primary,
+        onPrimary: a.onPrimary,
+        primaryContainer: a.primaryContainer,
+        onPrimaryContainer: a.onPrimaryContainer,
         secondary: AppColors.navy,
         onSecondary: AppColors.ivory,
         secondaryContainer: Color(0xFFD8DEE9),
@@ -257,10 +321,10 @@ abstract final class AppTheme {
         outlineVariant: Color(0xFFE7E0CF),
         inverseSurface: AppColors.navy,
         onInverseSurface: AppColors.ivory,
-        inversePrimary: AppColors.tealBright,
+        inversePrimary: a.inverse,
         scrim: Color(0x73000000),
         shadow: Color(0xFF000000),
-        surfaceTint: AppColors.teal,
+        surfaceTint: a.primary,
       );
 
   static BrandColors _lightBrand() => const BrandColors(
