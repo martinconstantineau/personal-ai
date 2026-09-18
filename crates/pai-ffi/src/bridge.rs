@@ -67,7 +67,7 @@ pub unsafe fn bridge_install_event_sink(
         let sink = unsafe { &*(user as *const Mutex<Vec<serde_json::Value>>) };
         if let Ok(s) = unsafe { CStr::from_ptr(evt) }.to_str() {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-                sink.lock().unwrap().push(v);
+                sink.lock().unwrap_or_else(|e| e.into_inner()).push(v);
             }
         }
     }

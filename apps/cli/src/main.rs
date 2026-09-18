@@ -3891,6 +3891,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 token: token.clone(),
                 user_slug,
                 bridge: bridge_state,
+                inflight: std::sync::atomic::AtomicUsize::new(0),
             });
             let rt = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
@@ -3899,9 +3900,26 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 for mut req in http.incoming_requests() {
                     let cx = cx.clone();
                     let rt = rt.clone();
+                    const MAX_INFLIGHT: usize = 64;
+                    if cx
+                        .inflight
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        >= MAX_INFLIGHT
+                    {
+                        cx.inflight
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        let _ = req.respond(serve_response(
+                            503,
+                            "text/plain",
+                            b"too many requests\n".to_vec(),
+                        ));
+                        continue;
+                    }
                     std::thread::spawn(move || {
                         let resp = serve_request(&cx, &rt, &mut req);
                         let _ = req.respond(resp);
+                        cx.inflight
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     });
                 }
             })
@@ -6182,6 +6200,9 @@ struct ServeCtx {
     /// POST /api/bridge runtime — present when `--bridge` was passed and
     /// `pai_init` succeeded.
     bridge: Option<Arc<BridgeState>>,
+    /// Live request threads — the loop caps spawning so a connection
+    /// flood can't exhaust the process (local slowloris/thread bomb).
+    inflight: std::sync::atomic::AtomicUsize,
 }
 
 /// `*mut PaiRuntime` — Send+Sync because every op either holds
@@ -6216,6 +6237,49 @@ fn serve_bridge(
     };
     if !req.method().as_str().eq_ignore_ascii_case("post") {
         return serve_response(405, "text/plain", b"POST only\n".to_vec());
+    }
+    // CSRF guard: cross-origin pages can only send CORS-safelisted
+    // content types without a preflight (OPTIONS already 405s), so
+    // requiring JSON makes every real call preflight — a drive-by
+    // `text/plain` POST can never fire an op.
+    let json_ct = req.headers().iter().any(|h| {
+        h.field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("content-type")
+            && h.value.as_str().starts_with("application/json")
+    });
+    if !json_ct {
+        return serve_response(
+            415,
+            "text/plain",
+            b"content-type must be application/json\n".to_vec(),
+        );
+    }
+    // Loopback binds carry no token, so pin the Host header to loopback
+    // or this user's own name-layer: a DNS-rebinding page would arrive
+    // with a foreign Host and must not be able to read answers
+    // cross-origin. With a token configured the token is the boundary.
+    if b.token.is_none() {
+        let host = req
+            .headers()
+            .iter()
+            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("host"))
+            .map(|h| {
+                h.value
+                    .as_str()
+                    .split(':')
+                    .next()
+                    .unwrap_or_default()
+                    .to_lowercase()
+            })
+            .unwrap_or_default();
+        let ok = matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1" | "[::1]")
+            || host == format!("{}.devices", cx.user_slug)
+            || host.ends_with(&format!(".{}.devices", cx.user_slug));
+        if !ok {
+            return serve_response(421, "text/plain", b"host not allowed\n".to_vec());
+        }
     }
     if let Some(t) = &b.token {
         let ok = req.headers().iter().any(|h| {
@@ -6257,25 +6321,41 @@ fn serve_bridge(
     let arg = v["arg"].as_str();
     // The poll drain is the bridge's own queue — never touches the runtime.
     if op == "pollEvents" {
-        let evs: Vec<serde_json::Value> = b.events.lock().unwrap().drain(..).collect();
+        let evs: Vec<serde_json::Value> = b
+            .events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
         return serve_response(
             200,
             "application/json",
             serde_json::json!({"events": evs}).to_string().into_bytes(),
         );
     }
-    let res = if pai_ffi::bridge::bridge_op_concurrent(op) {
-        unsafe { pai_ffi::bridge::bridge_dispatch(b.handle.0, op, arg) }
-    } else {
-        let _g = b.lock.lock().unwrap();
-        unsafe { pai_ffi::bridge::bridge_dispatch(b.handle.0, op, arg) }
-    };
+    // A panic inside an op unwinds across the FFI boundary and aborts the
+    // process — catch it so one bad op can't take the gateway down.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if pai_ffi::bridge::bridge_op_concurrent(op) {
+            unsafe { pai_ffi::bridge::bridge_dispatch(b.handle.0, op, arg) }
+        } else {
+            let _g = b.lock.lock().unwrap_or_else(|e| e.into_inner());
+            unsafe { pai_ffi::bridge::bridge_dispatch(b.handle.0, op, arg) }
+        }
+    }));
     match res {
-        Ok(json) => serve_response(200, "application/json", json.into_bytes()),
-        Err(e) => serve_response(
+        Ok(Ok(json)) => serve_response(200, "application/json", json.into_bytes()),
+        Ok(Err(e)) => serve_response(
             400,
             "application/json",
             serde_json::json!({"error": e.to_string()})
+                .to_string()
+                .into_bytes(),
+        ),
+        Err(_) => serve_response(
+            500,
+            "application/json",
+            serde_json::json!({"error": format!("bridge op '{op}' panicked")})
                 .to_string()
                 .into_bytes(),
         ),

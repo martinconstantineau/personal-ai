@@ -487,11 +487,20 @@ fn inject_pwa(resp: &mut ServeResponse, req: &ServeRequest) -> bool {
             }
         }
     }
+    // `req.base` is confined to [a-zA-Z0-9._/-] by check_app_id today,
+    // but it lands in HTML-attr and JS-string contexts — escape it as
+    // if it weren't, so a future id charset change can't become XSS.
+    let esc_attr = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
     let mut snippet = String::new();
     if !html.contains("rel=\"manifest\"") && !html.contains("rel='manifest'") {
         snippet.push_str(&format!(
             "<link rel=\"manifest\" href=\"{}/manifest.webmanifest\">",
-            req.base
+            esc_attr(&req.base)
         ));
     }
     // Note: Flutter ≥3.35 ships `flutter_service_worker.js` as a
@@ -504,17 +513,18 @@ fn inject_pwa(resp: &mut ServeResponse, req: &ServeRequest) -> bool {
         // / canvaskit.wasm). POST endpoints like /api/bridge are excluded:
         // addAll would GET them and fail wholesale on a non-ok reply.
         // A second pass runs later to catch lazy loads after `ready`.
+        let sw_url = serde_json::to_string(&format!("{}/sw.js", req.base))
+            .unwrap_or_else(|_| "\"/sw.js\"".into());
         snippet.push_str(&format!(
             "<script>addEventListener('load',()=>{{if(!('serviceWorker'in navigator))return;\
-             navigator.serviceWorker.register('{base}/sw.js');\
+             navigator.serviceWorker.register({sw_url});\
              const seed=()=>{{const dom=[...document.\
              querySelectorAll('link[href],script[src],img[src]')].map(e=>e.href||e.src);\
              const net=(performance.getEntriesByType('resource')||[]).map(e=>e.name);\
              const u=[...new Set([...dom,...net])].filter(u=>!u.includes('/api/'));\
              navigator.serviceWorker.ready.then(r=>r.active&&r.active.postMessage(\
              {{type:'pai-precache',urls:u}}));}};\
-             seed();setTimeout(seed,5000);}});</script>",
-            base = req.base
+             seed();setTimeout(seed,5000);}});</script>"
         ));
     }
     if snippet.is_empty() {

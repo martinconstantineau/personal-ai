@@ -3106,11 +3106,25 @@ pub unsafe extern "C" fn pai_media_export(
         Some(b) => b.to_string(),
         None => return to_c(serde_json::json!({"error": "job has no result yet"})),
     };
+    // Confine the write to <data_dir>/exports — `dest` is caller input
+    // reachable over the HTTP bridge, so a free path would be an
+    // arbitrary file write. Only the file name is honored.
+    let fname = std::path::Path::new(dest)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "export.bin".into());
+    let out_dir = std::path::Path::new(&rt.data_dir).join("exports");
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        return to_c(serde_json::json!({"error": format!("exports dir: {e}")}));
+    }
+    let dest_path = out_dir.join(&fname);
     match rt.store.get_blob(&blob) {
         Ok(bytes) => {
             let n = bytes.len();
-            match std::fs::write(dest, bytes) {
-                Ok(()) => to_c(serde_json::json!({"path": dest, "bytes": n})),
+            match std::fs::write(&dest_path, bytes) {
+                Ok(()) => {
+                    to_c(serde_json::json!({"path": dest_path.to_string_lossy(), "bytes": n}))
+                }
                 Err(e) => to_c(serde_json::json!({"error": e.to_string()})),
             }
         }
