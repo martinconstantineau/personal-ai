@@ -1211,7 +1211,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       ? (_error == null ? 'Starting the core…' : '')
                       : 'No messages yet — ask anything.',
                   hint: _pai != null
-                      ? 'local-first · private · auditable'
+                      ? 'local-first · private · auditable · '
+                          'writes code into workspace/'
                       : null,
                   children: [
                     if (_pai != null)
@@ -1224,6 +1225,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               'Remember that I like tea',
                               'What can you do?',
                               'Summarize my recent activity',
+                              'Write a hello-world Python script in my workspace',
                             ])
                               ActionChip(
                                   label: Text(s),
@@ -5800,6 +5802,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Text('Chats, memories, documents, and the audit log '
                     'live here — nothing leaves this folder unless you '
                     'sync.', style: muted),
+                const SizedBox(height: AppSpacing.sm),
+                Row(children: [
+                  Expanded(
+                      child: Text(workspaceDir(_dataDir),
+                          style: AppText.mono(context, size: 12),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis)),
+                  IconButton(
+                      tooltip: 'Open workspace',
+                      icon: const Icon(Icons.folder_open, size: 18),
+                      onPressed: () =>
+                          revealDataDir(workspaceDir(_dataDir))),
+                ]),
+                const SizedBox(height: AppSpacing.xs),
+                Text('Agent workspace — files the assistant writes '
+                    '(code, scripts, notes) land here. File tools are '
+                    'jailed to this folder and inbox/.', style: muted),
                 const SizedBox(height: AppSpacing.sm),
                 TextButton.icon(
                     onPressed: _clearConversations,

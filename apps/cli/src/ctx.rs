@@ -152,10 +152,13 @@ pub(crate) async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
     }
     let memory: Arc<dyn MemoryBackend> = Arc::new(mem_impl);
     let documents = Arc::new(doc_impl);
-    // Model-driven file reads are jailed to <data_dir>/inbox; user-driven
-    // `pai docs ingest <path>` bypasses the jail.
+    // Model-driven file access is jailed: writes + relative paths anchor
+    // at <data_dir>/workspace, reads may also reach <data_dir>/inbox.
+    // User-driven `pai docs ingest <path>` bypasses the jail.
     let inbox = cfg.data_dir.join("inbox");
+    let workspace = cfg.data_dir.join("workspace");
     std::fs::create_dir_all(&inbox).ok();
+    std::fs::create_dir_all(&workspace).ok();
 
     // Connectors: email provider when an account is configured.
     let email: Option<Arc<dyn pai_connector_email::EmailProvider>> =
@@ -225,7 +228,7 @@ pub(crate) async fn build(cli: &Cli) -> Result<(Ctx, pai_config::Config)> {
         ))),
         audio_gen,
         media_dir: Some(cfg.data_dir.join("media")),
-        allowed_roots: vec![inbox],
+        allowed_roots: vec![workspace, inbox],
     };
 
     Ok((

@@ -44,6 +44,11 @@ void saveThemeMode(String dataDir, String mode) {
   savePrefs(dataDir, p);
 }
 
+/// The agent's code workspace inside the data dir — matches the
+/// `<data_dir>/workspace` root the FFI registers for file tools.
+String workspaceDir(String dataDir) =>
+    '$dataDir${Platform.pathSeparator}workspace';
+
 /// Opens the data dir in the OS file manager (best effort).
 void revealDataDir(String dataDir) {
   try {

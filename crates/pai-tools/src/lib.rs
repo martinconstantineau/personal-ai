@@ -143,8 +143,10 @@ pub trait AppOperator: Send + Sync {
 
 impl<'a> ToolContext<'a> {
     /// Resolve `path` inside `allowed_roots`; errors when the canonicalized
-    /// path escapes every root.
+    /// path escapes every root. Relative paths resolve against the first
+    /// root (the workspace convention — see `resolve_new_in_jail`).
     pub fn resolve_in_jail(&self, path: &std::path::Path) -> Result<std::path::PathBuf> {
+        let path = &self.absolutize(path);
         let canon = std::fs::canonicalize(path)
             .map_err(|e| Error::InvalidInput(format!("{path:?}: {e}")))?;
         let ok = self.allowed_roots.iter().any(|root| {
@@ -160,6 +162,65 @@ impl<'a> ToolContext<'a> {
             )))
         }
     }
+
+    /// Resolve a path that may not exist yet (write targets). The nearest
+    /// existing ancestor is canonicalized + root-checked — this catches
+    /// symlinked ancestors too — and the missing tail is joined lexically.
+    /// Relative paths resolve against the first root.
+    pub fn resolve_new_in_jail(&self, path: &std::path::Path) -> Result<std::path::PathBuf> {
+        let path = normalize_path(&self.absolutize(path));
+        if path.exists() {
+            return self.resolve_in_jail(&path);
+        }
+        let mut missing = Vec::new();
+        let mut cur = path.as_path();
+        while !cur.exists() {
+            match cur.file_name() {
+                Some(name) => missing.push(name.to_os_string()),
+                None => {
+                    return Err(Error::InvalidInput(format!("{path:?}: no parent")));
+                }
+            }
+            cur = cur.parent().unwrap();
+        }
+        let mut out = self.resolve_in_jail(cur)?;
+        for comp in missing.iter().rev() {
+            out.push(comp);
+        }
+        Ok(out)
+    }
+
+    /// Absolute paths pass through; relative paths anchor at the first
+    /// allowed root so "src/main.rs" lands in the workspace, not the
+    /// process cwd.
+    fn absolutize(&self, path: &std::path::Path) -> std::path::PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            match self.allowed_roots.first() {
+                Some(root) => root.join(path),
+                None => path.to_path_buf(),
+            }
+        }
+    }
+}
+
+/// Lexically collapse `.`/`..` without touching the filesystem —
+/// `canonicalize` requires the path to exist, which write targets don't.
+fn normalize_path(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            // pop() refuses past the root/prefix — `..` can't escape upward.
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[derive(Default)]
@@ -1839,6 +1900,436 @@ impl Tool for AudioGenerateTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Filesystem + shell — the "write code" surface. All paths pass through the
+// jail (`allowed_roots`); writes/exec carry real permissions so the default
+// policy prompts the user.
+// ---------------------------------------------------------------------------
+
+const FS_READ_CAP: usize = 64 * 1024;
+const FS_LIST_CAP: usize = 256;
+const SHELL_OUTPUT_CAP: usize = 32 * 1024;
+
+fn jail_err(e: std::io::Error) -> Error {
+    Error::Other(format!("fs: {e}"))
+}
+
+fn capped(s: Vec<u8>, cap: usize) -> (String, bool) {
+    let slice = if s.len() > cap { &s[..cap] } else { &s[..] };
+    (String::from_utf8_lossy(slice).into_owned(), s.len() > cap)
+}
+
+/// `fs.list` — directory listing inside the jail.
+pub struct FsList;
+
+#[async_trait]
+impl Tool for FsList {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "fs.list".into(),
+            description: "List a directory inside the workspace. Relative \
+                          paths resolve in the workspace root."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::FilesRead],
+            risk: RiskLevel::Low,
+            execution: ExecutionMode::Local,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let path = args["path"].as_str().unwrap_or(".");
+        let dir = ctx.resolve_in_jail(std::path::Path::new(path))?;
+        let mut entries = Vec::new();
+        let mut truncated = false;
+        for e in std::fs::read_dir(&dir).map_err(jail_err)? {
+            let e = e.map_err(jail_err)?;
+            if entries.len() >= FS_LIST_CAP {
+                truncated = true;
+                break;
+            }
+            let meta = e.metadata().map_err(jail_err)?;
+            entries.push(serde_json::json!({
+                "name": e.file_name().to_string_lossy(),
+                "dir": meta.is_dir(),
+                "size": meta.len(),
+            }));
+        }
+        entries.sort_by_key(|e| e["name"].as_str().unwrap_or("").to_string());
+        let n = entries.len();
+        Ok(ToolOutput {
+            value: serde_json::json!({"entries": entries, "truncated": truncated}),
+            summary: format!("listed {n} entries in {}", dir.display()),
+        })
+    }
+}
+
+/// `fs.read` — read a text file inside the jail (64 KiB cap).
+pub struct FsRead;
+
+#[async_trait]
+impl Tool for FsRead {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "fs.read".into(),
+            description: "Read a text file inside the workspace. Large \
+                          files are truncated at 64 KiB."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::FilesRead],
+            risk: RiskLevel::Low,
+            execution: ExecutionMode::Local,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("path".into()))?;
+        let file = ctx.resolve_in_jail(std::path::Path::new(path))?;
+        let (content, truncated) = capped(std::fs::read(&file).map_err(jail_err)?, FS_READ_CAP);
+        Ok(ToolOutput {
+            value: serde_json::json!({
+                "path": file.to_string_lossy(),
+                "content": content,
+                "truncated": truncated,
+            }),
+            summary: format!("read {}", file.display()),
+        })
+    }
+}
+
+/// `fs.write` — create or overwrite a file inside the jail.
+pub struct FsWrite;
+
+#[async_trait]
+impl Tool for FsWrite {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "fs.write".into(),
+            description: "Write a file inside the workspace — creates it \
+                          (and any missing parent directories) or \
+                          overwrites it. Use for new code files."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::FilesWrite],
+            risk: RiskLevel::Medium,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("path".into()))?;
+        let content = args["content"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("content".into()))?;
+        let file = ctx.resolve_new_in_jail(std::path::Path::new(path))?;
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).map_err(jail_err)?;
+        }
+        std::fs::write(&file, content).map_err(jail_err)?;
+        Ok(ToolOutput {
+            value: serde_json::json!({
+                "path": file.to_string_lossy(),
+                "bytes": content.len(),
+            }),
+            summary: format!("wrote {} bytes to {}", content.len(), file.display()),
+        })
+    }
+}
+
+/// `fs.edit` — exact-match string replacement inside the jail.
+pub struct FsEdit;
+
+#[async_trait]
+impl Tool for FsEdit {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "fs.edit".into(),
+            description: "Edit a file inside the workspace by replacing an \
+                          exact `old` string with `new`. Fails when `old` \
+                          matches zero times; requires `all: true` when it \
+                          matches more than once."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old": {"type": "string"},
+                    "new": {"type": "string"},
+                    "all": {"type": "boolean"}
+                },
+                "required": ["path", "old", "new"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::FilesWrite],
+            risk: RiskLevel::Medium,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("path".into()))?;
+        let old = args["old"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("old".into()))?;
+        let new = args["new"].as_str().unwrap_or("");
+        if old.is_empty() {
+            return Err(Error::InvalidInput("old must not be empty".into()));
+        }
+        let file = ctx.resolve_in_jail(std::path::Path::new(path))?;
+        let content = String::from_utf8(std::fs::read(&file).map_err(jail_err)?)
+            .map_err(|_| Error::InvalidInput(format!("{path}: not UTF-8 text")))?;
+        let matches = content.matches(old).count();
+        let all = args["all"].as_bool().unwrap_or(false);
+        if matches == 0 {
+            return Err(Error::InvalidInput("old text not found".into()));
+        }
+        if matches > 1 && !all {
+            return Err(Error::InvalidInput(format!(
+                "{matches} matches; pass all=true to replace every one"
+            )));
+        }
+        let edited = content.replace(old, new);
+        std::fs::write(&file, &edited).map_err(jail_err)?;
+        Ok(ToolOutput {
+            value: serde_json::json!({
+                "path": file.to_string_lossy(),
+                "replacements": matches,
+            }),
+            summary: format!("edited {} ({matches} replacement(s))", file.display()),
+        })
+    }
+}
+
+/// `fs.delete` — remove a file or empty directory inside the jail.
+pub struct FsDelete;
+
+#[async_trait]
+impl Tool for FsDelete {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "fs.delete".into(),
+            description: "Delete a file or empty directory inside the \
+                          workspace. Refuses non-empty directories."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::FilesDelete],
+            risk: RiskLevel::Medium,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("path".into()))?;
+        let file = ctx.resolve_in_jail(std::path::Path::new(path))?;
+        let meta = std::fs::metadata(&file).map_err(jail_err)?;
+        if meta.is_dir() {
+            std::fs::remove_dir(&file).map_err(|_| {
+                Error::InvalidInput(format!("{path}: refusing to delete a non-empty directory"))
+            })?;
+        } else {
+            std::fs::remove_file(&file).map_err(jail_err)?;
+        }
+        Ok(ToolOutput {
+            value: serde_json::json!({"deleted": file.to_string_lossy()}),
+            summary: format!("deleted {}", file.display()),
+        })
+    }
+}
+
+/// `shell.exec` — run a shell command with cwd inside the jail.
+///
+/// Honest scope: the jail confines the working directory and the file
+/// tools, but a shell command is host-level by nature — that's why it
+/// carries `ComputeLocal` + `High` risk and prompts by default.
+pub struct ShellExec;
+
+#[async_trait]
+impl Tool for ShellExec {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "shell.exec".into(),
+            description: "Run a shell command with its working directory \
+                          inside the workspace (for builds, tests, git, \
+                          script runs). Stdout/stderr are captured and \
+                          capped at 32 KiB; commands time out after \
+                          `timeout_secs` (default 60, max 300)."
+                .into(),
+            version: "1.0.0".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "cwd": {"type": "string"},
+                    "timeout_secs": {"type": "number"}
+                },
+                "required": ["command"]
+            }),
+            output_schema: serde_json::json!({"type": "object"}),
+            required_permissions: vec![Permission::ComputeLocal],
+            risk: RiskLevel::High,
+            execution: ExecutionMode::SideEffecting,
+        }
+    }
+
+    async fn execute<'x>(
+        &self,
+        args: serde_json::Value,
+        ctx: &'x ToolContext<'x>,
+    ) -> Result<ToolOutput> {
+        let command = args["command"]
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("command".into()))?;
+        if command.trim().is_empty() {
+            return Err(Error::InvalidInput("empty command".into()));
+        }
+        let cwd = match args["cwd"].as_str() {
+            Some(c) => ctx.resolve_in_jail(std::path::Path::new(c))?,
+            None => ctx
+                .allowed_roots
+                .first()
+                .and_then(|r| ctx.resolve_in_jail(r).ok())
+                .ok_or_else(|| Error::PermissionDenied("no workspace root configured".into()))?,
+        };
+        let secs = args["timeout_secs"]
+            .as_f64()
+            .unwrap_or(60.0)
+            .clamp(1.0, 300.0);
+
+        let (prog, flag) = if cfg!(windows) {
+            ("cmd", "/C")
+        } else {
+            ("sh", "-c")
+        };
+        let mut child = tokio::process::Command::new(prog)
+            .arg(flag)
+            .arg(command)
+            .current_dir(&cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| Error::Other(format!("spawn {prog}: {e}")))?;
+
+        // Drain pipes concurrently so a chatty child can't deadlock, and
+        // so a timed-out kill still returns partial output.
+        let mut out_pipe = child.stdout.take().unwrap();
+        let mut err_pipe = child.stderr.take().unwrap();
+        let read_out = tokio::spawn(async move {
+            let mut b = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut out_pipe, &mut b)
+                .await
+                .map(|_| b)
+        });
+        let read_err = tokio::spawn(async move {
+            let mut b = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut err_pipe, &mut b)
+                .await
+                .map(|_| b)
+        });
+
+        let (status, timed_out) = match tokio::time::timeout(
+            std::time::Duration::from_secs_f64(secs),
+            child.wait(),
+        )
+        .await
+        {
+            Ok(s) => (s.map_err(|e| Error::Other(format!("wait: {e}")))?, false),
+            Err(_) => {
+                child
+                    .kill()
+                    .await
+                    .map_err(|e| Error::Other(format!("kill: {e}")))?;
+                (
+                    child
+                        .wait()
+                        .await
+                        .map_err(|e| Error::Other(format!("wait: {e}")))?,
+                    true,
+                )
+            }
+        };
+        let stdout = read_out
+            .await
+            .map_err(|e| Error::Other(format!("stdout: {e}")))?
+            .map_err(jail_err)?;
+        let stderr = read_err
+            .await
+            .map_err(|e| Error::Other(format!("stderr: {e}")))?
+            .map_err(jail_err)?;
+        let (stdout, out_trunc) = capped(stdout, SHELL_OUTPUT_CAP);
+        let (stderr, err_trunc) = capped(stderr, SHELL_OUTPUT_CAP);
+        let code = status.code().unwrap_or(-1);
+        Ok(ToolOutput {
+            value: serde_json::json!({
+                "exit_code": code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_truncated": out_trunc,
+                "stderr_truncated": err_trunc,
+                "timed_out": timed_out,
+            }),
+            summary: format!(
+                "`{command}` → exit {code}{}",
+                if timed_out { " (timed out)" } else { "" }
+            ),
+        })
+    }
+}
+
 pub fn builtin_registry() -> ToolRegistry {
     let mut r = ToolRegistry::default();
     r.register(Arc::new(CalculatorAdd));
@@ -1874,6 +2365,12 @@ pub fn builtin_registry() -> ToolRegistry {
     r.register(Arc::new(AppsLogsTool));
     r.register(Arc::new(AppsConfigureTool));
     r.register(Arc::new(AudioGenerateTool));
+    r.register(Arc::new(FsList));
+    r.register(Arc::new(FsRead));
+    r.register(Arc::new(FsWrite));
+    r.register(Arc::new(FsEdit));
+    r.register(Arc::new(FsDelete));
+    r.register(Arc::new(ShellExec));
     r
 }
 
@@ -1907,5 +2404,187 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.value["result"], 5.0);
+    }
+
+    // ------------------------------------------------------------------
+    // Filesystem jail + fs.*/shell.exec tools
+    // ------------------------------------------------------------------
+
+    fn jail(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("pai-tools-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn ctx_at<'x>(roots: &'x [std::path::PathBuf]) -> ToolContext<'x> {
+        ToolContext {
+            run: AgentRunId::new(),
+            device: DeviceId::new(),
+            memory: None,
+            memory_scope: None,
+            documents: None,
+            email: None,
+            gitlab: None,
+            vision: None,
+            notify: None,
+            allowed_roots: roots,
+            apps: None,
+            audio_gen: None,
+            media_dir: None,
+        }
+    }
+
+    #[test]
+    fn jail_resolves_inside_and_denies_escapes() {
+        let root = jail("jail");
+        let roots = vec![root.clone()];
+        let ctx = ctx_at(&roots);
+
+        // New nested path inside the root resolves (compare against the
+        // canonical root — resolution canonicalizes the ancestor).
+        let inner = ctx
+            .resolve_new_in_jail(std::path::Path::new("src/deep/new.rs"))
+            .unwrap();
+        let canon_root = std::fs::canonicalize(&root).unwrap();
+        assert!(inner.starts_with(&canon_root));
+
+        // ../ escape, absolute path outside, and nonexistent parent of
+        // an escape are all refused.
+        assert!(ctx
+            .resolve_new_in_jail(std::path::Path::new("../evil.txt"))
+            .is_err());
+        let outside = std::env::temp_dir().join("pai-tools-outside-x");
+        assert!(ctx.resolve_new_in_jail(&outside).is_err());
+        assert!(ctx
+            .resolve_in_jail(std::path::Path::new("/etc/passwd"))
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn fs_write_read_edit_delete_roundtrip() {
+        let root = jail("fs");
+        let roots = vec![root.clone()];
+        let ctx = ctx_at(&roots);
+
+        // write → nested file created under the root
+        FsWrite
+            .execute(
+                serde_json::json!({"path":"a/b/hello.py","content":"print('hi')\n"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(root.join("a/b/hello.py").exists());
+
+        // read back
+        let out = FsRead
+            .execute(serde_json::json!({"path":"a/b/hello.py"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.value["content"], "print('hi')\n");
+        assert_eq!(out.value["truncated"], false);
+
+        // list shows the tree
+        let out = FsList
+            .execute(serde_json::json!({"path":"a"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.value["entries"][0]["name"], "b");
+
+        // edit: single match
+        FsEdit
+            .execute(
+                serde_json::json!({"path":"a/b/hello.py","old":"hi","new":"bye"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let out = FsRead
+            .execute(serde_json::json!({"path":"a/b/hello.py"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.value["content"], "print('bye')\n");
+
+        // edit: ambiguous without `all` fails, with `all` succeeds
+        FsWrite
+            .execute(
+                serde_json::json!({"path":"dup.txt","content":"x x x"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(FsEdit
+            .execute(
+                serde_json::json!({"path":"dup.txt","old":"x","new":"y"}),
+                &ctx,
+            )
+            .await
+            .is_err());
+        FsEdit
+            .execute(
+                serde_json::json!({"path":"dup.txt","old":"x","new":"y","all":true}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let out = FsRead
+            .execute(serde_json::json!({"path":"dup.txt"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.value["content"], "y y y");
+
+        // delete file; non-empty dir refused
+        FsDelete
+            .execute(serde_json::json!({"path":"dup.txt"}), &ctx)
+            .await
+            .unwrap();
+        assert!(!root.join("dup.txt").exists());
+        assert!(FsDelete
+            .execute(serde_json::json!({"path":"a"}), &ctx)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn shell_exec_echo_and_cwd() {
+        let root = jail("sh");
+        let roots = vec![root.clone()];
+        let ctx = ctx_at(&roots);
+
+        let out = ShellExec
+            .execute(serde_json::json!({"command":"echo hello"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.value["exit_code"], 0);
+        assert!(out.value["stdout"].as_str().unwrap().contains("hello"));
+
+        // cwd escapes are refused; the default cwd is the first root
+        assert!(ShellExec
+            .execute(serde_json::json!({"command":"echo x","cwd":"/"}), &ctx,)
+            .await
+            .is_err());
+        assert!(
+            std::fs::canonicalize(ctx.resolve_in_jail(std::path::Path::new(".")).unwrap())
+                .unwrap()
+                .starts_with(std::fs::canonicalize(&root).unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_exec_times_out() {
+        let root = jail("shto");
+        let roots = vec![root];
+        let ctx = ctx_at(&roots);
+        // ~3s sleep, 1s cap → timed_out with partial/empty output.
+        let cmd = if cfg!(windows) {
+            "ping -n 3 127.0.0.1 >nul"
+        } else {
+            "sleep 3"
+        };
+        let out = ShellExec
+            .execute(serde_json::json!({"command":cmd,"timeout_secs":1}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.value["timed_out"], true);
     }
 }

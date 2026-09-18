@@ -214,9 +214,13 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
     }
     let memory: Arc<dyn MemoryBackend> = Arc::new(mem_impl);
     let documents = Arc::new(doc_impl);
-    // Tool-file jail: model-driven reads confined to <data_dir>/inbox.
+    // Tool-file jail: model-driven reads confined to <data_dir>/inbox;
+    // writes + relative paths anchor at <data_dir>/workspace, the
+    // agent's code workspace (first root wins for relative paths).
     let inbox = data_dir.join("inbox");
+    let workspace = data_dir.join("workspace");
     std::fs::create_dir_all(&inbox).ok();
+    std::fs::create_dir_all(&workspace).ok();
 
     let email: Option<Arc<dyn pai_connector_email::EmailProvider>> =
         pai_connector_email::ImapConfig::load(&data_dir)?
@@ -276,7 +280,7 @@ fn init_runtime(cfg: InitConfig) -> Result<PaiRuntime> {
         ))),
         audio_gen: None,
         media_dir: None,
-        allowed_roots: vec![inbox],
+        allowed_roots: vec![workspace, inbox],
     };
 
     // Active conversation: explicit restore, else the most recent chat,

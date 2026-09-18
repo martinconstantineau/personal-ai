@@ -656,6 +656,13 @@ Shipped:
 - **Screen-reader smoke test** — walked under TalkBack on the emulator
   (Narrator/NVDA substitute): focus ring advances, every control
   exposes its label, headings and live regions announce correctly.
+- **Agentic code workspace** — `fs.list`/`fs.read`/`fs.write`/`fs.edit`/
+  `fs.delete` + `shell.exec` tools: the chat agent can scaffold, edit,
+  and run code inside `<data_dir>/workspace` (relative paths anchor
+  there; `inbox/` stays readable). `resolve_new_in_jail` extends the
+  canonical path jail to not-yet-existing write targets; `shell.exec`
+  is `ComputeLocal`-gated + High risk so each command prompts by
+  default. Stdout/stderr capped at 32 KiB with kill-on-timeout.
 
 ## Known technical debt (tracked, not hidden)
 

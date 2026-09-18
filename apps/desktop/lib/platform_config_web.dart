@@ -48,6 +48,9 @@ void saveThemeMode(String dataDir, String mode) {
 /// The data dir is server-side; nothing to reveal in the browser.
 void revealDataDir(String _) {}
 
+/// Server-side workspace path — display only.
+String workspaceDir(String dataDir) => '$dataDir/workspace';
+
 /// Shown when the bridge is unreachable — the runtime is server-side.
 const platformInitHint =
     '(start the gateway: pai serve --bridge — then reload)';
