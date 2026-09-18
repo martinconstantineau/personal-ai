@@ -184,8 +184,16 @@ fn store_vault(data_dir: &Path, key: &[u8; 32]) -> Result<()> {
 // objects sealed to that device's pairwise `peer_key` — the same wrap
 // primitive that bootstraps the vault during pairing.
 
-fn circle_ks_name(name: &str) -> String {
-    format!("circle:{name}")
+/// Namespaced by data_dir like the vault key — without it every
+/// `circle:<name>` lands in one global keystore slot, so a second
+/// vault (or a second device in a test) inherits keys it never
+/// received a grant for.
+fn circle_ks_name(data_dir: &Path, name: &str) -> String {
+    let canon = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    let h = Sha256::digest(canon.to_string_lossy().as_bytes());
+    format!("circle:{name}:{}", hex::encode(&h[..8]))
 }
 
 fn circle_key_file(data_dir: &Path, name: &str) -> PathBuf {
@@ -204,7 +212,7 @@ fn circle_key_file(data_dir: &Path, name: &str) -> PathBuf {
 }
 
 fn store_circle(data_dir: &Path, name: &str, key: &[u8; 32]) -> Result<()> {
-    if keystore::store(&circle_ks_name(name), key) {
+    if keystore::store(&circle_ks_name(data_dir, name), key) {
         return Ok(());
     }
     let file = circle_key_file(data_dir, name);
@@ -222,7 +230,7 @@ fn store_circle(data_dir: &Path, name: &str, key: &[u8; 32]) -> Result<()> {
 /// The named circle key, if this device holds it. Membership *is* key
 /// possession — a device that can't open `circle:<name>` isn't a member.
 pub fn circle_key(data_dir: &Path, name: &str) -> Result<Option<[u8; 32]>> {
-    if let Some(b) = keystore::load(&circle_ks_name(name)) {
+    if let Some(b) = keystore::load(&circle_ks_name(data_dir, name)) {
         return b
             .as_slice()
             .try_into()
@@ -271,7 +279,7 @@ pub fn adopt_circle_key(data_dir: &Path, name: &str, key: &[u8; 32]) -> Result<(
 /// stay on-device but are re-scoped `device_local` by the caller so
 /// they stop roaming entirely.
 pub fn drop_circle_key(data_dir: &Path, name: &str) {
-    keystore::delete(&circle_ks_name(name));
+    keystore::delete(&circle_ks_name(data_dir, name));
     let _ = std::fs::remove_file(circle_key_file(data_dir, name));
 }
 
