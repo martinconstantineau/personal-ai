@@ -30,16 +30,19 @@ class _PaiAppState extends State<PaiApp> {
     };
   }
 
-  /// Rail toggle — system → light → dark, persisted to the data dir.
-  void _cycleTheme() {
-    final next = switch (_mode) {
-      ThemeMode.system => ThemeMode.light,
-      ThemeMode.light => ThemeMode.dark,
-      ThemeMode.dark => ThemeMode.system,
-    };
-    setState(() => _mode = next);
-    saveThemeMode(_dataDir, next.name);
+  /// Persist + apply a theme mode — shared by the rail toggle and the
+  /// Settings segmented control.
+  void _setTheme(ThemeMode m) {
+    setState(() => _mode = m);
+    saveThemeMode(_dataDir, m.name);
   }
+
+  /// Rail toggle — system → light → dark.
+  void _cycleTheme() => _setTheme(switch (_mode) {
+        ThemeMode.system => ThemeMode.light,
+        ThemeMode.light => ThemeMode.dark,
+        ThemeMode.dark => ThemeMode.system,
+      });
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -48,7 +51,10 @@ class _PaiAppState extends State<PaiApp> {
         theme: AppTheme.light(),
         darkTheme: AppTheme.dark(),
         themeMode: _mode,
-        home: HomeShell(themeMode: _mode, onThemeCycle: _cycleTheme),
+        home: HomeShell(
+            themeMode: _mode,
+            onThemeCycle: _cycleTheme,
+            onThemeMode: _setTheme),
       );
 }
 
@@ -57,14 +63,18 @@ class _PaiAppState extends State<PaiApp> {
 /// state after).
 class HomeShell extends StatefulWidget {
   const HomeShell(
-      {super.key, required this.themeMode, required this.onThemeCycle});
+      {super.key,
+      required this.themeMode,
+      required this.onThemeCycle,
+      required this.onThemeMode});
   final ThemeMode themeMode;
   final VoidCallback onThemeCycle;
+  final ValueChanged<ThemeMode> onThemeMode;
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
 
-/// The ten surfaces, in rail order — shared by the wide rail, the
+/// The surfaces, in rail order — shared by the wide rail, the
 /// compact icon-rail, and the narrow bottom bar.
 const _dests = [
   (Icons.chat_bubble_outline, 'Chat'),
@@ -78,6 +88,7 @@ const _dests = [
   (Icons.policy_outlined, 'Permissions'),
   (Icons.music_note_outlined, 'Media'),
   (Icons.merge_type_outlined, 'GitLab'),
+  (Icons.settings_outlined, 'Settings'),
 ];
 
 /// Slash-command grammar: `/verb [arg]` typed in the chat input runs
@@ -99,6 +110,7 @@ const _cmds = <(String, String, String)>[
   ('permissions', '', 'Open Permissions'),
   ('media', '', 'Open Media'),
   ('gitlab', '', 'Open GitLab'),
+  ('settings', '', 'Open Settings'),
   ('help', '', 'List these commands'),
 ];
 
@@ -114,6 +126,7 @@ const _navCmds = {
   'permissions': 8,
   'media': 9,
   'gitlab': 10,
+  'settings': 11,
 };
 
 /// Ctrl+1..9,0 jump straight to a rail destination.
@@ -327,6 +340,13 @@ class _HomeShellState extends State<HomeShell> {
         return MediaScreen(bridge: pai);
       case 10:
         return GitLabScreen(bridge: pai);
+      case 11:
+        return SettingsScreen(
+            bridge: pai,
+            themeMode: widget.themeMode,
+            onThemeMode: widget.onThemeMode,
+            onNavigate: _select,
+            onHelp: _helpDialog);
       default:
         return const SizedBox.shrink();
     }
@@ -5270,4 +5290,243 @@ class _QrPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_QrPainter old) => old.rows != rows;
+}
+
+/// Settings — the one writable knob is appearance (theme mode); the
+/// rest report what the runtime sees (provider, voice, sync, storage)
+/// and deep-link to the screens that own each of those knobs.
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen(
+      {super.key,
+      required this.bridge,
+      required this.themeMode,
+      required this.onThemeMode,
+      this.onNavigate,
+      this.onHelp});
+  final PaiBridge bridge;
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeMode;
+  final ValueChanged<int>? onNavigate;
+  final VoidCallback? onHelp;
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  Map<String, dynamic> _status = const {};
+  Map<String, dynamic> _voice = const {};
+  Map<String, dynamic> _sync = const {};
+  String _dataDir = '';
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _dataDir = appDataDir();
+    _load();
+  }
+
+  Future<void> _load() async {
+    Map<String, dynamic> st = const {}, voice = const {}, sync = const {};
+    try {
+      st = await widget.bridge.status();
+    } catch (_) {}
+    try {
+      voice = await widget.bridge.voiceStatus();
+    } catch (_) {}
+    try {
+      sync = await widget.bridge.syncStatus();
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _status = st;
+        _voice = voice;
+        _sync = sync;
+        _loading = false;
+      });
+    }
+  }
+
+  /// Voice capability flags come back as `true`/`false`, except `stt`
+  /// which reports the serving provider name when available.
+  bool _voiceOn(String k) => _voice[k] == true || _voice[k] is String;
+
+  Widget _section(String title, List<Widget> children) {
+    final tt = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.md),
+      child: Card(
+        child: Padding(
+          padding: AppSpacing.card,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+            Text(title, style: tt.titleSmall),
+            const SizedBox(height: AppSpacing.md),
+            ...children,
+          ]),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final brand = context.brand;
+    final tt = Theme.of(context).textTheme;
+    final muted = tt.bodySmall?.copyWith(color: brand.textMuted);
+    final echo = _status['provider'] == 'echo';
+    final auto = (_sync['auto_minutes'] as num?)?.toInt() ?? 0;
+    final syncTarget = _sync['lan'] == true
+        ? 'This LAN'
+        : _sync['dir'] != null
+            ? 'Shared folder'
+            : _sync['relay'] != null
+                ? 'Relay'
+                : 'This LAN';
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings'), actions: [
+        IconButton(
+            tooltip: 'Refresh',
+            icon: const Icon(Icons.refresh),
+            onPressed: _load),
+      ]),
+      body: _loading
+          ? _listSkeleton(context)
+          : ListView(padding: AppSpacing.page, children: [
+              _section('Appearance', [
+                SegmentedButton<ThemeMode>(
+                  segments: const [
+                    ButtonSegment(
+                        value: ThemeMode.system,
+                        icon: Icon(Icons.brightness_auto_outlined),
+                        label: Text('System')),
+                    ButtonSegment(
+                        value: ThemeMode.light,
+                        icon: Icon(Icons.light_mode_outlined),
+                        label: Text('Light')),
+                    ButtonSegment(
+                        value: ThemeMode.dark,
+                        icon: Icon(Icons.dark_mode_outlined),
+                        label: Text('Dark')),
+                  ],
+                  selected: {widget.themeMode},
+                  onSelectionChanged: (s) =>
+                      widget.onThemeMode(s.first),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Text('Persisted across restarts — the rail\'s theme '
+                    'button cycles the same three modes.', style: muted),
+              ]),
+              _section('Chat provider', [
+                Wrap(spacing: AppSpacing.sm,
+                    runSpacing: AppSpacing.xs, children: [
+                  _TagChip('${_status['provider'] ?? 'unknown'}',
+                      color: echo ? brand.warning : brand.success),
+                  if (_status['model'] != null)
+                    _TagChip('${_status['model']}'),
+                ]),
+                const SizedBox(height: AppSpacing.sm),
+                Text(
+                    echo
+                        ? 'No model is serving — replies are echoes '
+                            'until an endpoint or model pack is picked.'
+                        : 'Replies stream from the endpoint above.',
+                    style: muted),
+                const SizedBox(height: AppSpacing.sm),
+                TextButton.icon(
+                    onPressed: () => widget.onNavigate?.call(2),
+                    icon: const Icon(Icons.devices_outlined, size: 16),
+                    label: const Text('Manage in Devices')),
+              ]),
+              _section('Voice', [
+                Wrap(spacing: AppSpacing.sm,
+                    runSpacing: AppSpacing.xs, children: [
+                  for (final (label, key) in const [
+                    ('Microphone', 'mic'),
+                    ('Speech-to-text', 'stt'),
+                    ('Text-to-speech', 'tts'),
+                    ('Speaker', 'speaker'),
+                  ])
+                    _TagChip(label,
+                        color: _voiceOn(key)
+                            ? brand.success
+                            : brand.textMuted,
+                        tooltip: _voiceOn(key)
+                            ? 'available'
+                            : 'not detected'),
+                ]),
+                const SizedBox(height: AppSpacing.sm),
+                Text('Dictation and spoken replies need a whisper '
+                    'server (STT) and piper (TTS) on this machine.',
+                    style: muted),
+              ]),
+              _section('Sync', [
+                Wrap(spacing: AppSpacing.sm,
+                    runSpacing: AppSpacing.xs, children: [
+                  _TagChip(syncTarget),
+                  _TagChip(
+                      auto == 0
+                          ? 'Auto-sync off'
+                          : 'Auto-sync every ${auto}m',
+                      color:
+                          auto == 0 ? brand.textMuted : brand.info),
+                  if (_sync['dir'] != null)
+                    _TagChip('${_sync['dir']}',
+                        tooltip: 'Shared folder'),
+                  if (_sync['relay'] != null)
+                    _TagChip('${_sync['relay']}', tooltip: 'Relay'),
+                ]),
+                const SizedBox(height: AppSpacing.sm),
+                TextButton.icon(
+                    onPressed: () => widget.onNavigate?.call(2),
+                    icon: const Icon(Icons.sync_outlined, size: 16),
+                    label: const Text('Sync options in Devices')),
+              ]),
+              _section('Storage', [
+                Row(children: [
+                  Expanded(
+                      child: Text(_dataDir,
+                          style: AppText.mono(context, size: 12),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis)),
+                  IconButton(
+                      tooltip: 'Copy path',
+                      icon: const Icon(Icons.copy_outlined, size: 18),
+                      onPressed: () async {
+                        await Clipboard.setData(
+                            ClipboardData(text: _dataDir));
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content:
+                                      Text('Data directory copied')));
+                        }
+                      }),
+                ]),
+                const SizedBox(height: AppSpacing.xs),
+                Text('Chats, memories, documents, and the audit log '
+                    'live here — nothing leaves this folder unless you '
+                    'sync.', style: muted),
+              ]),
+              _section('About', [
+                Text('Personal AI', style: tt.titleMedium),
+                const SizedBox(height: AppSpacing.x2),
+                Text('Local-first · private by default · every action '
+                    'audited.', style: muted),
+                const SizedBox(height: AppSpacing.sm),
+                Wrap(spacing: AppSpacing.sm, children: [
+                  TextButton.icon(
+                      onPressed: widget.onHelp,
+                      icon: const Icon(Icons.help_outline, size: 16),
+                      label: const Text('Tour & shortcuts')),
+                  TextButton.icon(
+                      onPressed: () => widget.onNavigate?.call(7),
+                      icon: const Icon(Icons.receipt_long_outlined,
+                          size: 16),
+                      label: const Text('Audit log')),
+                ]),
+              ]),
+            ]),
+    );
+  }
 }
