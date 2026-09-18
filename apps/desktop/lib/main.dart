@@ -544,7 +544,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final role = m['role'];
     if (role == 'system' || role == 'tool') return null;
     final text = (m['content'] as List? ?? [])
-        .where((c) => c is Map && c['type'] == 'text')
+        .where((c) => c is Map && (c['type'] == 'text' || c['kind'] == 'text'))
         .map((c) => c['text'] as String? ?? '')
         .join('');
     DateTime? at;
