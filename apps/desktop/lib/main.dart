@@ -343,7 +343,8 @@ class _HomeShellState extends State<HomeShell> {
       child: LayoutBuilder(
         builder: (_, c) {
           final content = IndexedStack(
-              index: _index, children: List.generate(10, _tab));
+              index: _index,
+              children: List.generate(_dests.length, _tab));
           // Narrow windows (and the Android build): bottom bar with
           // labels on the selected destination only — all ten fit.
           if (c.maxWidth < 640) {
@@ -368,10 +369,11 @@ class _HomeShellState extends State<HomeShell> {
           // still dock at the bottom on tall windows.
           final rail = LayoutBuilder(
             builder: (_, rc) {
-              final overflow = rc.maxHeight < 10 * 72 + 96;
+              final overflow = rc.maxHeight < _dests.length * 72 + 96;
               final scrollable = SingleChildScrollView(
                 child: SizedBox(
-                  height: math.max(rc.maxHeight, 10 * 72 + 96),
+                  height: math.max(
+                      rc.maxHeight, _dests.length * 72 + 96),
                   child: NavigationRail(
                     selectedIndex: _index,
                     onDestinationSelected: _select,
