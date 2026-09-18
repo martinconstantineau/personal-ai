@@ -5,6 +5,7 @@ import 'platform_config.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'pai_bridge.dart';
+import 'theme.dart';
 
 void main() => runApp(const PaiApp());
 
@@ -15,11 +16,9 @@ class PaiApp extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
         title: 'Personal AI',
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF6C5CE7), brightness: Brightness.dark),
-          useMaterial3: true,
-        ),
+        theme: AppTheme.light(),
+        darkTheme: AppTheme.dark(),
+        themeMode: ThemeMode.system,
         home: const HomeShell(),
       );
 }
@@ -165,7 +164,6 @@ class _HomeShellState extends State<HomeShell> {
   /// Feature tour + shortcuts — shown on first run, and reachable any
   /// time via the rail help button or F1.
   void _helpDialog({bool firstRun = false}) {
-    final cs = Theme.of(context).colorScheme;
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -174,9 +172,8 @@ class _HomeShellState extends State<HomeShell> {
           width: 440,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Text('local-first - private - auditable',
-                style:
-                    TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
-            const SizedBox(height: 16),
+                style: Theme.of(ctx).textTheme.bodySmall),
+            const SizedBox(height: AppSpacing.lg),
             const _FeatureRow(
                 icon: Icons.chat_bubble_outline,
                 title: 'Chat on local models',
@@ -197,13 +194,12 @@ class _HomeShellState extends State<HomeShell> {
                 title: 'Audited and permissioned',
                 body: 'Every action lands in Activity; app capabilities '
                     'live under Permissions.'),
-            const Divider(height: 24),
-            const Align(
+            const Divider(height: AppSpacing.xxl),
+            Align(
                 alignment: Alignment.centerLeft,
                 child: Text('Shortcuts',
-                    style:
-                        TextStyle(fontWeight: FontWeight.w600))),
-            const SizedBox(height: 6),
+                    style: Theme.of(ctx).textTheme.titleSmall)),
+            const SizedBox(height: AppSpacing.sm),
             const _ShortcutRow('Ctrl+1-9,0', 'jump to a section'),
             const _ShortcutRow('/', 'slash commands — /help lists them'),
             const _ShortcutRow('Ctrl+K', 'focus the message field'),
@@ -251,12 +247,10 @@ class _HomeShellState extends State<HomeShell> {
   /// Rail-bottom provider health: green when a real model serves chat,
   /// amber on the echo fallback, grey until status lands.
   Color _healthColor(ColorScheme cs) {
-    if (_status.isEmpty) return cs.onSurfaceVariant.withValues(alpha: 0.4);
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    if (_status['provider'] == 'echo') {
-      return dark ? Colors.amber : Colors.orange.shade800;
-    }
-    return dark ? Colors.greenAccent : Colors.green.shade700;
+    final brand = context.brand;
+    if (_status.isEmpty) return brand.textMuted.withValues(alpha: 0.4);
+    if (_status['provider'] == 'echo') return brand.warning;
+    return brand.success;
   }
 
   /// Destination icon — Alerts carries the unread-count badge.
@@ -314,13 +308,13 @@ class _HomeShellState extends State<HomeShell> {
           body: Center(
               child: _error != null
                   ? Padding(
-                      padding: const EdgeInsets.all(24),
+                      padding: const EdgeInsets.all(AppSpacing.xxl),
                       child: Text(_error!,
                           textAlign: TextAlign.center,
                           style: TextStyle(color: cs.error)))
                   : const Column(mainAxisSize: MainAxisSize.min, children: [
                       CircularProgressIndicator(),
-                      SizedBox(height: 16),
+                      SizedBox(height: AppSpacing.lg),
                       Text('Starting core…'),
                     ])));
     }
@@ -384,7 +378,7 @@ class _HomeShellState extends State<HomeShell> {
                       child: Align(
                         alignment: Alignment.bottomCenter,
                         child: Padding(
-                          padding: const EdgeInsets.only(bottom: 14),
+                          padding: const EdgeInsets.only(bottom: AppSpacing.md + 2),
                           child: Column(mainAxisSize: MainAxisSize.min,
                               children: [
                             IconButton(
@@ -392,7 +386,7 @@ class _HomeShellState extends State<HomeShell> {
                                     size: 18),
                                 tooltip: 'About & shortcuts (F1)',
                                 onPressed: _helpDialog),
-                            const SizedBox(height: 6),
+                            const SizedBox(height: AppSpacing.sm - 2),
                             Tooltip(
                             message: _healthMsg(),
                             child: Icon(Icons.circle,
@@ -918,6 +912,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -929,7 +924,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 Text(
                   '${_status['provider']}'
                   '${_status['model'] != null ? ' · ${_status['model']}' : ''}',
-                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                  style: tt.bodySmall?.copyWith(color: cs.primary),
                 ),
             ]),
         actions: [
@@ -1017,30 +1012,19 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         Expanded(
           child: _entries.isEmpty
-              ? Center(
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.forum_outlined,
-                        size: 40, color: cs.onSurfaceVariant),
-                    const SizedBox(height: 12),
-                    Text(
-                      _pai == null
-                          ? (_error == null ? 'Starting the core…' : '')
-                          : 'No messages yet — ask anything.',
-                      style: TextStyle(color: cs.onSurfaceVariant),
-                    ),
-                    if (_pai != null) ...[
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Text('local-first · private · auditable',
-                            style: TextStyle(
-                                fontSize: 11,
-                                color: cs.onSurfaceVariant
-                                    .withValues(alpha: 0.7))),
-                      ),
-                      const SizedBox(height: 16),
+              ? _EmptyState(
+                  icon: Icons.forum_outlined,
+                  title: _pai == null
+                      ? (_error == null ? 'Starting the core…' : '')
+                      : 'No messages yet — ask anything.',
+                  hint: _pai != null
+                      ? 'local-first · private · auditable'
+                      : null,
+                  children: [
+                    if (_pai != null)
                       Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
+                          spacing: AppSpacing.sm,
+                          runSpacing: AppSpacing.sm,
                           alignment: WrapAlignment.center,
                           children: [
                             for (final s in const [
@@ -1055,13 +1039,15 @@ class _ChatScreenState extends State<ChatScreen> {
                                     _send();
                                   }),
                           ]),
-                    ],
-                  ]))
+                  ],
+                )
               : Semantics(
                   label: 'Conversation transcript',
                   child: ListView.builder(
                   controller: _scroll,
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.lg,
+                      vertical: AppSpacing.md),
                   itemCount: _entries.length,
                   itemBuilder: (_, i) {
                     final e = _entries[i];
@@ -1079,7 +1065,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
         ),
         Padding(
-          padding: const EdgeInsets.all(8),
+          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0,
+              AppSpacing.lg, AppSpacing.sm),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             if (_cmdSuggestions.isNotEmpty)
               Semantics(
@@ -1087,7 +1074,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 liveRegion: true,
                 label: 'Command suggestions',
                 child: Card(
-                  margin: const EdgeInsets.only(bottom: 8),
+                  margin: const EdgeInsets.only(bottom: AppSpacing.sm),
                 clipBehavior: Clip.antiAlias,
                 child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -1120,12 +1107,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   hintText: _pai == null
                       ? 'Waiting for core…'
                       : 'Message — try "remember that I like tea"',
-                  border: const OutlineInputBorder(),
                   isDense: true,
                 ),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: AppSpacing.sm),
             IconButton(
               icon: const Icon(Icons.attach_file),
               tooltip: _voice['stt'] == true
@@ -1174,19 +1160,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
 /// Shared skeleton rows shown while a list screen loads.
 Widget _listSkeleton(BuildContext context) {
-  final c = Theme.of(context)
-      .colorScheme
-      .surfaceContainerHighest
-      .withValues(alpha: 0.45);
+  final c = context.brand.surfaceCard;
   return Semantics(
     label: 'Loading',
-    child: ListView(padding: const EdgeInsets.all(12), children: [
+    child: ListView(
+        padding: const EdgeInsets.all(AppSpacing.md), children: [
       for (var i = 0; i < 5; i++)
         Container(
-            margin: const EdgeInsets.only(bottom: 10),
+            margin: const EdgeInsets.only(bottom: AppSpacing.sm + 2),
             height: 56,
             decoration: BoxDecoration(
-                color: c, borderRadius: BorderRadius.circular(10))),
+                color: c,
+                borderRadius: AppRadii.rMd,
+                border: Border.all(color: context.brand.hairline))),
     ]),
   );
 }
@@ -1194,12 +1180,23 @@ Widget _listSkeleton(BuildContext context) {
 /// Shared error block with a Retry action.
 Widget _errorView(BuildContext context, String err, VoidCallback onRetry) {
   final cs = Theme.of(context).colorScheme;
+  final tt = Theme.of(context).textTheme;
   return Center(
       child: Column(mainAxisSize: MainAxisSize.min, children: [
-    Icon(Icons.error_outline, color: cs.error, size: 32),
-    const SizedBox(height: 8),
-    Text(err, style: TextStyle(color: cs.error)),
-    const SizedBox(height: 12),
+    Container(
+        width: 56,
+        height: 56,
+        decoration: BoxDecoration(
+            color: cs.errorContainer.withValues(alpha: 0.5),
+            shape: BoxShape.circle),
+        child: Icon(Icons.error_outline, color: cs.error, size: 26)),
+    const SizedBox(height: AppSpacing.md),
+    Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.x3),
+        child: Text(err,
+            textAlign: TextAlign.center,
+            style: tt.bodyMedium?.copyWith(color: cs.error))),
+    const SizedBox(height: AppSpacing.md),
     TextButton.icon(
         onPressed: onRetry,
         icon: const Icon(Icons.refresh, size: 16),
@@ -1207,11 +1204,115 @@ Widget _errorView(BuildContext context, String err, VoidCallback onRetry) {
   ]));
 }
 
+/// Shared empty-state: tinted icon disc, title, hint, optional extras
+/// (e.g. suggestion chips).
+class _EmptyState extends StatelessWidget {
+  const _EmptyState(
+      {required this.icon,
+      required this.title,
+      this.hint,
+      this.children = const []});
+  final IconData icon;
+  final String title;
+  final String? hint;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final brand = context.brand;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.x3),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+              width: 64,
+              height: 64,
+              decoration: BoxDecoration(
+                  color: cs.primary.withValues(alpha: 0.10),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                      color: cs.primary.withValues(alpha: 0.22))),
+              child: Icon(icon, size: 28, color: cs.primary)),
+          const SizedBox(height: AppSpacing.lg),
+          Text(title,
+              textAlign: TextAlign.center, style: tt.titleMedium),
+          if (hint != null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text(hint!,
+                textAlign: TextAlign.center,
+                style: tt.bodySmall?.copyWith(color: brand.textMuted)),
+          ],
+          if (children.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.xl),
+            ...children,
+          ],
+        ]),
+      ),
+    );
+  }
+}
+
+/// Compact metadata chip — scope/source/state tags on list rows.
+class _TagChip extends StatelessWidget {
+  const _TagChip(this.label, {this.color, this.tooltip});
+  final String label;
+  final Color? color;
+  final String? tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final tt = Theme.of(context).textTheme;
+    final brand = context.brand;
+    final fg = color ?? brand.textMuted;
+    final chip = Container(
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.sm, vertical: AppSpacing.x2),
+      decoration: BoxDecoration(
+          color: fg.withValues(alpha: 0.10),
+          borderRadius: AppRadii.rSm,
+          border: Border.all(color: fg.withValues(alpha: 0.25))),
+      child: Text(label,
+          style: tt.labelSmall?.copyWith(color: fg, letterSpacing: 0.3)),
+    );
+    return tooltip == null ? chip : Tooltip(message: tooltip!, child: chip);
+  }
+}
+
+/// Inline error strip for list headers — icon + message + retry.
+class _InlineError extends StatelessWidget {
+  const _InlineError(this.msg, {required this.onRetry, this.action});
+  final String msg;
+  final VoidCallback onRetry;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+      child: Row(children: [
+        Icon(Icons.error_outline, size: 16, color: cs.error),
+        const SizedBox(width: AppSpacing.sm - 2),
+        Expanded(
+            child: Text(msg,
+                style: tt.bodySmall?.copyWith(color: cs.error))),
+        ?action,
+        TextButton(onPressed: onRetry, child: const Text('Retry')),
+      ]),
+    );
+  }
+}
+
 /// Approval-sheet risk styling.
-Color _riskColor(ColorScheme cs, String risk) => switch (risk) {
+Color _riskColor(BrandColors b, ColorScheme cs, String risk) =>
+    switch (risk) {
       'high' || 'critical' => cs.error,
-      'medium' || 'moderate' => Colors.amber,
-      _ => Colors.greenAccent,
+      'medium' || 'moderate' => b.warning,
+      _ => b.success,
     };
 
 IconData _riskIcon(String risk) => switch (risk) {
@@ -1245,56 +1346,72 @@ class _BubbleState extends State<_Bubble> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final brand = context.brand;
     final e = widget.entry;
     final isYou = e.role == 'you';
     final isSys = e.role == 'system';
+    final metaColor = isYou
+        ? cs.onPrimaryContainer.withValues(alpha: 0.75)
+        : brand.textMuted;
     return MouseRegion(
       onEnter: (_) => setState(() => _hov = true),
       onExit: (_) => setState(() => _hov = false),
       child: Align(
       alignment: isYou ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        margin: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+        padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md + 2, vertical: AppSpacing.md - 2),
         constraints: const BoxConstraints(maxWidth: 560),
         decoration: BoxDecoration(
           color: isYou
               ? cs.primaryContainer
               : isSys
-                  ? cs.surfaceContainerHighest.withValues(alpha: 0.5)
-                  : cs.secondaryContainer,
-          borderRadius: BorderRadius.circular(14),
+                  ? brand.surfaceOverlay.withValues(alpha: 0.5)
+                  : brand.surfaceCard,
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(AppRadii.lg),
+            topRight: const Radius.circular(AppRadii.lg),
+            bottomLeft: isYou
+                ? const Radius.circular(AppRadii.lg)
+                : const Radius.circular(AppRadii.sm),
+            bottomRight: isYou
+                ? const Radius.circular(AppRadii.sm)
+                : const Radius.circular(AppRadii.lg),
+          ),
+          border: isYou
+              ? null
+              : Border.all(color: brand.hairline),
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(mainAxisSize: MainAxisSize.min, children: [
             Text(
               '${isYou ? 'You' : isSys ? 'Event' : 'Assistant'} · ${_fmtHm(e.at)}',
-              style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  color: cs.onSecondaryContainer.withValues(alpha: 0.6)),
+              style: tt.labelSmall?.copyWith(color: metaColor),
             ),
             if (_hov && !e.streaming && e.text.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(left: 8),
+                padding: const EdgeInsets.only(left: AppSpacing.sm),
                 child: IconButton(
                   iconSize: 12,
                   visualDensity: VisualDensity.compact,
                   tooltip: 'Copy message',
                   onPressed: _copy,
-                  icon: Icon(Icons.copy_outlined,
-                      color:
-                          cs.onSecondaryContainer.withValues(alpha: 0.6)),
+                  icon: Icon(Icons.copy_outlined, color: metaColor),
                 ),
               ),
           ]),
-          if (e.text.isNotEmpty || !e.streaming) SelectableText(e.text),
+          if (e.text.isNotEmpty || !e.streaming)
+            Padding(
+                padding: const EdgeInsets.only(top: AppSpacing.x2),
+                child: SelectableText(e.text, style: tt.bodyMedium)),
           if (e.isError && e.text.contains('provider'))
-            Text(
-                'Check the provider endpoint — the Devices tab shows what\'s live',
-                style: TextStyle(
-                    fontSize: 10,
-                    color: cs.onSecondaryContainer.withValues(alpha: 0.6))),
+            Padding(
+                padding: const EdgeInsets.only(top: AppSpacing.xs),
+                child: Text(
+                    'Check the provider endpoint — the Devices tab shows what\'s live',
+                    style: tt.bodySmall?.copyWith(color: metaColor))),
           if (e.isError && widget.onRetry != null)
             TextButton.icon(
                 style: TextButton.styleFrom(
@@ -1303,18 +1420,20 @@ class _BubbleState extends State<_Bubble> {
                     minimumSize: const Size(0, 28)),
                 onPressed: widget.onRetry,
                 icon: const Icon(Icons.replay, size: 14),
-                label: const Text('Retry',
-                    style: TextStyle(fontSize: 12))),
+                label: const Text('Retry')),
           if (e.streaming && e.text.isEmpty)
-            const SizedBox(
-                height: 16,
-                width: 16,
-                child: CircularProgressIndicator(strokeWidth: 2)),
+            const Padding(
+                padding: EdgeInsets.only(top: AppSpacing.xs),
+                child: SizedBox(
+                    height: 16,
+                    width: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))),
           if (e.sub.isNotEmpty)
-            Text(e.sub,
-                style: TextStyle(
-                    fontSize: 10,
-                    color: cs.onSecondaryContainer.withValues(alpha: 0.5))),
+            Padding(
+                padding: const EdgeInsets.only(top: AppSpacing.x2),
+                child: Text(e.sub,
+                    style: tt.labelSmall
+                        ?.copyWith(color: metaColor.withValues(alpha: 0.8)))),
         ]),
       ),
       ),
@@ -1331,51 +1450,37 @@ class _ApprovalSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final brand = context.brand;
+    final risk = _riskColor(brand, cs, '${req['risk']}');
     final perms = (req['permissions'] as List? ?? []).join(', ');
     return Padding(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(AppSpacing.xxl),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(children: [
-            Icon(Icons.shield_outlined, color: cs.primary),
-            const SizedBox(width: 8),
-            Text('Approval needed',
-                style: Theme.of(context).textTheme.titleLarge),
+            Icon(_riskIcon('${req['risk']}'), color: risk),
+            const SizedBox(width: AppSpacing.sm),
+            Text('Approval needed', style: tt.titleLarge),
           ]),
-          const SizedBox(height: 16),
-          Text('${req['tool']}',
-              style: const TextStyle(
-                  fontWeight: FontWeight.bold)),
-          Text('${req['summary']}'),
-          const SizedBox(height: 8),
-          Wrap(spacing: 6, children: [
-            Chip(
-              avatar: Icon(_riskIcon('${req['risk']}'),
-                  size: 14,
-                  color: _riskColor(cs, '${req['risk']}')),
-              label: Text('Risk: ${req['risk']}',
-                  style: TextStyle(
-                      fontSize: 11,
-                      color: _riskColor(cs, '${req['risk']}'))),
-              visualDensity: VisualDensity.compact,
-            ),
+          const SizedBox(height: AppSpacing.lg),
+          Text('${req['tool']}', style: tt.titleSmall),
+          Text('${req['summary']}', style: tt.bodyMedium),
+          const SizedBox(height: AppSpacing.sm),
+          Wrap(spacing: AppSpacing.sm - 2, children: [
+            _TagChip('Risk: ${req['risk']}', color: risk),
             if (perms.isNotEmpty)
-              Chip(
-                avatar: const Icon(Icons.key_outlined, size: 14),
-                label:
-                    Text(perms, style: const TextStyle(fontSize: 11)),
-                visualDensity: VisualDensity.compact,
-              ),
+              _TagChip(perms, tooltip: 'Permissions requested'),
           ]),
-          const SizedBox(height: 20),
+          const SizedBox(height: AppSpacing.xl),
           Row(mainAxisAlignment: MainAxisAlignment.end, children: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
               child: const Text('Deny'),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: AppSpacing.sm),
             FilledButton.icon(
               onPressed: () => Navigator.of(context).pop(true),
               icon: const Icon(Icons.check),
@@ -1427,9 +1532,10 @@ class _ConvDrawerState extends State<_ConvDrawer> {
       child: SafeArea(
         child: ListView(children: [
           Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(AppSpacing.lg),
             child: Row(children: [
-              Text('Chats', style: Theme.of(context).textTheme.titleMedium),
+              Text('Chats',
+                  style: Theme.of(context).textTheme.titleLarge),
               const Spacer(),
               IconButton(
                   tooltip: 'New chat',
@@ -1442,26 +1548,24 @@ class _ConvDrawerState extends State<_ConvDrawer> {
             ]),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.lg),
             child: TextField(
               decoration: const InputDecoration(
                 hintText: 'Filter chats',
                 prefixIcon: Icon(Icons.search, size: 18),
                 isDense: true,
-                border: OutlineInputBorder(),
               ),
               onChanged: (v) =>
                   setState(() => _q = v.trim().toLowerCase()),
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: AppSpacing.sm),
           if (convs.isEmpty && widget.convs.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(AppSpacing.lg),
               child: Text('No chats match',
-                  style: TextStyle(
-                      color:
-                          Theme.of(context).colorScheme.onSurfaceVariant)),
+                  style: Theme.of(context).textTheme.bodySmall),
             ),
           for (final c in convs)
             ListTile(
@@ -1472,8 +1576,7 @@ class _ConvDrawerState extends State<_ConvDrawer> {
               title: Text('${c['title'] ?? 'Untitled'}',
                   maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: Text(
-                  '${c['memory']} · ${_fmtTs(c['created_at'])}',
-                  style: const TextStyle(fontSize: 11)),
+                  '${c['memory']} · ${_fmtTs(c['created_at'])}'),
               onTap: () => widget.onSelect(c['id'] as String),
               trailing: PopupMenuButton<String>(
                 itemBuilder: (_) => [
@@ -1489,16 +1592,19 @@ class _ConvDrawerState extends State<_ConvDrawer> {
               ),
             ),
           if (widget.interrupted.isNotEmpty) ...[
-            const Divider(),
-            const Padding(
-                padding: EdgeInsets.all(16),
-                child: Text('Interrupted runs')),
+            const Divider(height: AppSpacing.xl),
+            Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.lg,
+                    vertical: AppSpacing.xs),
+                child: Text('Interrupted runs',
+                    style:
+                        Theme.of(context).textTheme.titleSmall)),
             for (final r in widget.interrupted)
               ListTile(
                 leading: const Icon(Icons.replay),
                 title: Text('${(r['id'] as String).substring(0, 8)} · ${r['state']}'),
-                subtitle: Text('${r['started_at']}',
-                    style: const TextStyle(fontSize: 11)),
+                subtitle: Text('${r['started_at']}'),
                 trailing: IconButton(
                     icon: const Icon(Icons.play_arrow),
                     tooltip: 'Resume interrupted run',
@@ -1616,53 +1722,59 @@ class _MemoriesScreenState extends State<MemoriesScreen> {
           : _error != null
               ? _errorView(context, _error!, _load)
               : _items.isEmpty
-                  ? Center(
-                      child: Text(
-                          'Nothing remembered yet — tell the agent '
-                          'something worth keeping.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: cs.onSurfaceVariant)))
+                  ? const _EmptyState(
+                      icon: Icons.psychology_outlined,
+                      title: 'Nothing remembered yet',
+                      hint: 'Tell the agent something worth keeping.')
               : ListView.builder(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.md,
+                      vertical: AppSpacing.sm),
                   itemCount: _items.length,
                   itemBuilder: (_, i) {
                     final m = _items[i];
                     final conv = m['conversation'];
                     return Card(
-                      margin: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 4),
-                      child: ListTile(
-                        title: Text('${m['content']}'),
-                        subtitle: Wrap(spacing: 6, children: [
-                          Chip(
-                              label: Text('${m['scope']}',
-                                  style: const TextStyle(fontSize: 10)),
-                              visualDensity: VisualDensity.compact),
-                          Chip(
-                              label: Text('${m['source']}',
-                                  style: const TextStyle(fontSize: 10)),
-                              visualDensity: VisualDensity.compact),
-                          Chip(
-                              label: Text(
-                                  conv == null
-                                      ? 'global'
-                                      : 'chat ${(conv as String).substring(0, 8)}',
-                                  style: const TextStyle(fontSize: 10)),
-                              visualDensity: VisualDensity.compact),
-                          Chip(
-                              label: Text('${m['privacy']}',
-                                  style: const TextStyle(fontSize: 10)),
-                              visualDensity: VisualDensity.compact),
-                          if (m['created_at'] != null)
-                            Chip(
-                                label: Text(_fmtTs(m['created_at']),
-                                    style: const TextStyle(fontSize: 10)),
-                                visualDensity: VisualDensity.compact),
-                        ]),
-                        trailing: IconButton(
-                          icon: Icon(Icons.delete_outline, color: cs.error),
-                          tooltip: 'Forget',
-                          onPressed: () => _forget(m),
-                        ),
+                      margin: const EdgeInsets.only(
+                          bottom: AppSpacing.sm),
+                      child: Padding(
+                        padding:
+                            const EdgeInsets.all(AppSpacing.md),
+                        child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            children: [
+                              Row(crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                                  children: [
+                                Expanded(
+                                    child: Text('${m['content']}',
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodyLarge)),
+                                IconButton(
+                                  icon: Icon(Icons.delete_outline,
+                                      size: 18, color: cs.error),
+                                  tooltip: 'Forget',
+                                  onPressed: () => _forget(m),
+                                ),
+                              ]),
+                              const SizedBox(height: AppSpacing.sm),
+                              Wrap(
+                                  spacing: AppSpacing.sm - 2,
+                                  runSpacing: AppSpacing.xs,
+                                  children: [
+                                    _TagChip('${m['scope']}'),
+                                    _TagChip('${m['source']}'),
+                                    _TagChip(conv == null
+                                        ? 'global'
+                                        : 'chat ${(conv as String).substring(0, 8)}'),
+                                    _TagChip('${m['privacy']}'),
+                                    if (m['created_at'] != null)
+                                      _TagChip(
+                                          _fmtTs(m['created_at'])),
+                                  ]),
+                            ]),
                       ),
                     );
                   },
@@ -1798,20 +1910,10 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
           ? _listSkeleton(context)
           : Column(children: [
               if (_error != null)
-                Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 4),
-                    child: Row(children: [
-                      Icon(Icons.error_outline, size: 16, color: cs.error),
-                      const SizedBox(width: 6),
-                      Expanded(
-                          child: Text(_error!,
-                              style: TextStyle(color: cs.error))),
-                      TextButton(
-                          onPressed: _load, child: const Text('Retry')),
-                    ])),
+                _InlineError(_error!, onRetry: _load),
               Padding(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.fromLTRB(AppSpacing.lg,
+                    AppSpacing.md, AppSpacing.lg, AppSpacing.xs),
                 child: Row(children: [
                   Expanded(
                     child: TextField(
@@ -1822,7 +1924,7 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                       onSubmitted: (_) => _ingest(),
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: AppSpacing.sm),
                   FilledButton.icon(
                       onPressed: _ingesting ? null : _ingest,
                       icon: _ingesting
@@ -1831,28 +1933,26 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                               height: 14,
                               child: CircularProgressIndicator(
                                   strokeWidth: 2))
-                          : const Icon(Icons.upload_file),
+                          : const Icon(Icons.upload_file, size: 18),
                       label:
                           Text(_ingesting ? 'Ingesting…' : 'Ingest')),
                 ]),
               ),
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0,
+                    AppSpacing.lg, AppSpacing.sm),
                 child: Row(children: [
                   Expanded(
                     child: TextField(
                       controller: _searchCtrl,
                       decoration: const InputDecoration(
                           labelText: 'Search sections',
-                          hintText: 'Keyword or phrase'),
+                          hintText: 'Keyword or phrase',
+                          prefixIcon:
+                              Icon(Icons.search, size: 18)),
                       onSubmitted: (_) => _search(),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                      onPressed: _search,
-                      tooltip: 'Search',
-                      icon: const Icon(Icons.search)),
                 ]),
               ),
               if (_hits.isNotEmpty)
@@ -1865,20 +1965,26 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                       return ListTile(
                         dense: true,
                         leading: Text('[D${i + 1}]',
-                            style: TextStyle(color: cs.primary)),
-                        title: Text('${h['title'] ?? 'Untitled'} §${h['section']}',
-                            style: const TextStyle(fontSize: 12)),
+                            style: AppText.mono(context,
+                                color: cs.primary)),
+                        title: Text(
+                            '${h['title'] ?? 'Untitled'} §${h['section']}',
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleSmall),
                         subtitle: Text('${h['snippet']}',
                             maxLines: 2, overflow: TextOverflow.ellipsis),
                       );
                     },
                   ),
                 ),
-              const Divider(),
+              const Divider(height: AppSpacing.lg),
               Expanded(
                 child: _items.isEmpty
-                    ? const Center(
-                        child: Text('No documents yet — ingest a file to search it.'))
+                    ? const _EmptyState(
+                        icon: Icons.description_outlined,
+                        title: 'No documents yet',
+                        hint: 'Ingest a file to search it.')
                     : ListView.builder(
                         itemCount: _items.length,
                         itemBuilder: (_, i) {
@@ -2017,7 +2123,8 @@ class _EmailScreenState extends State<EmailScreen> {
                                           'Password (app password for Gmail/Outlook)',
                                       helperText:
                                           'Stored in the OS keystore — never in a file')),
-                              const Divider(height: 24),
+                              const Divider(
+                                  height: AppSpacing.xxl),
                               TextField(
                                   controller: smtpHostCtl,
                                   decoration: const InputDecoration(
@@ -2164,47 +2271,31 @@ class _EmailScreenState extends State<EmailScreen> {
             ]),
         body: Column(children: [
           Padding(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.fromLTRB(AppSpacing.lg,
+                  AppSpacing.md, AppSpacing.lg, AppSpacing.xs),
               child: TextField(
                   controller: _searchCtrl,
                   decoration: const InputDecoration(
                       hintText: 'Search mail',
-                      prefixIcon: Icon(Icons.search)),
+                      prefixIcon: Icon(Icons.search, size: 18)),
                   onSubmitted: (_) => _search())),
           if (_error != null)
-            Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                child: Row(children: [
-                  Icon(Icons.error_outline,
-                      size: 16,
-                      color: Theme.of(context).colorScheme.error),
-                  const SizedBox(width: 6),
-                  Expanded(
-                      child: Text(_error!,
-                          style: TextStyle(
-                              color:
-                                  Theme.of(context).colorScheme.error))),
-                  if (_error!.contains('not configured'))
-                    TextButton(
+            _InlineError(_error!,
+                onRetry: _search,
+                action: _error!.contains('not configured')
+                    ? TextButton(
                         onPressed: _configure,
-                        child: const Text('Set up')),
-                  TextButton(
-                      onPressed: _search, child: const Text('Retry')),
-                ])),
+                        child: const Text('Set up'))
+                    : null),
           Expanded(
               child: _loading
                   ? _listSkeleton(context)
                   : _hits.isEmpty && _error == null
-                      ? Center(
-                          child: Text(
-                              _searchCtrl.text.trim().isEmpty
-                                  ? 'Inbox is empty'
-                                  : 'No mail matches that search',
-                              style: TextStyle(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onSurfaceVariant)))
+                      ? _EmptyState(
+                          icon: Icons.mail_outline,
+                          title: _searchCtrl.text.trim().isEmpty
+                              ? 'Inbox is empty'
+                              : 'No mail matches that search')
                       : ListView.builder(
                           itemCount: _hits.length,
                           itemBuilder: (ctx, i) {
@@ -2320,19 +2411,15 @@ class _GitLabScreenState extends State<GitLabScreen> {
               children: [
                 Text(
                   '${i['state']} · ${i['author'] ?? ''} · ${i['project'] ?? ''}',
-                  style: TextStyle(
-                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
-                  ),
+                  style: Theme.of(ctx).textTheme.bodySmall,
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 Text(i['description'] ?? '(no description)'),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 Text(
                   '${i['web_url'] ?? ''}',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(ctx).colorScheme.primary,
-                  ),
+                  style: AppText.mono(ctx,
+                      color: Theme.of(ctx).colorScheme.primary),
                 ),
               ],
             ),
@@ -2376,21 +2463,17 @@ class _GitLabScreenState extends State<GitLabScreen> {
               children: [
                 Text(
                   '${mr['state']} · ${mr['source_branch']} → ${mr['target_branch']} · ${mr['author'] ?? ''}',
-                  style: TextStyle(
-                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
-                  ),
+                  style: Theme.of(ctx).textTheme.bodySmall,
                 ),
                 if (mr['head_pipeline_status'] != null)
                   Text('pipeline: ${mr['head_pipeline_status']}'),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 Text(mr['description'] ?? '(no description)'),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 Text(
                   '${mr['web_url'] ?? ''}',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(ctx).colorScheme.primary,
-                  ),
+                  style: AppText.mono(ctx,
+                      color: Theme.of(ctx).colorScheme.primary),
                 ),
               ],
             ),
@@ -2641,7 +2724,8 @@ class _GitLabScreenState extends State<GitLabScreen> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+            padding: const EdgeInsets.fromLTRB(AppSpacing.lg,
+                AppSpacing.md, AppSpacing.lg, 0),
             child: SegmentedButton<int>(
               segments: const [
                 ButtonSegment(
@@ -2669,7 +2753,8 @@ class _GitLabScreenState extends State<GitLabScreen> {
           ),
           if (_tab < 2)
             Padding(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.fromLTRB(AppSpacing.lg,
+                  AppSpacing.sm, AppSpacing.lg, AppSpacing.xs),
               child: Row(
                 children: [
                   Expanded(
@@ -2677,12 +2762,12 @@ class _GitLabScreenState extends State<GitLabScreen> {
                       controller: _searchCtrl,
                       decoration: const InputDecoration(
                         hintText: 'Search',
-                        prefixIcon: Icon(Icons.search),
+                        prefixIcon: Icon(Icons.search, size: 18),
                       ),
                       onSubmitted: (_) => _refresh(),
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: AppSpacing.sm),
                   DropdownButton<String>(
                     value: _state,
                     items: [
@@ -2701,49 +2786,28 @@ class _GitLabScreenState extends State<GitLabScreen> {
               ),
             ),
           if (_error != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.error_outline,
-                    size: 16,
-                    color: Theme.of(context).colorScheme.error,
-                  ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      _error!,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                      ),
-                    ),
-                  ),
-                  if (!_configured)
-                    TextButton(
-                      onPressed: _configure,
-                      child: const Text('Set up'),
-                    ),
-                  TextButton(onPressed: _refresh, child: const Text('Retry')),
-                ],
-              ),
-            ),
+            _InlineError(_error!,
+                onRetry: _refresh,
+                action: !_configured
+                    ? TextButton(
+                        onPressed: _configure,
+                        child: const Text('Set up'))
+                    : null),
           Expanded(
             child: _loading
                 ? _listSkeleton(context)
                 : _rows.isEmpty && _error == null
-                ? Center(
-                    child: Text(
-                      switch (_tab) {
-                        1 => 'No merge requests',
-                        2 => 'No pipelines',
-                        _ => 'No issues',
-                      },
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  )
+                ? _EmptyState(
+                    icon: switch (_tab) {
+                      1 => Icons.merge_type_outlined,
+                      2 => Icons.play_circle_outline,
+                      _ => Icons.adjust_outlined,
+                    },
+                    title: switch (_tab) {
+                      1 => 'No merge requests',
+                      2 => 'No pipelines',
+                      _ => 'No issues',
+                    })
                 : ListView.builder(
                     itemCount: _rows.length,
                     itemBuilder: (ctx, i) {
@@ -2860,15 +2924,12 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
           ? _listSkeleton(context)
           : ListView(children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                padding: const EdgeInsets.fromLTRB(AppSpacing.lg,
+                    AppSpacing.md, AppSpacing.lg, AppSpacing.xs),
                 child: Text(
                     'What the agent may do without asking — '
                     'changes apply immediately.',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(context)
-                            .colorScheme
-                            .onSurfaceVariant)),
+                    style: Theme.of(context).textTheme.bodySmall),
               ),
               for (final r in _rows) _policyRow(r),
             ]),
@@ -2878,7 +2939,7 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
   Widget _policyRow(dynamic r) {
     return ListTile(
       title: Text('${r['permission']}',
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+          style: AppText.mono(context, size: 13)),
       trailing: DropdownButton<String>(
         value: '${r['policy']}',
         underline: const SizedBox.shrink(),
@@ -3175,8 +3236,9 @@ class _AppsScreenState extends State<AppsScreen> {
                     }),
                   ),
                   if (parentJson.isNotEmpty && parent == null)
-                    const Text('Not a token JSON',
-                        style: TextStyle(color: Colors.redAccent)),
+                    Text('Not a token JSON',
+                        style: TextStyle(
+                            color: Theme.of(ctx).colorScheme.error)),
                   if (parent != null)
                     Text('app ${parent!['app_id']} — may delegate '
                         '${parentActions.join(",")}'),
@@ -3285,8 +3347,9 @@ class _AppsScreenState extends State<AppsScreen> {
                     }),
                   ),
                   if (tokenJson.isNotEmpty && token == null)
-                    const Text('Not a token JSON',
-                        style: TextStyle(color: Colors.redAccent)),
+                    Text('Not a token JSON',
+                        style: TextStyle(
+                            color: Theme.of(ctx).colorScheme.error)),
                   if (token != null)
                     Text('app ${token!['app_id']} — '
                         '${acts.join(",")}'
@@ -3404,7 +3467,7 @@ class _AppsScreenState extends State<AppsScreen> {
           shrinkWrap: true,
           children: [
             Padding(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(AppSpacing.sm),
               child: Row(children: [
                 TextButton.icon(
                     icon: const Icon(Icons.account_tree_outlined),
@@ -3417,7 +3480,7 @@ class _AppsScreenState extends State<AppsScreen> {
             ),
             if (list.isEmpty)
               const Padding(
-                  padding: EdgeInsets.all(24),
+                  padding: EdgeInsets.all(AppSpacing.xxl),
                   child: Text('No grants issued — share an app first.')),
             for (final g in list)
               ListTile(
@@ -3429,8 +3492,7 @@ class _AppsScreenState extends State<AppsScreen> {
                     '${g['status']} · '
                     '${g['bound'] == true ? "bound" : "bearer"}'
                     '${g['parent'] != null ? " · ↳ ${'${g['parent']}'.substring(0, 8)}…" : ""}',
-                    style: const TextStyle(
-                        fontFamily: 'monospace', fontSize: 12)),
+                    style: AppText.mono(ctx)),
                       trailing: g['status'] == 'active'
                           ? IconButton(
                               icon: const Icon(Icons.block),
@@ -3477,11 +3539,11 @@ class _AppsScreenState extends State<AppsScreen> {
           : _error != null
               ? _errorView(context, _error!, _load)
               : _apps.isEmpty
-                  ? const Center(
-                      child: Text(
-                          'No apps installed — `pai deploy <dir>` on any\n'
-                          'paired device syncs them here.',
-                          textAlign: TextAlign.center))
+                  ? const _EmptyState(
+                      icon: Icons.widgets_outlined,
+                      title: 'No apps installed',
+                      hint: '`pai deploy <dir>` on any paired device '
+                          'syncs them here.')
               : ListView.builder(
                   itemCount: _apps.length,
                   itemBuilder: (_, i) {
@@ -3494,8 +3556,7 @@ class _AppsScreenState extends State<AppsScreen> {
                       subtitle: Text(
                           '${id.length > 8 ? id.substring(0, 8) : id} · v${a['version']} · ${a['runtime']} · '
                           '${_placement(a)}',
-                          style: const TextStyle(
-                              fontFamily: 'monospace', fontSize: 12)),
+                          style: AppText.mono(context)),
                       trailing: _running == id
                           ? const SizedBox(
                               width: 20,
@@ -3556,20 +3617,18 @@ class _FeatureRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.only(bottom: AppSpacing.md),
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Icon(icon, size: 20, color: cs.primary),
-        const SizedBox(width: 12),
+        const SizedBox(width: AppSpacing.md),
         Expanded(
             child:
                 Column(crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-              Text(title,
-                  style: const TextStyle(fontWeight: FontWeight.w600)),
-              Text(body,
-                  style: TextStyle(
-                      color: cs.onSurfaceVariant, fontSize: 12)),
+              Text(title, style: tt.titleSmall),
+              Text(body, style: tt.bodySmall),
             ])),
       ]),
     );
@@ -3584,15 +3643,17 @@ class _ShortcutRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(
+          vertical: AppSpacing.x2),
       child: Row(children: [
         SizedBox(
             width: 110,
             child: Text(keys,
-                style: TextStyle(color: cs.primary, fontSize: 12))),
-        Text(action,
-            style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
+                style: AppText.mono(context,
+                    size: 12, color: cs.primary))),
+        Text(action, style: tt.bodySmall),
       ]),
     );
   }
@@ -3644,18 +3705,16 @@ class _MediaScreenState extends State<MediaScreen> {
           title: const Text('Generate media'),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
             Padding(
-              padding: const EdgeInsets.only(bottom: 10),
+              padding:
+                  const EdgeInsets.only(bottom: AppSpacing.md - 2),
               child: Text(
                   'Runs on this device, or on a paired mesh peer when it '
                   'advertises media-run.',
-                  style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+                  style: Theme.of(ctx).textTheme.bodySmall),
             ),
             DropdownButtonFormField<String>(
               initialValue: kind,
-              decoration: const InputDecoration(
-                  labelText: 'Kind', border: OutlineInputBorder()),
+              decoration: const InputDecoration(labelText: 'Kind'),
               items: const [
                 DropdownMenuItem(value: 'audio', child: Text('Audio')),
                 DropdownMenuItem(value: 'image', child: Text('Image')),
@@ -3663,7 +3722,7 @@ class _MediaScreenState extends State<MediaScreen> {
               ],
               onChanged: (v) => setDialog(() => kind = v ?? 'audio'),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             TextField(
               controller: promptCtl,
               autofocus: true,
@@ -3671,25 +3730,22 @@ class _MediaScreenState extends State<MediaScreen> {
               minLines: 1,
               decoration: const InputDecoration(
                   labelText: 'Prompt',
-                  hintText: 'e.g. calm lo-fi rain ambience',
-                  border: OutlineInputBorder()),
+                  hintText: 'e.g. calm lo-fi rain ambience'),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             if (kind == 'audio')
               TextField(
                 controller: secsCtl,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                    labelText: 'Duration (seconds, 1-300)',
-                    border: OutlineInputBorder()),
+                    labelText: 'Duration (seconds, 1-300)'),
               )
             else
               TextField(
                 controller: sizeCtl,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                    labelText: 'Size (px, square)',
-                    border: OutlineInputBorder()),
+                    labelText: 'Size (px, square)'),
               ),
           ]),
           actions: [
@@ -3747,8 +3803,7 @@ class _MediaScreenState extends State<MediaScreen> {
           autofocus: true,
           decoration: const InputDecoration(
               labelText: 'Destination path',
-              hintText: 'e.g. clip.wav',
-              border: OutlineInputBorder()),
+              hintText: 'e.g. clip.wav'),
         ),
         actions: [
           TextButton(
@@ -3771,12 +3826,16 @@ class _MediaScreenState extends State<MediaScreen> {
             : 'Saved ${r['bytes']} bytes to ${r['path']}')));
   }
 
-  Color _stateColor(ColorScheme cs, String state) => switch (state) {
-        'done' => Colors.greenAccent,
-        'running' => cs.primary,
-        'failed' => cs.error,
-        _ => cs.onSurfaceVariant,
-      };
+  Color _stateColor(String state) {
+    final cs = Theme.of(context).colorScheme;
+    final brand = context.brand;
+    return switch (state) {
+      'done' => brand.success,
+      'running' => cs.primary,
+      'failed' => cs.error,
+      _ => brand.textMuted,
+    };
+  }
 
   IconData _kindIcon(String kind) => switch (kind) {
         'text_to_audio' => Icons.music_note_outlined,
@@ -3798,7 +3857,7 @@ class _MediaScreenState extends State<MediaScreen> {
             tooltip: 'Refresh',
             onPressed: _load),
         Padding(
-          padding: const EdgeInsets.only(right: 12),
+          padding: const EdgeInsets.only(right: AppSpacing.md),
           child: FilledButton.icon(
               icon: const Icon(Icons.add, size: 18),
               label: const Text('Generate'),
@@ -3810,19 +3869,14 @@ class _MediaScreenState extends State<MediaScreen> {
           : _error != null
               ? _errorView(context, _error!, _load)
               : _jobs.isEmpty
-                  ? Center(
-                      child: Column(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(Icons.auto_awesome_outlined,
-                            size: 40, color: cs.onSurfaceVariant),
-                        const SizedBox(height: 12),
-                        const Text('No media jobs yet'),
-                        const SizedBox(height: 4),
-                        Text('Generate media from a prompt - it lands here.',
-                            style: TextStyle(
-                                color: cs.onSurfaceVariant, fontSize: 13)),
-                      ]),
-                    )
+                  ? const _EmptyState(
+                      icon: Icons.auto_awesome_outlined,
+                      title: 'No media jobs yet',
+                      hint: 'Generate media from a prompt — it lands here.')
                   : ListView.builder(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: AppSpacing.md,
+                          vertical: AppSpacing.sm),
                       itemCount: _jobs.length,
                       itemBuilder: (_, i) {
                         final j = _jobs[i];
@@ -3832,63 +3886,66 @@ class _MediaScreenState extends State<MediaScreen> {
                         final done =
                             state == 'done' && j['result_blob'] != null;
                         return Card(
-                          margin: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 4),
-                          child: ListTile(
-                            leading: Icon(_kindIcon(kind),
-                                color: _stateColor(cs, state)),
-                            title: Text('${j['prompt']}',
-                                maxLines: 1, overflow: TextOverflow.ellipsis),
-                            subtitle: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                          margin: const EdgeInsets.only(
+                              bottom: AppSpacing.sm),
+                          child: Padding(
+                            padding:
+                                const EdgeInsets.all(AppSpacing.md),
+                            child: Column(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.start,
                               children: [
-                                Wrap(spacing: 6, runSpacing: 4, children: [
-                                  Chip(
-                                      label: Text(state,
-                                          style: TextStyle(
-                                              fontSize: 10,
-                                              color:
-                                                  _stateColor(cs, state))),
-                                      visualDensity:
-                                          VisualDensity.compact),
-                                  Chip(
-                                      label: Text(_kindLabel(kind),
-                                          style:
-                                              const TextStyle(fontSize: 10)),
-                                      visualDensity:
-                                          VisualDensity.compact),
-                                  if (j['worker'] != null)
-                                    Chip(
-                                        label: Text(
-                                            'worker ${(j['worker'] as String).substring(0, 8)}',
-                                            style: const TextStyle(
-                                                fontSize: 10)),
-                                        visualDensity:
-                                            VisualDensity.compact),
-                                  Chip(
-                                      label: Text(_fmtTs(j['created_at']),
-                                          style:
-                                              const TextStyle(fontSize: 10)),
-                                      visualDensity:
-                                          VisualDensity.compact),
+                                Row(children: [
+                                  Icon(_kindIcon(kind),
+                                      size: 20,
+                                      color: _stateColor(state)),
+                                  const SizedBox(
+                                      width: AppSpacing.sm),
+                                  Expanded(
+                                      child: Text('${j['prompt']}',
+                                          maxLines: 1,
+                                          overflow:
+                                              TextOverflow.ellipsis,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .titleSmall)),
+                                  if (done)
+                                    IconButton(
+                                        icon: const Icon(
+                                            Icons.save_alt,
+                                            size: 18),
+                                        tooltip: 'Export result',
+                                        onPressed: () => _export(j)),
                                 ]),
+                                const SizedBox(
+                                    height: AppSpacing.sm),
+                                Wrap(
+                                    spacing: AppSpacing.sm - 2,
+                                    runSpacing: AppSpacing.xs,
+                                    children: [
+                                      _TagChip(state,
+                                          color:
+                                              _stateColor(state)),
+                                      _TagChip(_kindLabel(kind)),
+                                      if (j['worker'] != null)
+                                        _TagChip(
+                                            'worker ${(j['worker'] as String).substring(0, 8)}'),
+                                      _TagChip(
+                                          _fmtTs(j['created_at'])),
+                                    ]),
                                 if (err != null && err.isNotEmpty)
                                   Padding(
-                                    padding: const EdgeInsets.only(top: 4),
+                                    padding: const EdgeInsets.only(
+                                        top: AppSpacing.xs),
                                     child: Text(err,
-                                        style: TextStyle(
-                                            color: cs.error, fontSize: 12)),
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodySmall
+                                            ?.copyWith(
+                                                color: cs.error)),
                                   ),
                               ],
                             ),
-                            isThreeLine: err != null && err.isNotEmpty,
-                            trailing: done
-                                ? IconButton(
-                                    icon:
-                                        const Icon(Icons.save_alt, size: 20),
-                                    tooltip: 'Export result (WAV)',
-                                    onPressed: () => _export(j))
-                                : null,
                           ),
                         );
                       },
@@ -4028,6 +4085,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
   /// local placement weight. `announced=false` means no `bcap` object
   /// has synced yet — the device isn't currently routable.
   Widget _deviceCard(ColorScheme cs, Map dev) {
+    final tt = Theme.of(context).textTheme;
+    final brand = context.brand;
     final ops = (dev['ops'] as List? ?? const []).cast<String>();
     final load = dev['load'] as Map?;
     final announced = dev['announced'] == true;
@@ -4046,25 +4105,20 @@ class _DevicesScreenState extends State<DevicesScreen> {
       ],
     ].join(' · ');
     return Card(
+        margin: const EdgeInsets.only(bottom: AppSpacing.sm),
         child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg, vertical: AppSpacing.md),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Icon(isSelf ? Icons.computer : Icons.devices,
               size: 20, color: cs.onSurfaceVariant),
-          const SizedBox(width: 8),
+          const SizedBox(width: AppSpacing.sm),
           Expanded(
               child: Text('${dev['name']}',
-                  style: const TextStyle(fontWeight: FontWeight.w600),
+                  style: tt.titleSmall,
                   overflow: TextOverflow.ellipsis)),
-          if (isSelf)
-            Tooltip(
-                message: 'This device',
-                child: Chip(
-                    label: Text('local',
-                        style:
-                            TextStyle(fontSize: 10, color: cs.primary)),
-                    visualDensity: VisualDensity.compact)),
+          if (isSelf) _TagChip('local', color: cs.primary),
           if (announced)
             Tooltip(
                 message: fresh
@@ -4073,26 +4127,25 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 child: Icon(
                     fresh ? Icons.check_circle_outline : Icons.schedule,
                     size: 16,
-                    color: fresh ? Colors.greenAccent : cs.error)),
+                    color: fresh ? brand.success : cs.error)),
         ]),
-        const SizedBox(height: 2),
+        const SizedBox(height: AppSpacing.x2),
         Text(
             '${dev['platform']} · ${(dev['id'] as String).substring(0, 8)}',
-            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+            style: tt.bodySmall),
         if (ops.isNotEmpty || weight != 0 || score != null)
-          const SizedBox(height: 8),
+          const SizedBox(height: AppSpacing.sm),
         if (ops.isNotEmpty)
-          Wrap(spacing: 6, runSpacing: 4, children: [
-            for (final op in ops)
-              Tooltip(
-                  message: 'advertised op',
-                  child: Chip(
-                      label: Text(op, style: const TextStyle(fontSize: 10)),
-                      visualDensity: VisualDensity.compact)),
-          ]),
+          Wrap(
+              spacing: AppSpacing.sm - 2,
+              runSpacing: AppSpacing.xs,
+              children: [
+                for (final op in ops)
+                  _TagChip(op, tooltip: 'advertised op'),
+              ]),
         if (score != null || weight != 0)
           Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.only(top: AppSpacing.xs),
             child: Text(
                 [
                   if (score != null) 'score $score',
@@ -4101,19 +4154,18 @@ class _DevicesScreenState extends State<DevicesScreen> {
                   if (score != null && weight != 0)
                     'effective ${score + weight}',
                 ].join(' · '),
-                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                style: tt.bodySmall),
           ),
         if (loadBits.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Text(loadBits,
-                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+            padding: const EdgeInsets.only(top: AppSpacing.x2),
+            child: Text(loadBits, style: tt.bodySmall),
           ),
         if (!announced && !isSelf)
           Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.only(top: AppSpacing.xs),
             child: Text('No capability announcement synced yet',
-                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                style: tt.bodySmall),
           ),
       ]),
     ));
@@ -4130,14 +4182,13 @@ class _DevicesScreenState extends State<DevicesScreen> {
         title: const Text('Pair a device'),
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+            padding: const EdgeInsets.fromLTRB(AppSpacing.xxl, 0,
+                AppSpacing.xxl, AppSpacing.sm),
             child: Text(
                 'A signed offer travels one way, the sealed accept '
                 'travels back. Any file transport works - flash drive, '
                 'shared folder, attachment.',
-                style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+                style: Theme.of(ctx).textTheme.bodySmall),
           ),
           SimpleDialogOption(
             onPressed: () {
@@ -4224,20 +4275,17 @@ class _DevicesScreenState extends State<DevicesScreen> {
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               if (acceptQr == null) ...[
                 _QrView(r, size: 260),
-                const SizedBox(height: 8),
+                const SizedBox(height: AppSpacing.sm),
                 Text('This device is offering - the other device scans '
                     'this code (or pastes the payload).',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
-                const SizedBox(height: 8),
+                    style: Theme.of(ctx).textTheme.bodySmall),
+                const SizedBox(height: AppSpacing.sm),
                 Row(children: [
                   Expanded(
                       child: Text('${r['payload']}',
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 9, fontFamily: 'monospace'))),
+                          style: AppText.mono(ctx, size: 9))),
                   IconButton(
                       icon: const Icon(Icons.copy, size: 16),
                       tooltip: 'Copy offer payload',
@@ -4246,18 +4294,17 @@ class _DevicesScreenState extends State<DevicesScreen> {
                             text: '${r['payload']}'));
                       }),
                 ]),
-                const Divider(),
+                const Divider(height: AppSpacing.xl),
                 TextField(
                   controller: acceptCtl,
                   maxLines: 2,
                   decoration: InputDecoration(
                     labelText: 'Or paste an offer payload',
                     hintText: '{"kind":"offer",…}',
-                    border: const OutlineInputBorder(),
                     errorText: acceptErr,
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: AppSpacing.sm),
                 FilledButton.tonal(
                   onPressed: () async {
                     final offer = acceptCtl.text.trim();
@@ -4277,20 +4324,17 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 ),
               ] else ...[
                 _QrView(acceptQr!, size: 260),
-                const SizedBox(height: 8),
+                const SizedBox(height: AppSpacing.sm),
                 Text('Accepted - the offerer scans this (or the payload) '
                     'and completes pairing.',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
-                const SizedBox(height: 8),
+                    style: Theme.of(ctx).textTheme.bodySmall),
+                const SizedBox(height: AppSpacing.sm),
                 Row(children: [
                   Expanded(
                       child: Text('${acceptQr!['payload']}',
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 9, fontFamily: 'monospace'))),
+                          style: AppText.mono(ctx, size: 9))),
                   IconButton(
                       icon: const Icon(Icons.copy, size: 16),
                       tooltip: 'Copy accept payload',
@@ -4399,8 +4443,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
         content: TextField(
           controller: ctl,
           autofocus: true,
-          decoration: InputDecoration(
-              labelText: label, border: const OutlineInputBorder()),
+          decoration: InputDecoration(labelText: label),
           onSubmitted: (_) => Navigator.pop(ctx, true),
         ),
         actions: [
@@ -4458,7 +4501,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 onSelectionChanged: (v) =>
                     setD(() => transport = v.first),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               SegmentedButton<String>(
                 segments: const [
                   ButtonSegment(value: 'run', label: Text('Both')),
@@ -4469,7 +4512,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 onSelectionChanged: (v) => setD(() => mode = v.first),
               ),
               if (transport != 'lan') ...[
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 TextField(
                   controller: pathCtl,
                   decoration: InputDecoration(
@@ -4478,18 +4521,16 @@ class _DevicesScreenState extends State<DevicesScreen> {
                           : 'Relay URL (and token, url#token)',
                       hintText: transport == 'dir'
                           ? r'X:\pai-sync or \\nas\pai-sync'
-                          : 'http://host:port',
-                      border: const OutlineInputBorder()),
+                          : 'http://host:port'),
                 ),
               ],
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               DropdownButtonFormField<int>(
                 initialValue: auto,
                 decoration: const InputDecoration(
                     labelText: 'Auto-sync',
                     helperText:
-                        'Background syncs on this target while the app runs',
-                    border: OutlineInputBorder()),
+                        'Background syncs on this target while the app runs'),
                 items: const [
                   DropdownMenuItem(value: 0, child: Text('Off')),
                   DropdownMenuItem(
@@ -4577,27 +4618,25 @@ class _DevicesScreenState extends State<DevicesScreen> {
                       value: '${m['slug']}',
                       title: Text('${m['slug']}'),
                       subtitle: Text(
-                          '${m['family']} - ${m['quant'] ?? '?'} - ${m['size_mb']} MB',
-                          style: const TextStyle(fontSize: 12)),
+                          '${m['family']} - ${m['quant'] ?? '?'} - ${m['size_mb']} MB'),
                     ),
                 ]),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               TextField(
                 controller: refCtl,
                 decoration: const InputDecoration(
                     labelText: 'Custom reference (optional)',
                     hintText:
-                        'hf://owner/repo/file.gguf — overrides the pick above',
-                    border: OutlineInputBorder()),
+                        'hf://owner/repo/file.gguf — overrides the pick above'),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               TextField(
                 controller: destCtl,
                 decoration: const InputDecoration(
                     labelText: 'Destination (optional)',
-                    hintText: 'e.g. D:\\pai-models - leave empty for internal',
-                    border: OutlineInputBorder()),
+                    hintText:
+                        'e.g. D:\\pai-models - leave empty for internal'),
               ),
             ]),
           ),
@@ -4648,27 +4687,12 @@ class _DevicesScreenState extends State<DevicesScreen> {
       ]),
       body: _loading
           ? _listSkeleton(context)
-          : ListView(padding: const EdgeInsets.all(12), children: [
+          : ListView(padding: AppSpacing.page, children: [
               if (_error != null)
-                Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(children: [
-                      Icon(Icons.error_outline,
-                          size: 16,
-                          color: Theme.of(context).colorScheme.error),
-                      const SizedBox(width: 6),
-                      Expanded(
-                          child: Text(_error!,
-                              style: TextStyle(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .error))),
-                      TextButton(
-                          onPressed: _load, child: const Text('Retry')),
-                    ])),
+                _InlineError(_error!, onRetry: _load),
               Text('This device',
                   style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 4),
+              const SizedBox(height: AppSpacing.xs),
               if (endpoints.isEmpty)
                 Card(
                     child: ListTile(
@@ -4681,14 +4705,16 @@ class _DevicesScreenState extends State<DevicesScreen> {
               else
                 for (final e in endpoints)
                   Card(
+                      margin: const EdgeInsets.only(
+                          bottom: AppSpacing.sm),
                       child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                    padding: const EdgeInsets.all(AppSpacing.md + 2),
                     child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(children: [
                             Icon(Icons.bolt, color: cs.primary, size: 20),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: AppSpacing.sm),
                             Expanded(
                                 child: Text(
                                     '${e['provider']} · ${e['base_url']}',
@@ -4696,8 +4722,11 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                         .textTheme
                                         .titleSmall)),
                           ]),
-                          const SizedBox(height: 8),
-                          Wrap(spacing: 6, runSpacing: 6, children: [
+                          const SizedBox(height: AppSpacing.sm),
+                          Wrap(
+                              spacing: AppSpacing.sm - 2,
+                              runSpacing: AppSpacing.sm - 2,
+                              children: [
                             for (final m
                                 in (e['models'] as List? ?? const []))
                               _ModelChip(
@@ -4711,13 +4740,13 @@ class _DevicesScreenState extends State<DevicesScreen> {
                               ),
                             if ((e['models'] as List? ?? const []).isEmpty)
                               Text('No models reported',
-                                  style: TextStyle(
-                                      color: cs.onSurfaceVariant,
-                                      fontSize: 12)),
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodySmall),
                           ]),
                         ]),
                   )),
-              const SizedBox(height: 4),
+              const SizedBox(height: AppSpacing.xs),
               for (final name in ['llama-server', 'ollama', 'lms'])
                 ListTile(
                     dense: true,
@@ -4732,7 +4761,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                     title: Text(name),
                     subtitle: Text(binaries[name] as String? ?? 'not found',
                         maxLines: 1, overflow: TextOverflow.ellipsis)),
-              const SizedBox(height: 16),
+              const SizedBox(height: AppSpacing.xl),
               Row(children: [
                 Text('Model packs',
                     style: Theme.of(context).textTheme.titleMedium),
@@ -4752,7 +4781,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                     tooltip: 'Install a model (internal or to a drive)',
                     onPressed: _installDialog),
               ]),
-              const SizedBox(height: 4),
+              const SizedBox(height: AppSpacing.xs),
               if (_models.isEmpty)
                 Card(
                     child: ListTile(
@@ -4766,6 +4795,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
               else
                 for (final m in _models)
                   Card(
+                      margin: const EdgeInsets.only(
+                          bottom: AppSpacing.sm),
                       child: ListTile(
                     leading: Icon(
                         m['online'] == true
@@ -4783,11 +4814,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                     ].join(' · '),
                         maxLines: 2, overflow: TextOverflow.ellipsis),
                     trailing: m['serving'] == true
-                        ? Chip(
-                            label: Text('serving',
-                                style: TextStyle(
-                                    fontSize: 10, color: cs.primary)),
-                            visualDensity: VisualDensity.compact)
+                        ? _TagChip('serving', color: cs.primary)
                         : _serving == m['slug']
                             ? const SizedBox(
                                 width: 20,
@@ -4799,22 +4826,14 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                     onPressed: () =>
                                         _serve('${m['slug']}'),
                                     child: const Text('Serve'))
-                                : Tooltip(
-                                    message:
-                                        'Drive not mounted — plug it in and rescan',
-                                    child: Chip(
-                                        label: Text('offline',
-                                            style: TextStyle(
-                                                fontSize: 10,
-                                                color: cs
-                                                    .onSurfaceVariant)),
-                                        visualDensity:
-                                            VisualDensity.compact)),
+                                : _TagChip('offline',
+                                    tooltip: 'Drive not mounted — '
+                                        'plug it in and rescan'),
                   )),
-              const SizedBox(height: 16),
+              const SizedBox(height: AppSpacing.xl),
               Text('Paired devices',
                   style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 4),
+              const SizedBox(height: AppSpacing.xs),
               if (_peers.isEmpty && _placement.isEmpty)
                 Card(
                     child: ListTile(
@@ -4834,12 +4853,12 @@ class _DevicesScreenState extends State<DevicesScreen> {
                           'self': false,
                         }))
                   _deviceCard(cs, dev as Map),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.md),
               Align(
                 alignment: Alignment.centerLeft,
                 child: _syncing
                     ? const Padding(
-                        padding: EdgeInsets.all(8),
+                        padding: EdgeInsets.all(AppSpacing.sm),
                         child: Row(mainAxisSize: MainAxisSize.min,
                             children: [
                               SizedBox(
@@ -4847,7 +4866,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                   height: 16,
                                   child: CircularProgressIndicator(
                                       strokeWidth: 2)),
-                              SizedBox(width: 10),
+                              SizedBox(width: AppSpacing.md - 2),
                               Text('Syncing…'),
                             ]),
                       )
@@ -4856,7 +4875,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                             icon: const Icon(Icons.sync, size: 18),
                             label: const Text('Sync now'),
                             onPressed: _syncDialog),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: AppSpacing.sm),
                         TextButton.icon(
                             icon: const Icon(Icons.add_link, size: 18),
                             label: const Text('Pair a device'),
@@ -4946,12 +4965,15 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           : _error != null
               ? _errorView(context, _error!, _load)
               : _items.isEmpty
-                  ? Center(
-                      child: Text(
-                          _unreadOnly
-                              ? 'No unread notifications'
-                              : 'Nothing yet — the agent posts reminders and proactive notes here.',
-                          style: TextStyle(color: cs.onSurfaceVariant)))
+                  ? _EmptyState(
+                      icon: Icons.notifications_outlined,
+                      title: _unreadOnly
+                          ? 'No unread notifications'
+                          : 'Nothing yet',
+                      hint: _unreadOnly
+                          ? null
+                          : 'The agent posts reminders and proactive '
+                              'notes here.')
                   : ListView.builder(
                       itemCount: _items.length,
                       itemBuilder: (ctx, i) {
@@ -5044,9 +5066,10 @@ class _ActivityScreenState extends State<ActivityScreen> {
           : _error != null
               ? _errorView(context, _error!, _load)
               : _events.isEmpty
-                  ? Center(
-                      child: Text('Nothing yet — every permission-gated action is logged here.',
-                          style: TextStyle(color: cs.onSurfaceVariant)))
+                  ? const _EmptyState(
+                      icon: Icons.receipt_long_outlined,
+                      title: 'Nothing yet',
+                      hint: 'Every permission-gated action is logged here.')
                   : ListView.builder(
                       itemCount: _events.length,
                       itemBuilder: (ctx, i) {
@@ -5054,13 +5077,16 @@ class _ActivityScreenState extends State<ActivityScreen> {
                         final outcome = '${e['outcome'] ?? ''}';
                         final tool = e['tool'];
                         final detail = e['detail'];
+                        final outcomeColor = switch (outcome) {
+                          'ok' => context.brand.success,
+                          'denied' => context.brand.warning,
+                          'error' => cs.error,
+                          _ => context.brand.info,
+                        };
                         return ListTile(
                           dense: true,
                           leading: Icon(_iconFor(outcome),
-                              size: 18,
-                              color: outcome == 'ok'
-                                  ? cs.primary
-                                  : cs.error),
+                              size: 18, color: outcomeColor),
                           title: Text(
                               '${e['kind'] ?? 'event'}${tool != null ? ' · $tool' : ''}',
                               maxLines: 1,
@@ -5108,28 +5134,32 @@ class _ModelChip extends StatelessWidget {
             : embedOnly
                 ? 'embeddings'
                 : null;
+    final tt = Theme.of(context).textTheme;
+    final brand = context.brand;
     final chip = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
       decoration: BoxDecoration(
         color: serving
-            ? cs.primaryContainer
+            ? cs.primary.withValues(alpha: 0.16)
             : embedOnly
-                ? cs.surfaceContainerHighest
-                : cs.secondaryContainer.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(6),
+                ? brand.surfaceOverlay.withValues(alpha: 0.6)
+                : cs.primary.withValues(alpha: 0.07),
+        borderRadius: AppRadii.rSm,
+        border: Border.all(
+            color: serving
+                ? cs.primary.withValues(alpha: 0.5)
+                : brand.hairline),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Text(name,
-            style: TextStyle(
-                fontSize: 12,
-                color: embedOnly ? cs.onSurfaceVariant : null)),
+            style: tt.bodySmall?.copyWith(
+                color: embedOnly ? brand.textMuted : cs.onSurface)),
         if (tag != null) ...[
-          const SizedBox(width: 5),
+          const SizedBox(width: AppSpacing.xs + 1),
           Text(tag,
-              style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                  color: serving ? cs.primary : cs.onSurfaceVariant)),
+              style: tt.labelSmall?.copyWith(
+                  color: serving ? cs.primary : brand.textMuted)),
         ],
       ]),
     );
@@ -5140,7 +5170,7 @@ class _ModelChip extends StatelessWidget {
     return Tooltip(
       message: serving ? 'Serving chat' : 'Tap to serve chat from $name',
       child: InkWell(
-          borderRadius: BorderRadius.circular(6), onTap: onTap, child: chip),
+          borderRadius: AppRadii.rSm, onTap: onTap, child: chip),
     );
   }
 }
@@ -5162,9 +5192,9 @@ class _QrView extends StatelessWidget {
     return Container(
       width: size,
       height: size,
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(AppSpacing.md - 2),
       decoration: BoxDecoration(
-          color: Colors.white, borderRadius: BorderRadius.circular(8)),
+          color: Colors.white, borderRadius: AppRadii.rSm),
       child: CustomPaint(painter: _QrPainter(rows)),
     );
   }
