@@ -394,6 +394,12 @@ CREATE TABLE media_jobs (
     updated_at TEXT NOT NULL
 );
 "#,
+    r#"
+-- V15: document section locators — the PDF/EPUB extractors produce
+-- page/heading metadata that was previously dropped at insert.
+ALTER TABLE document_sections ADD COLUMN page INTEGER;
+ALTER TABLE document_sections ADD COLUMN heading TEXT;
+"#,
 ];
 
 /// A 32-byte SQLCipher raw key, sourced from the OS keystore (or a 0600

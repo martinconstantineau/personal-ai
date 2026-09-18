@@ -129,9 +129,15 @@ class _HomeShellState extends State<HomeShell> {
   int _index = 0;
   int _unread = 0;
   int _unreadMail = 0;
+  /// Notification ids already seen — the first poll seeds this, later
+  /// polls diff against it so genuinely new rows raise a toast.
+  Set<String>? _seenNotifyIds;
   Map<String, dynamic> _status = const {};
   StreamSubscription? _statusSub;
   StreamSubscription? _uiSub;
+  /// Heartbeat for badge + toast state — notifications can arrive from
+  /// background sync with no `ui:` event, so poll on a slow cadence.
+  Timer? _pollTimer;
   final _visited = <int>{0};
   final _chatKey = GlobalKey<_ChatScreenState>();
 
@@ -155,12 +161,21 @@ class _HomeShellState extends State<HomeShell> {
         if (mounted) setState(() => _status = st);
       });
       _uiSub = bridge.uiEvents.listen((ev) {
-        if (ev['kind'] == 'ui:model_packs' && mounted) _refreshUnread();
+        if (!mounted) return;
+        if (ev['kind'] == 'ui:model_packs') {
+          _refreshUnread();
+          final n = (ev['scanned'] as num? ?? 0).toInt();
+          _toast('Model drive detected',
+              '$n model(s) known — serve one from Devices.',
+              Icons.sd_storage_outlined);
+        }
       });
       try {
         await bridge.status();
       } catch (_) {}
       _refreshUnread();
+      _pollTimer = Timer.periodic(
+          const Duration(seconds: 30), (_) => _refreshUnread());
       _maybeWelcome();
     } catch (e) {
       setState(() => _error = 'Core init failed: $e\n$platformInitHint');
@@ -171,8 +186,23 @@ class _HomeShellState extends State<HomeShell> {
     if (_pai == null) return;
     try {
       final r = await _pai!.notifyList(unreadOnly: true);
-      if (mounted) {
-        setState(() => _unread = (r['unread'] as num? ?? 0).toInt());
+      if (!mounted) return;
+      setState(() => _unread = (r['unread'] as num? ?? 0).toInt());
+      // Toast notifications that appeared since the last poll — the
+      // first poll just seeds the seen-set so a backlog doesn't burst.
+      final items = (r['notifications'] as List? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .toList();
+      final ids = items.map((n) => '${n['id']}').toSet();
+      final seen = _seenNotifyIds;
+      _seenNotifyIds = ids;
+      if (seen != null) {
+        for (final n in items) {
+          if (seen.contains('${n['id']}')) continue;
+          _toast('${n['title'] ?? 'Notification'}', '${n['body'] ?? ''}',
+              Icons.notifications_outlined);
+          break; // one toast per poll is enough — the badge counts the rest
+        }
       }
     } catch (_) {}
     try {
@@ -182,6 +212,35 @@ class _HomeShellState extends State<HomeShell> {
             _unreadMail = (m['results'] as List? ?? const []).length);
       }
     } catch (_) {}
+  }
+
+  /// In-app toast — the snackbar picks up `snackBarTheme`; icon + title
+  /// line carry the semantics.
+  void _toast(String title, String body, IconData icon) {
+    final tt = Theme.of(context).textTheme;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        duration: const Duration(seconds: 4),
+        content: Row(children: [
+          Icon(icon, size: 18),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(title,
+                      style: tt.titleSmall, overflow: TextOverflow.ellipsis),
+                  if (body.isNotEmpty)
+                    Text(body,
+                        style: tt.bodySmall,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis),
+                ]),
+          ),
+        ]),
+      ));
   }
 
   /// First run: show the welcome once — a marker file in the data dir
@@ -321,6 +380,7 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
+    _pollTimer?.cancel();
     _statusSub?.cancel();
     _uiSub?.cancel();
     super.dispose();
@@ -2053,7 +2113,8 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                       controller: _pathCtrl,
                       decoration: const InputDecoration(
                           labelText: 'Ingest file path',
-                          hintText: r'C:\path\to\notes.md'),
+                          hintText:
+                              r'C:\path\to\doc — .txt .md .html .pdf .epub .docx'),
                       onSubmitted: (_) => _ingest(),
                     ),
                   ),
@@ -2101,7 +2162,8 @@ class _DocumentsScreenState extends State<DocumentsScreen> {
                             style: AppText.mono(context,
                                 color: cs.primary)),
                         title: Text(
-                            '${h['title'] ?? 'Untitled'} §${h['section']}',
+                            '${h['title'] ?? 'Untitled'} §${h['section']}'
+                            '${h['page'] != null ? ' p.${h['page']}' : ''}',
                             style: Theme.of(context)
                                 .textTheme
                                 .titleSmall),

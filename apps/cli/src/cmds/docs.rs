@@ -32,17 +32,7 @@ pub(crate) async fn run(cmd: DocsCmd, ctx: &Ctx) -> Result<()> {
                 .map_err(|e| Error::InvalidInput(format!("{path}: {e}")))?;
             let bytes = std::fs::read(&canon)
                 .map_err(|e| Error::InvalidInput(format!("{canon:?}: {e}")))?;
-            let mime = match canon
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase()
-                .as_str()
-            {
-                "md" | "markdown" => "text/markdown",
-                "html" | "htm" => "text/html",
-                _ => "text/plain",
-            };
+            let mime = pai_documents::mime_for_path(&canon);
             let id = ctx
                 .documents
                 .ingest(&bytes, mime, canon.file_name().and_then(|n| n.to_str()))

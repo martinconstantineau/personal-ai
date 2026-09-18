@@ -1012,17 +1012,7 @@ pub unsafe extern "C" fn pai_docs_ingest(
             std::fs::canonicalize(path).map_err(|e| Error::InvalidInput(format!("{path}: {e}")))?;
         let bytes =
             std::fs::read(&canon).map_err(|e| Error::InvalidInput(format!("{canon:?}: {e}")))?;
-        let mime = match canon
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase()
-            .as_str()
-        {
-            "md" | "markdown" => "text/markdown",
-            "html" | "htm" => "text/html",
-            _ => "text/plain",
-        };
+        let mime = pai_documents::mime_for_path(&canon);
         rt.documents
             .ingest(&bytes, mime, canon.file_name().and_then(|n| n.to_str()))
             .await
@@ -1055,6 +1045,7 @@ pub unsafe extern "C" fn pai_docs_search(
                         "document": h.document_id.to_string(),
                         "title": h.title,
                         "section": h.section,
+                        "page": h.page,
                         "snippet": h.snippet,
                         "score": h.score,
                     })

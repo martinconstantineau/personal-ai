@@ -48,14 +48,16 @@ fn configure_hot_swaps_provider() {
         assert_eq!(r["error"], "email not configured (email.json)");
 
         // Configure with an unreachable host — config + credential writes
-        // succeed; only live calls would hit the network.
+        // succeed; only live calls would hit the network. The smtp host
+        // shares the imap domain: the configure gate refuses cross-domain
+        // relays (creds may only reach the account's own domain).
         let cfg = CString::new(
             serde_json::json!({
-                "host": "imap.invalid",
+                "host": "imap.example.com",
                 "port": 993,
                 "user": "me@example.com",
                 "password": "app-password",
-                "smtp": {"host": "smtp.invalid", "port": 465, "tls": "tls"},
+                "smtp": {"host": "smtp.example.com", "port": 465, "tls": "tls"},
             })
             .to_string(),
         )
@@ -67,8 +69,8 @@ fn configure_hot_swaps_provider() {
         // email.json landed — and the password is NOT in it.
         let raw = std::fs::read_to_string(dir.join("email.json")).unwrap();
         let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(saved["host"], "imap.invalid");
-        assert_eq!(saved["smtp"]["host"], "smtp.invalid");
+        assert_eq!(saved["host"], "imap.example.com");
+        assert_eq!(saved["smtp"]["host"], "smtp.example.com");
         assert!(
             !raw.contains("app-password"),
             "password must not be persisted"

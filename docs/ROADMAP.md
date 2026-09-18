@@ -670,7 +670,7 @@ Shipped:
 | `hf://` resolve isn't pinned by default | `@rev` supported; pin for reproducibility | V2 |
 | Tool sandbox is in-process (path jail + capability ctx), not OS-level | seccomp/AppArmor needs subprocess isolation | V2 |
 | OS-keystore key loss = data loss | same trust domain as OS login | passphrase wrap option, V2 |
-| PDF/EPUB/DOCX extractors declared not implemented | adapters needed | V2 |
+| OCR for scanned documents/images | leptess adapter deferred | V2 |
 
 ## Cross-cutting risks
 

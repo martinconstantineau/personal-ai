@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    # v* tags also run the full pipeline — the release job below
+    # packages the windows artifact into a GitHub Release.
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -105,3 +108,23 @@ jobs:
           name: pai-app-windows
           path: apps/desktop/build/windows/x64/runner/Release/
           if-no-files-found: error
+
+  # Tag-triggered: zip the windows job's bundle and attach it to a
+  # GitHub Release. Push `v*` to cut a release.
+  release:
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pai-app-windows
+          path: bundle
+      - name: zip bundle
+        run: Compress-Archive -Path bundle\* -DestinationPath pai-app-windows-x64.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: pai-app-windows-x64.zip
+          generate_release_notes: true

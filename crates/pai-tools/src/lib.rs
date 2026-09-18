@@ -599,17 +599,7 @@ impl Tool for DocumentsIngest {
         // Filesystem jail: canonicalize + confine to allowed roots.
         let canon = ctx.resolve_in_jail(std::path::Path::new(path))?;
         let bytes = std::fs::read(&canon).map_err(pai_storage_err)?;
-        let mime = match canon
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase()
-            .as_str()
-        {
-            "md" | "markdown" => "text/markdown",
-            "html" | "htm" => "text/html",
-            _ => "text/plain",
-        };
+        let mime = pai_documents::mime_for_path(&canon);
         let title = canon.file_name().and_then(|n| n.to_str());
         let id = docs.ingest(&bytes, mime, title).await?;
         Ok(ToolOutput {
