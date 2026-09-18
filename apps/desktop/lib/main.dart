@@ -9,8 +9,37 @@ import 'theme.dart';
 
 void main() => runApp(const PaiApp());
 
-class PaiApp extends StatelessWidget {
+class PaiApp extends StatefulWidget {
   const PaiApp({super.key});
+  @override
+  State<PaiApp> createState() => _PaiAppState();
+}
+
+class _PaiAppState extends State<PaiApp> {
+  ThemeMode _mode = ThemeMode.system;
+  String _dataDir = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _dataDir = appDataDir();
+    _mode = switch (themeMode(_dataDir)) {
+      'light' => ThemeMode.light,
+      'dark' => ThemeMode.dark,
+      _ => ThemeMode.system,
+    };
+  }
+
+  /// Rail toggle — system → light → dark, persisted to the data dir.
+  void _cycleTheme() {
+    final next = switch (_mode) {
+      ThemeMode.system => ThemeMode.light,
+      ThemeMode.light => ThemeMode.dark,
+      ThemeMode.dark => ThemeMode.system,
+    };
+    setState(() => _mode = next);
+    saveThemeMode(_dataDir, next.name);
+  }
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -18,8 +47,8 @@ class PaiApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: AppTheme.light(),
         darkTheme: AppTheme.dark(),
-        themeMode: ThemeMode.system,
-        home: const HomeShell(),
+        themeMode: _mode,
+        home: HomeShell(themeMode: _mode, onThemeCycle: _cycleTheme),
       );
 }
 
@@ -27,7 +56,10 @@ class PaiApp extends StatelessWidget {
 /// and lazy tab construction (each screen builds on first visit, keeps
 /// state after).
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key});
+  const HomeShell(
+      {super.key, required this.themeMode, required this.onThemeCycle});
+  final ThemeMode themeMode;
+  final VoidCallback onThemeCycle;
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
@@ -363,11 +395,11 @@ class _HomeShellState extends State<HomeShell> {
           // still dock at the bottom on tall windows.
           final rail = LayoutBuilder(
             builder: (_, rc) {
-              final overflow = rc.maxHeight < _dests.length * 72 + 96;
+              final overflow = rc.maxHeight < _dests.length * 72 + 144;
               final scrollable = SingleChildScrollView(
                 child: SizedBox(
                   height: math.max(
-                      rc.maxHeight, _dests.length * 72 + 96),
+                      rc.maxHeight, _dests.length * 72 + 144),
                   child: NavigationRail(
                     selectedIndex: _index,
                     onDestinationSelected: _select,
@@ -381,6 +413,20 @@ class _HomeShellState extends State<HomeShell> {
                           padding: const EdgeInsets.only(bottom: AppSpacing.md + 2),
                           child: Column(mainAxisSize: MainAxisSize.min,
                               children: [
+                            IconButton(
+                                icon: Icon(
+                                    switch (widget.themeMode) {
+                                      ThemeMode.light =>
+                                        Icons.light_mode_outlined,
+                                      ThemeMode.dark =>
+                                        Icons.dark_mode_outlined,
+                                      ThemeMode.system =>
+                                        Icons.brightness_auto_outlined,
+                                    },
+                                    size: 18),
+                                tooltip:
+                                    'Theme: ${widget.themeMode.name} — tap to switch',
+                                onPressed: widget.onThemeCycle),
                             IconButton(
                                 icon: const Icon(Icons.help_outline,
                                     size: 18),

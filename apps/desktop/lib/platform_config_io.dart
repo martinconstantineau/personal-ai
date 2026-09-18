@@ -15,5 +15,17 @@ bool onboardingSeen(String dataDir) => File('$dataDir/.onboarded').existsSync();
 void markOnboardingSeen(String dataDir) =>
     File('$dataDir/.onboarded').writeAsStringSync('seen');
 
+/// Theme preference — 'system' | 'light' | 'dark' in the data dir.
+String themeMode(String dataDir) {
+  try {
+    return File('$dataDir/.theme-mode').readAsStringSync().trim();
+  } catch (_) {
+    return 'system';
+  }
+}
+
+void saveThemeMode(String dataDir, String mode) =>
+    File('$dataDir/.theme-mode').writeAsStringSync(mode);
+
 /// Shown when the bridge fails to start.
 const platformInitHint = '(build the core: cargo build -p pai-ffi)';
