@@ -38,6 +38,7 @@ prebuilt static OpenSSL per ABI (`OPENSSL_OUT` dir — see the script header;
 vendored `openssl-src` can't cross-compile on Windows hosts).
 
 ```bash
+export ANDROID_SDK_ROOT=~/src/android-sdk                   # NDK auto-derived from here
 OPENSSL_OUT=~/src/ossl-out ./scripts/build_android_ffi.sh   # arm64-v8a, armeabi-v7a, x86_64
 cd apps/desktop && flutter build apk --release              # or appbundle
 ```

@@ -3,7 +3,8 @@
 # project's jniLibs dir. Requires:
 #   - rustup targets: aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 #   - cargo-ndk (cargo install cargo-ndk)
-#   - Android NDK (set ANDROID_NDK_HOME, or let cargo-ndk discover it)
+#   - Android NDK (ANDROID_NDK_HOME; auto-derived from ANDROID_SDK_ROOT/ndk
+#     when unset)
 #   - Prebuilt OpenSSL static libs per ABI under OPENSSL_OUT (vendored
 #     openssl-src cannot cross-compile on Windows hosts). Build them from
 #     an OpenSSL source tree in an MSYS2 shell:
@@ -17,6 +18,21 @@ cd "$(dirname "$0")/.."
 
 PROFILE="${1:-release}"
 OSSL="${OPENSSL_OUT:?set OPENSSL_OUT to the dir containing arm64/ armv7/ x86_64/ openssl installs}"
+
+# cargo-ndk needs ANDROID_NDK_HOME; derive it from the SDK's newest
+# installed NDK when unset so ANDROID_SDK_ROOT alone is enough.
+if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+  for sdk in "${ANDROID_SDK_ROOT:-}" "${ANDROID_HOME:-}"; do
+    if [ -n "$sdk" ] && [ -d "$sdk/ndk" ]; then
+      ANDROID_NDK_HOME="$(ls -d "$sdk"/ndk/*/ 2>/dev/null | sort -V | tail -1)"
+      [ -n "$ANDROID_NDK_HOME" ] && export ANDROID_NDK_HOME && break
+    fi
+  done
+  if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+    echo "error: no NDK found — set ANDROID_NDK_HOME or ANDROID_SDK_ROOT" >&2
+    exit 1
+  fi
+fi
 
 # AAudio (cpal) needs API 26+. Keep in sync with minSdk in
 # apps/desktop/android/app/build.gradle.kts.
