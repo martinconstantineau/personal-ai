@@ -63,13 +63,15 @@ fn schema_v3_columns_exist() {
                 "SELECT title, body, source, channel, read_at, sync_scope
                  FROM notifications LIMIT 0",
             )?;
+            // v15: document section page/heading locators.
+            c.execute_batch("SELECT page, heading FROM document_sections LIMIT 0")?;
             c.query_row(
                 "SELECT value FROM meta WHERE key='schema_version'",
                 [],
                 |r| r.get::<_, String>(0),
             )
         })
-        .map(|v| assert_eq!(v, "14"))
+        .map(|v| assert_eq!(v, "15"))
         .unwrap();
 }
 

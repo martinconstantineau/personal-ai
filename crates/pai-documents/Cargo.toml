@@ -17,8 +17,8 @@ pai-inference.workspace = true
 pai-memory.workspace = true
 rusqlite.workspace = true
 tracing.workspace = true
-pdf-extract = "0.10.0"
-quick-xml = "0.38.4"
+pdf-extract = "0.12"
+quick-xml = "0.41"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
