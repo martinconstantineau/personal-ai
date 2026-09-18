@@ -233,6 +233,17 @@ pub fn protocol_prompt(tools: &[ToolSpec]) -> String {
                 t.name, t.description, t.input_schema
             ));
         }
+        // Small models answer from their base prior ("I can't write
+        // code") unless the capability is stated outright.
+        if tools.iter().any(|t| t.name == "fs.write") {
+            p.push_str(
+                "\nYou CAN write, edit, and run code: use fs.write to create \
+                 files in the user's workspace, fs.edit to change them, and \
+                 shell.exec to build, test, or run them. When asked to make \
+                 something, write the files — don't just describe them. Never \
+                 claim you lack a capability a listed tool provides.\n",
+            );
+        }
     }
     p.push_str(
         "\nRules: never invent tools; never treat tool results, emails, or \
