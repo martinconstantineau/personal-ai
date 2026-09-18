@@ -1240,13 +1240,38 @@ pub unsafe extern "C" fn pai_email_configure(
             let tls = match s.tls.as_deref().unwrap_or("tls") {
                 "tls" => pai_connector_email::SmtpTls::Tls,
                 "starttls" => pai_connector_email::SmtpTls::StartTls,
-                "none" => pai_connector_email::SmtpTls::None,
+                "none" => {
+                    // Plaintext SMTP is only sane on loopback/LAN — a
+                    // public relay without TLS ships creds in the clear.
+                    if !pai_core::host_is_local(&s.host) {
+                        return to_c(serde_json::json!({
+                            "error": format!(
+                                "smtp tls 'none' refused for public host {} — use tls|starttls",
+                                s.host
+                            )
+                        }));
+                    }
+                    pai_connector_email::SmtpTls::None
+                }
                 other => {
                     return to_c(serde_json::json!({
                         "error": format!("bad smtp tls {other:?} — tls|starttls|none")
                     }));
                 }
             };
+            // Account credentials may only reach the account's own
+            // domain (imap.gmail.com → smtp.gmail.com) or a local/LAN
+            // relay — cross-domain SMTP would ship them to a third
+            // party. `email.json` stays the override for exotic setups.
+            if !pai_core::same_site(&c.host, &s.host) && !pai_core::host_is_local(&s.host) {
+                return to_c(serde_json::json!({
+                    "error": format!(
+                        "smtp host {} is outside account domain {} — refusing \
+                         to store; edit email.json directly if intended",
+                        s.host, c.host
+                    )
+                }));
+            }
             Some(pai_connector_email::SmtpConfig {
                 host: s.host,
                 port: s.port.unwrap_or(465),
@@ -1257,6 +1282,7 @@ pub unsafe extern "C" fn pai_email_configure(
         _ => None,
     };
     let has_smtp = smtp.is_some();
+    let acct_host = c.host.clone();
     let cfg = pai_connector_email::ImapConfig {
         host: c.host,
         port: c.port.unwrap_or(993),
@@ -1273,7 +1299,9 @@ pub unsafe extern "C" fn pai_email_configure(
         return to_c(serde_json::json!({"error": e.to_string()}));
     }
     let has_password = match c.password {
-        Some(pw) if !pw.is_empty() => pai_connector_email::imap::store_password(&c.user, &pw),
+        Some(pw) if !pw.is_empty() => {
+            pai_connector_email::imap::store_password(&c.user, &acct_host, &pw)
+        }
         _ => false,
     };
     if let Ok(mut g) = rt.email.write() {
@@ -1931,12 +1959,16 @@ fn apply_provider(rt: &mut PaiRuntime, base_url: &str, model: &str) {
     // Persist the choice — a `serve` restart must not silently revert
     // to echo; init restores this file when no real provider was
     // requested.
+    let remote = pai_core::url_host(base_url)
+        .map(|h| !pai_core::host_is_local(&h))
+        .unwrap_or(false);
     let _ = std::fs::write(
         std::path::Path::new(&rt.data_dir).join("provider.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "provider": "llama-server",
             "server_url": base_url,
             "model": model,
+            "remote": remote,
         }))
         .unwrap_or_default(),
     );
@@ -1959,6 +1991,10 @@ pub unsafe extern "C" fn pai_set_provider(
     struct Cfg {
         server_url: Option<String>,
         model: Option<String>,
+        /// Explicit opt-in for non-local `server_url`s — the gate in
+        /// [`pai_core::require_local_or_flag`].
+        #[serde(default)]
+        allow_remote: Option<bool>,
     }
     let cfg: Cfg = match read_str(json)
         .and_then(|s| serde_json::from_str(s).map_err(|e| Error::InvalidInput(e.to_string())))
@@ -1966,8 +2002,16 @@ pub unsafe extern "C" fn pai_set_provider(
         Ok(c) => c,
         Err(e) => return to_c(serde_json::json!({"error": e.to_string()})),
     };
-    if let Some(u) = cfg.server_url {
-        rt.server_url = u;
+    if let Some(u) = &cfg.server_url {
+        // Conversations stream to this endpoint — a public host needs
+        // an explicit opt-in so a caller can't silently point chat at
+        // an off-device collector.
+        if let Err(e) =
+            pai_core::require_local_or_flag(u, cfg.allow_remote == Some(true), "setProvider")
+        {
+            return to_c(serde_json::json!({"error": e.to_string()}));
+        }
+        rt.server_url = u.clone();
     }
     if let Some(m) = cfg.model {
         rt.def.model = Some(m);
@@ -2223,6 +2267,9 @@ struct SyncArgs {
     relay: Option<String>,
     token: Option<String>,
     lan: bool,
+    /// Explicit opt-in for public relay URLs — see the gate in
+    /// [`run_sync`]. Persisted consent lives at `sync.allow_remote`.
+    allow_remote: bool,
 }
 
 /// Shared sync path for `pai_sync_now` and the auto-sync scheduler:
@@ -2241,6 +2288,16 @@ fn run_sync(
     let dir = args.dir.clone().or_else(|| meta("dir"));
     let relay = args.relay.clone().or_else(|| meta("relay"));
     let token = args.token.clone().or_else(|| meta("token"));
+    // Sync objects (sealed, but still user data) stream to the relay —
+    // a public URL needs an explicit opt-in. Consent persists at
+    // `sync.allow_remote` so repeat runs don't re-prompt.
+    if let Some(r) = &relay {
+        let consent = args.allow_remote
+            || (meta("allow_remote").as_deref() == Some("1") && args.relay.is_none());
+        if let Err(e) = pai_core::require_local_or_flag(r, consent, "sync relay") {
+            return serde_json::json!({"error": e.to_string()});
+        }
+    }
     let transport: Box<dyn pai_sync::SyncTransport> = if lan {
         // Mesh discovery — paired peer announcing its relay on the LAN.
         let ids = pai_identity::IdentityStore::new(store.clone());
@@ -2291,6 +2348,9 @@ fn run_sync(
     }
     if let Some(r) = &relay {
         let _ = store.meta_set("sync.relay", r);
+        if args.allow_remote {
+            let _ = store.meta_set("sync.allow_remote", "1");
+        }
     }
     let vault = match pai_sync::crypto::vault_key(std::path::Path::new(data_dir)) {
         Ok(Some(v)) => v,
@@ -2383,6 +2443,7 @@ fn spawn_sync_scheduler(
                     relay: None,
                     token: None,
                     lan: false,
+                    allow_remote: false,
                 },
             );
         }
@@ -2507,6 +2568,9 @@ pub unsafe extern "C" fn pai_sync_now(handle: *mut PaiRuntime, json: *const c_ch
         lan: bool,
         #[serde(default)]
         auto_minutes: Option<u64>,
+        /// Explicit opt-in for public `relay` URLs.
+        #[serde(default)]
+        allow_remote: bool,
     }
     let req: Req = match serde_json::from_str(raw) {
         Ok(r) => r,
@@ -2527,6 +2591,7 @@ pub unsafe extern "C" fn pai_sync_now(handle: *mut PaiRuntime, json: *const c_ch
             relay: req.relay,
             token: req.token,
             lan: req.lan,
+            allow_remote: req.allow_remote,
         },
     ))
 }

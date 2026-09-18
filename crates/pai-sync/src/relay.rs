@@ -63,7 +63,37 @@ pub fn bind_dynamic(
     )
 }
 
+/// Largest accepted object payload — sync objects carry base64'd app
+/// packages, so this sits above the 4 MiB bridge cap.
+const MAX_OBJ_BODY: u64 = 32 * 1024 * 1024;
+
+/// Concurrent requests the relay will service — beyond this, excess
+/// connections get a 503 instead of an unbounded thread spawn.
+const MAX_REQUESTS: usize = 32;
+
+/// A listener is exposed when its bind address isn't loopback —
+/// `0.0.0.0`, a LAN address, or a hostname all count.
+fn bind_is_loopback(addr: &str) -> bool {
+    if let Ok(a) = addr.parse::<std::net::SocketAddr>() {
+        return a.ip().is_loopback();
+    }
+    addr.split(':')
+        .next()
+        .map(|h| matches!(h, "localhost" | "127.0.0.1" | "::1"))
+        .unwrap_or(false)
+}
+
 fn bind_auth(dir: PathBuf, addr: &str, auth: Option<AuthCheck>) -> Result<RelayServer> {
+    if auth.is_none() && !bind_is_loopback(addr) {
+        eprintln!(
+            "WARNING: sync relay on {addr} has NO bearer token — \
+             anything that can reach it can store/delete objects"
+        );
+        tracing::warn!(
+            addr,
+            "sync relay listening without auth on a non-loopback bind"
+        );
+    }
     let store = FolderTransport::new(dir)?;
     let inner = tiny_http::Server::http(addr)
         .map_err(|e| Error::Sync(format!("relay bind {addr}: {e}")))?;
@@ -107,13 +137,25 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
     }
 }
 
-/// Run the relay loop forever (blocking).
+/// Run the relay loop forever (blocking). Requests are handled on
+/// bounded worker threads — one drip-feeding client stalls a slot, not
+/// every peer's sync.
 pub fn serve(server: RelayServer) -> ! {
     let store = server.store;
     let auth = server.auth;
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for mut req in server.inner.incoming_requests() {
-        let resp = handle(&store, auth.as_deref(), &mut req);
-        let _ = req.respond(resp);
+        if in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_REQUESTS {
+            in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = req.respond(json_response(503, serde_json::json!({"error": "busy"})));
+            continue;
+        }
+        let (store, auth, ctr) = (store.clone(), auth.clone(), in_flight.clone());
+        std::thread::spawn(move || {
+            let resp = handle(&store, auth.as_deref(), &mut req);
+            let _ = req.respond(resp);
+            ctr.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        });
     }
     unreachable!("incoming_requests never ends")
 }
@@ -156,8 +198,15 @@ fn handle(
         ("PUT", p) if p.starts_with(key_prefix) => {
             let key = urldec(&p[key_prefix.len()..]);
             let mut body = String::new();
-            if std::io::Read::read_to_string(req.as_reader(), &mut body).is_err() {
+            let mut rd = std::io::Read::take(req.as_reader(), MAX_OBJ_BODY + 1);
+            if std::io::Read::read_to_string(&mut rd, &mut body).is_err() {
                 return json_response(400, serde_json::json!({"error": "bad body"}));
+            }
+            if body.len() as u64 > MAX_OBJ_BODY {
+                return json_response(
+                    413,
+                    serde_json::json!({"error": "object exceeds 32 MiB cap"}),
+                );
             }
             let w: Wire = match serde_json::from_str(&body) {
                 Ok(w) => w,

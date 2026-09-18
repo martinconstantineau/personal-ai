@@ -86,25 +86,46 @@ impl ImapConfig {
 }
 
 /// Password resolution: `PAI_EMAIL_PASSWORD` env → OS keystore
-/// `email:<user>`. Keystore writes happen via [`store_password`] so the
-/// secret never touches email.json.
-pub fn resolve_password(user: &str) -> Result<String> {
+/// `email:<user>@<host>`. Keystore writes happen via [`store_password`]
+/// so the secret never touches email.json. Secrets are keyed by the
+/// host they authenticate to — repointing `email.json` at another
+/// server can't pull the old host's credentials. Entries written under
+/// the legacy `email:<user>` key are migrated on first read.
+fn password_key(user: &str, host: &str) -> String {
+    format!("email:{user}@{}", host.trim().to_ascii_lowercase())
+}
+
+pub fn resolve_password(user: &str, host: &str) -> Result<String> {
     if let Ok(p) = std::env::var("PAI_EMAIL_PASSWORD") {
         if !p.is_empty() {
             return Ok(p);
         }
     }
-    keystore::load(&format!("email:{user}"))
-        .and_then(|b| String::from_utf8(b).ok())
-        .ok_or_else(|| {
-            Error::InvalidInput(
-                "no email password — set PAI_EMAIL_PASSWORD or run `pai email configure`".into(),
-            )
-        })
+    let key = password_key(user, host);
+    if let Some(b) = keystore::load(&key) {
+        return String::from_utf8(b)
+            .map_err(|_| Error::InvalidInput("corrupt email password".into()));
+    }
+    let legacy = format!("email:{user}");
+    if let Some(b) = keystore::load(&legacy) {
+        let pw = String::from_utf8(b)
+            .map_err(|_| Error::InvalidInput("corrupt email password".into()))?;
+        if keystore::store(&key, pw.as_bytes()) {
+            keystore::delete(&legacy);
+        }
+        return Ok(pw);
+    }
+    Err(Error::InvalidInput(
+        "no email password — set PAI_EMAIL_PASSWORD or run `pai email configure`".into(),
+    ))
 }
 
-pub fn store_password(user: &str, password: &str) -> bool {
-    keystore::store(&format!("email:{user}"), password.as_bytes())
+pub fn store_password(user: &str, host: &str, password: &str) -> bool {
+    let ok = keystore::store(&password_key(user, host), password.as_bytes());
+    if ok {
+        keystore::delete(&format!("email:{user}"));
+    }
+    ok
 }
 
 // ---------------------------------------------------------------------------
@@ -501,10 +522,24 @@ impl EmailProvider for ImapProvider {
                     .into(),
             )
         })?;
+        // Account credentials must not leave the account's domain:
+        // the SMTP host has to share a site with the IMAP host or be a
+        // local/LAN address (imap.gmail.com → smtp.gmail.com passes).
+        if !pai_core::same_site(&self.cfg.host, &smtp.host) && !pai_core::host_is_local(&smtp.host)
+        {
+            return Err(Error::PermissionDenied(format!(
+                "smtp host {} is outside account domain {} — refusing to \
+                 send account credentials there; edit email.json if this \
+                 relay is intended",
+                smtp.host, self.cfg.host
+            )));
+        }
         let user = smtp.user.clone().unwrap_or_else(|| self.cfg.user.clone());
-        // Auth resolves under the *SMTP* login user — an oauth block
-        // applies here too (XOAUTH2 over AUTH XOAUTH2).
-        let auth = crate::oauth::resolve_auth_for(self.cfg.oauth.as_ref(), &user).await?;
+        // Auth resolves under the account's IMAP host scope — the
+        // credential is the account's; the guard above decides where it
+        // may be sent. An oauth block applies here too (AUTH XOAUTH2).
+        let auth =
+            crate::oauth::resolve_auth_for(self.cfg.oauth.as_ref(), &user, &self.cfg.host).await?;
         crate::smtp::SmtpProvider::new(smtp, user)
             .send_with_auth(draft, crate::oauth::smtp_auth(auth))
             .await

@@ -106,6 +106,7 @@ impl NotifySink for StoreNotifySink {
             configured += 1;
             match reqwest::Client::new()
                 .post(url)
+                .timeout(std::time::Duration::from_secs(10))
                 .json(&serde_json::json!({
                     "title": title,
                     "body": body,

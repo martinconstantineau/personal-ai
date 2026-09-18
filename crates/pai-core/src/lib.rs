@@ -591,3 +591,109 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Arbitrary metadata bag used sparingly across the domain.
 pub type Metadata = BTreeMap<String, serde_json::Value>;
+
+// ---------------------------------------------------------------------------
+// Outbound-target classification — which hosts count as "on this
+// machine / LAN" vs the public internet. Callers gate URL-accepting
+// surfaces on this so a remote endpoint needs an explicit opt-in flag.
+// ---------------------------------------------------------------------------
+
+/// True when `host` names a loopback or private/LAN destination:
+/// `localhost`/`*.localhost`/`*.local`/`*.local-user.devices`, a
+/// single-label (mDNS/NetBIOS) name, or a literal IP in loopback,
+/// RFC1918, link-local, CGNAT (Tailscale), or v6 ULA/link-local space.
+pub fn host_is_local(host: &str) -> bool {
+    let h = host
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    if h.is_empty() || h.contains(':') {
+        // A bare ':' means an unparseable v6 literal — parse below or fail.
+        if h.parse::<std::net::IpAddr>().is_err() && h.contains(':') {
+            return false;
+        }
+    }
+    if h == "localhost"
+        || h.ends_with(".localhost")
+        || h.ends_with(".local")
+        || h.ends_with(".local-user.devices")
+        || (!h.contains('.') && !h.contains(':'))
+    {
+        return true;
+    }
+    match h.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || (o[0] == 100 && (o[1] & 0xC0) == 64)
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            v6.is_loopback()
+                || v6.is_unicast_link_local()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+        Err(_) => false,
+    }
+}
+
+/// Extract the host from a `scheme://host[:port]/path` URL or a bare
+/// `host[:port]` — userinfo and trailing path are stripped.
+pub fn url_host(u: &str) -> Option<String> {
+    let s = u.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let rest = s.split("://").nth(1).unwrap_or(s);
+    let auth_path = rest.split(['/', '?', '#']).next()?;
+    let hostport = auth_path.rsplit('@').next()?;
+    if hostport.starts_with('[') {
+        let end = hostport.find(']')?;
+        return Some(hostport[1..end].to_string());
+    }
+    hostport.split(':').next().map(str::to_string)
+}
+
+/// Same host, or same last-two-labels domain — the
+/// `imap.gmail.com` ↔ `smtp.gmail.com` case. Both sides must be dotted
+/// so bare TLDs can't collide.
+pub fn same_site(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim().to_ascii_lowercase(), b.trim().to_ascii_lowercase());
+    if a == b {
+        return true;
+    }
+    let suffix = |h: &str| -> Option<String> {
+        let mut it = h.rsplitn(3, '.');
+        let (tld, sld) = (it.next()?, it.next()?);
+        Some(format!("{sld}.{tld}"))
+    };
+    matches!((suffix(&a), suffix(&b)), (Some(x), Some(y)) if x == y)
+}
+
+/// Gate an outbound target: http(s) schemes only, loopback/private
+/// hosts pass, anything public requires `allow_remote`. `what` names
+/// the surface in error text ("setProvider", "sync relay", ...).
+pub fn require_local_or_flag(url: &str, allow_remote: bool, what: &str) -> Result<()> {
+    if let Some((scheme, _)) = url.trim().split_once("://") {
+        if !matches!(scheme, "http" | "https") {
+            return Err(Error::InvalidInput(format!(
+                "{what}: scheme '{scheme}://' not allowed (http/https only)"
+            )));
+        }
+    }
+    let Some(host) = url_host(url) else {
+        return Err(Error::InvalidInput(format!(
+            "{what}: can't parse a host from '{url}'"
+        )));
+    };
+    if host_is_local(&host) || allow_remote {
+        return Ok(());
+    }
+    Err(Error::InvalidInput(format!(
+        "{what}: '{host}' is a public address — pass allow_remote:true to \
+         reach it (traffic will leave this device)"
+    )))
+}

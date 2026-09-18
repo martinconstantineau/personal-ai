@@ -29,19 +29,42 @@ pub use pai_oauth::{
 // Keystore + SASL-IR
 // ---------------------------------------------------------------------------
 
-fn oauth_key(user: &str) -> String {
-    format!("email-oauth:{user}")
+/// Refresh tokens are scoped to the host they authenticate against —
+/// `email-oauth:<user>@<host>` — so repointing `email.json` at another
+/// server can't pull the old host's grant. Entries under the legacy
+/// `email-oauth:<user>` key are migrated on first read.
+fn oauth_key(user: &str, host: &str) -> String {
+    format!("email-oauth:{user}@{}", host.trim().to_ascii_lowercase())
 }
 
 /// Persist the refresh token (the only durable OAuth secret).
-pub fn store_refresh_token(user: &str, refresh_token: &str) -> bool {
-    pai_identity::keystore::store(&oauth_key(user), refresh_token.as_bytes())
+pub fn store_refresh_token(user: &str, host: &str, refresh_token: &str) -> bool {
+    let ok = pai_identity::keystore::store(&oauth_key(user, host), refresh_token.as_bytes());
+    if ok {
+        pai_identity::keystore::delete(&format!("email-oauth:{user}"));
+    }
+    ok
+}
+
+/// Whether a refresh token exists for `user@host` (legacy key counts).
+pub fn has_refresh_token(user: &str, host: &str) -> bool {
+    pai_identity::keystore::load(&oauth_key(user, host)).is_some()
+        || pai_identity::keystore::load(&format!("email-oauth:{user}")).is_some()
 }
 
 /// Resolve an access token: refresh token from the keystore → refresh
 /// grant → transparent rotation re-store.
-pub async fn access_token(cfg: &OAuthConfig, user: &str) -> Result<String> {
-    let refresh = pai_identity::keystore::load(&oauth_key(user))
+pub async fn access_token(cfg: &OAuthConfig, user: &str, host: &str) -> Result<String> {
+    let key = oauth_key(user, host);
+    let legacy = format!("email-oauth:{user}");
+    let stored = pai_identity::keystore::load(&key).or_else(|| {
+        let b = pai_identity::keystore::load(&legacy)?;
+        if pai_identity::keystore::store(&key, &b) {
+            pai_identity::keystore::delete(&legacy);
+        }
+        Some(b)
+    });
+    let refresh = stored
         .and_then(|b| String::from_utf8(b).ok())
         .ok_or_else(|| {
             Error::InvalidInput(
@@ -51,7 +74,7 @@ pub async fn access_token(cfg: &OAuthConfig, user: &str) -> Result<String> {
     let (access, rotated) = refresh_access_token(cfg, &refresh).await?;
     if let Some(r) = rotated {
         if !r.is_empty() && r != refresh {
-            let _ = store_refresh_token(user, &r);
+            let _ = store_refresh_token(user, host, &r);
         }
     }
     Ok(access)
@@ -91,19 +114,25 @@ pub enum AuthMaterial {
     Xoauth2(String),
 }
 
-/// Pick the credential for one session under `user`: OAuth config wins,
-/// else the `email:<user>` password entry.
-pub async fn resolve_auth_for(oauth: Option<&OAuthConfig>, user: &str) -> Result<AuthMaterial> {
+/// Pick the credential for one session under `user` at `host`: OAuth
+/// config wins, else the `email:<user>@<host>` password entry.
+pub async fn resolve_auth_for(
+    oauth: Option<&OAuthConfig>,
+    user: &str,
+    host: &str,
+) -> Result<AuthMaterial> {
     if let Some(oauth) = oauth {
-        let token = access_token(oauth, user).await?;
+        let token = access_token(oauth, user, host).await?;
         return Ok(AuthMaterial::Xoauth2(xoauth2_ir(user, &token)));
     }
-    Ok(AuthMaterial::Password(crate::imap::resolve_password(user)?))
+    Ok(AuthMaterial::Password(crate::imap::resolve_password(
+        user, host,
+    )?))
 }
 
-/// `resolve_auth_for` on the account's own IMAP user.
+/// `resolve_auth_for` on the account's own IMAP user and host.
 pub async fn resolve_auth(cfg: &crate::ImapConfig) -> Result<AuthMaterial> {
-    resolve_auth_for(cfg.oauth.as_ref(), &cfg.user).await
+    resolve_auth_for(cfg.oauth.as_ref(), &cfg.user, &cfg.host).await
 }
 
 /// SMTP-side auth view — the send path wants Plain(user,pass) or the

@@ -792,6 +792,11 @@ enum PairCmd {
     },
     /// Complete pairing from an accept file; installs the vault key.
     Complete { accept: String },
+    /// Print a pairing file's key fingerprint — compare it against the
+    /// other device over a channel the file didn't travel (voice call,
+    /// in person) before accepting. Matching fingerprints prove both
+    /// ends hold the same key; the signature alone can't.
+    Verify { file: String },
     /// List trusted peer devices.
     List,
     /// Remove a peer. Note: does NOT rotate the vault key — a removed
@@ -1652,6 +1657,13 @@ impl ApprovalHandler for CliApproval {
         }
         matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
     }
+}
+
+/// Strip control characters from untrusted display fields (device
+/// names in pairing files and announcements are attacker-influenced —
+/// raw prints could carry terminal escapes).
+fn clean(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
 }
 
 fn parse_uuid(s: &str, what: &str) -> Result<uuid::Uuid> {
@@ -3373,7 +3385,10 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 for p in &paired {
                     println!(
                         "  {}  {:<20} {:<10} relay http://{}",
-                        p.peer.device_id, p.peer.name, p.peer.platform, p.relay_addr
+                        p.peer.device_id,
+                        clean(&p.peer.name),
+                        clean(&p.peer.platform),
+                        p.relay_addr
                     );
                 }
                 println!(
@@ -3391,7 +3406,12 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
                 let m = pair::make_offer(&device, &agree, &ids, &key_dir)?;
                 pair::write_message(&m, std::path::Path::new(out))?;
-                println!("offer for '{}' written to {out}", device.name);
+                println!("offer for '{}' written to {out}", clean(&device.name));
+                println!(
+                    "fingerprint: {} — verify it matches on the other \
+                     device (`pai pair verify {out}`)",
+                    pair::fingerprint(&device.public_key)
+                );
                 if *qr {
                     let payload =
                         serde_json::to_string(&m).map_err(|e| Error::Sync(e.to_string()))?;
@@ -3416,7 +3436,7 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 pair::write_message(&m, std::path::Path::new(out))?;
                 println!(
                     "paired with '{}' ({}…); accept written to {out}",
-                    offer.name,
+                    clean(&offer.name),
                     &offer.device_id[..8.min(offer.device_id.len())]
                 );
                 if *qr {
@@ -3432,7 +3452,21 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                 let accept = pair::read_message(std::path::Path::new(accept))?;
                 let agree = crypto::agreement_key(device.id, &cfg.data_dir)?;
                 pair::complete_pairing(&store, &accept, &agree, &cfg.data_dir)?;
-                println!("paired with '{}' — vault key installed", accept.name);
+                println!(
+                    "paired with '{}' — vault key installed",
+                    clean(&accept.name)
+                );
+            }
+            PairCmd::Verify { file } => {
+                let m = pair::read_message(std::path::Path::new(file))?;
+                m.verify()?;
+                let peer = m.peer()?;
+                println!(
+                    "{} {} — key fingerprint {}",
+                    m.kind,
+                    clean(&m.name),
+                    pair::fingerprint(&peer.ed_pubkey)
+                );
             }
             PairCmd::List => {
                 let peers = pair::list_peers(&store)?;
@@ -3443,8 +3477,8 @@ async fn run_sync_cmds(cli: &Cli) -> Result<()> {
                     println!(
                         "  {}  {:<16} {:<10} paired {}",
                         &p.device_id.to_string()[..8],
-                        p.name,
-                        p.platform,
+                        clean(&p.name),
+                        clean(&p.platform),
                         p.paired_at.format("%Y-%m-%d %H:%M")
                     );
                 }
@@ -4618,8 +4652,11 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
                     )
                 })?;
                 c.save(&cfg.data_dir)?;
-                if pai_connector_email::oauth::store_refresh_token(&user, &refresh) {
-                    println!("\nrefresh token stored in OS keystore (email-oauth:{user})");
+                if pai_connector_email::oauth::store_refresh_token(&user, &c.host, &refresh) {
+                    println!(
+                        "\nrefresh token stored in OS keystore (email-oauth:{user}@{})",
+                        c.host
+                    );
                 } else {
                     return Err(Error::Other(
                         "keystore unavailable — cannot persist the refresh token".into(),
@@ -4629,8 +4666,8 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
                 c.save(&cfg.data_dir)?;
                 if password.is_empty() {
                     println!("no password stored — set PAI_EMAIL_PASSWORD at run time");
-                } else if pai_connector_email::imap::store_password(&user, &password) {
-                    println!("password stored in OS keystore (email:{user})");
+                } else if pai_connector_email::imap::store_password(&user, &c.host, &password) {
+                    println!("password stored in OS keystore (email:{user}@{})", c.host);
                 } else {
                     println!("keystore unavailable — set PAI_EMAIL_PASSWORD at run time");
                 }
@@ -4660,7 +4697,8 @@ async fn run_email_cmds(cmd: &EmailCmd, cfg: &pai_config::Config) -> Result<()> 
                         );
                     }
                     None => {
-                        let pw = pai_connector_email::imap::resolve_password(&c.user).is_ok();
+                        let pw =
+                            pai_connector_email::imap::resolve_password(&c.user, &c.host).is_ok();
                         println!(
                             "auth: password — {}",
                             if pw { "available" } else { "MISSING" }

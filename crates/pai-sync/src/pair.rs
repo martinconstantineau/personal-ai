@@ -66,7 +66,9 @@ fn hex32(s: &str) -> Result<[u8; 32]> {
 }
 
 impl PairingMessage {
-    fn verify(&self) -> Result<()> {
+    /// Signature check over the domain-separated transcript — a
+    /// pairing file that fails this is forged or corrupted.
+    pub fn verify(&self) -> Result<()> {
         let ed = hex32(&self.ed_pubkey)?;
         let key = VerifyingKey::from_bytes(&ed)
             .map_err(|_| Error::InvalidInput("bad ed25519 pubkey".into()))?;
@@ -83,7 +85,9 @@ impl PairingMessage {
         }
     }
 
-    fn peer(&self) -> Result<SyncPeer> {
+    /// The peer record this message attests to (parsed pubkeys, fresh
+    /// `paired_at` timestamp).
+    pub fn peer(&self) -> Result<SyncPeer> {
         Ok(SyncPeer {
             device_id: DeviceId(
                 uuid::Uuid::parse_str(&self.device_id)
@@ -258,6 +262,22 @@ pub fn remove_peer(store: &Store, id: DeviceId) -> Result<bool> {
         )
     })?;
     Ok(n > 0)
+}
+
+/// Human-comparable fingerprint of a pairing key — the first 12 bytes
+/// of `SHA-256(ed_pubkey)` in groups. The signature proves *someone*
+/// signed the file; matching fingerprints prove both ends saw the same
+/// key. Read it over a channel the file didn't travel (voice,
+/// screenshot) to close the TOFU gap on file-carried offers.
+pub fn fingerprint(ed_pubkey: &[u8]) -> String {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(ed_pubkey);
+    hex::encode(&h[..12])
+        .as_bytes()
+        .chunks(4)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 // -- file io ---------------------------------------------------------------
