@@ -7,11 +7,13 @@ stages:
   - build
   - test
 
+# keyring builds the Secret Service dbus client on Linux; cpal
+# (pai-voice mic) builds alsa-sys. Both need system headers.
 rust:
   stage: lint
   image: rust:latest
   script:
-    - apt-get update -qq && apt-get install -y -qq libdbus-1-dev pkg-config libssl-dev gcc
+    - apt-get update -qq && apt-get install -y -qq libdbus-1-dev libasound2-dev pkg-config libssl-dev gcc
     - rustup component add rustfmt clippy
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets -- -D warnings
@@ -21,7 +23,7 @@ ffi:
   stage: build
   image: rust:latest
   script:
-    - apt-get update -qq && apt-get install -y -qq libdbus-1-dev pkg-config libssl-dev gcc
+    - apt-get update -qq && apt-get install -y -qq libdbus-1-dev libasound2-dev pkg-config libssl-dev gcc
     - cargo build -p pai-ffi
   artifacts:
     paths:
